@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "chatxz"
@@ -12,8 +12,11 @@ requires-python = ">=3.10"
 dependencies = [
     "rns>=0.8.0",
 ]
-optional-dependencies = {
-    "voice": ["pyaudio"],
-    "tui": ["textual>=0.52.0"],
-    "full": ["pyaudio", "textual>=0.52.0"],
-}
+
+[project.optional-dependencies]
+voice = ["pyaudio"]
+tui = ["textual>=0.52"]
+full = ["pyaudio", "textual>=0.52"]
+
+[project.scripts]
+chatxz = "chatxz.app:main"
