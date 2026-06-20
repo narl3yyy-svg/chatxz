@@ -246,7 +246,8 @@ def main():
         return
 
     if args.daemon:
-        print("Listening for incoming connections...")
+        print(f"Listening for incoming connections as {my_hash}...")
+        sys.stdout.flush()
         try:
             while True:
                 time.sleep(1)
