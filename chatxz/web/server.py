@@ -1,4 +1,4 @@
-import os, json, time, base64, mimetypes, asyncio, socket, zipfile, shutil
+import os, json, time, base64, mimetypes, asyncio, socket, zipfile, shutil, subprocess
 from pathlib import Path
 
 import aiohttp
@@ -367,6 +367,69 @@ class ChatWebServer:
     async def handle_settings_get(self, request):
         return web.json_response(self.load_settings())
 
+    def _normalize_received_dir(self, raw):
+        path = os.path.normpath(os.path.expanduser((raw or "").strip()))
+        if not path:
+            return None, "Path is empty"
+        if not os.path.isabs(path):
+            return None, "Path must be absolute (e.g. /home/user/Downloads)"
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as e:
+            return None, f"Cannot create directory: {e}"
+        if not os.path.isdir(path):
+            return None, "Path is not a directory"
+        return path, None
+
+    def _apply_received_dir(self, settings):
+        received_dir = settings.get("received_dir")
+        if not received_dir:
+            return
+        path, err = self._normalize_received_dir(received_dir)
+        if err:
+            return
+        settings["received_dir"] = path
+        if self.messaging:
+            self.messaging.receive_dir = path
+
+    def _pick_directory_native(self):
+        settings = self.load_settings()
+        start = settings.get("received_dir", os.path.join(self.config_dir, "received"))
+        start = os.path.expanduser(start)
+        if not os.path.isdir(start):
+            start = os.path.expanduser("~")
+
+        commands = []
+        if shutil.which("zenity"):
+            commands.append(["zenity", "--file-selection", "--directory", f"--filename={start}/"])
+        if shutil.which("kdialog"):
+            commands.append(["kdialog", "--getexistingdirectory", start])
+        if shutil.which("yad"):
+            commands.append(["yad", "--file", "--directory", f"--filename={start}"])
+
+        for cmd in commands:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                if result.returncode == 0:
+                    picked = result.stdout.strip()
+                    if picked:
+                        return os.path.normpath(picked)
+            except Exception:
+                continue
+        return None
+
+    async def handle_browse_dir(self, request):
+        try:
+            picked = await asyncio.to_thread(self._pick_directory_native)
+            if not picked:
+                return web.json_response({"error": "cancelled"}, status=400)
+            path, err = self._normalize_received_dir(picked)
+            if err:
+                return web.json_response({"error": err}, status=400)
+            return web.json_response({"path": path})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
     async def handle_settings_post(self, request):
         try:
             data = await request.json()
@@ -378,13 +441,14 @@ class ChatWebServer:
                 if data["history_retention"] in valid:
                     settings["history_retention"] = data["history_retention"]
             if "received_dir" in data:
-                raw = data["received_dir"].strip()
-                if os.path.isdir(raw) or os.path.exists(os.path.dirname(raw)):
-                    settings["received_dir"] = raw
-                    os.makedirs(raw, exist_ok=True)
+                path, err = self._normalize_received_dir(data["received_dir"])
+                if err:
+                    return web.json_response({"error": err}, status=400)
+                settings["received_dir"] = path
             self.save_settings(settings)
             if self.messaging:
                 self.messaging.display_name = settings.get("name", "")
+            self._apply_received_dir(settings)
             self._apply_retention()
             self._save_history()
             return web.json_response({"status": "ok", "settings": settings})
@@ -964,6 +1028,7 @@ class ChatWebServer:
         app.router.add_get("/api/debug", self.handle_debug)
         app.router.add_get("/api/settings", self.handle_settings_get)
         app.router.add_post("/api/settings", self.handle_settings_post)
+        app.router.add_get("/api/browse-dir", self.handle_browse_dir)
         app.router.add_get("/api/file/{filepath:.*}", self.handle_serve_file)
         app.router.add_get("/api/direct-transfer/{token}", self.handle_direct_transfer)
         app.router.add_get("/api/queue", self.handle_queue)

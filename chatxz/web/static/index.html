@@ -77,6 +77,8 @@ body::before {
   border-right: 1px solid var(--border);
   transition: transform var(--transition), width var(--transition);
   flex-shrink: 0;
+  overflow: hidden;
+  isolation: isolate;
 }
 #sidebar > #debug-bar { flex-shrink: 0; }
 #sidebar-header {
@@ -445,6 +447,7 @@ body::before {
 #input-area {
   padding: 16px 24px 20px; position: relative; z-index: 2;
   background: linear-gradient(to top, var(--bg) 60%, transparent);
+  display: flex; flex-direction: column; flex-shrink: 0;
 }
 .composer {
   background: var(--surface-glass); border: 1px solid var(--border);
@@ -505,14 +508,21 @@ body::before {
 .btn-block.danger { color: var(--danger); border-color: rgba(255,107,122,0.2); }
 .btn-block.danger:hover { background: var(--danger-soft); }
 
+/* Modal state */
+body.modal-open #app { pointer-events: none; user-select: none; }
+body.modal-open #save-contact-dialog,
+body.modal-open #save-contact-dialog * { pointer-events: auto; user-select: auto; }
+
 /* Dialog */
 #save-contact-dialog {
   display: none; position: fixed; inset: 0;
   background: rgba(0,0,0,0.65); backdrop-filter: blur(4px);
-  z-index: 1000; align-items: center; justify-content: center;
+  z-index: 5000; align-items: center; justify-content: center;
   animation: fadeIn 0.2s ease;
 }
 #save-contact-dialog.open { display: flex; }
+#save-contact-dialog .dialog { pointer-events: auto; }
+#save-contact-dialog input, #save-contact-dialog button { pointer-events: auto; }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 .dialog {
   background: var(--surface); border: 1px solid var(--border);
@@ -566,12 +576,15 @@ body::before {
 
 /* Progress bar */
 #progress-bar {
-  display: none; padding: 12px 24px 16px;
-  background: var(--surface-glass); border-top: 1px solid var(--border);
-  position: relative; z-index: 2;
+  display: none; padding: 10px 14px;
+  margin-bottom: 10px;
+  background: rgba(124,106,239,0.08);
+  border: 1px solid rgba(124,106,239,0.2);
+  border-radius: var(--radius-md);
+  flex-shrink: 0;
 }
 #progress-bar .progress-track {
-  width: 100%; height: 6px; background: rgba(255,255,255,0.06);
+  width: 100%; height: 5px; background: rgba(255,255,255,0.06);
   border-radius: 99px; overflow: hidden;
 }
 #progress-bar .progress-fill {
@@ -580,7 +593,8 @@ body::before {
   border-radius: 99px; transition: width 0.3s ease; width: 0%;
 }
 #progress-bar #progress-label {
-  font-size: 11px; color: var(--text3); margin-top: 8px; text-align: center;
+  font-size: 11px; color: var(--text2); margin-top: 6px; text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -690,7 +704,7 @@ body::before {
           <input id="settings-received-dir" placeholder="e.g. /home/user/Downloads">
           <button class="input-btn" onclick="pickReceivedDir()" style="width:40px;height:40px;border:1px solid var(--border);border-radius:var(--radius-md)" title="Browse...">📁</button>
         </div>
-        <div class="field-hint">Absolute path. Default: ~/.config/chatxz/received/</div>
+        <div class="field-hint">Use Browse to pick a folder (zenity/kdialog). Path must be absolute. Click Save to apply.</div>
         <input type="file" id="dir-picker-fallback" style="display:none" webkitdirectory onchange="pickReceivedDirFallback(this)">
       </div>
       <div class="settings-divider"></div>
@@ -772,6 +786,10 @@ body::before {
     <div id="messages" style="display:none"></div>
 
     <div id="input-area" style="display:none">
+      <div id="progress-bar">
+        <div class="progress-track"><div class="progress-fill"></div></div>
+        <div id="progress-label">Sending...</div>
+      </div>
       <div class="composer">
         <div id="emoji-picker"></div>
         <div id="input-row">
@@ -788,11 +806,6 @@ body::before {
         </div>
       </div>
     </div>
-
-    <div id="progress-bar">
-      <div class="progress-track"><div class="progress-fill"></div></div>
-      <div id="progress-label">Sending...</div>
-    </div>
   </main>
 </div>
 
@@ -806,7 +819,7 @@ body::before {
     </div>
     <div class="field-group">
       <label>Display Name</label>
-      <input id="save-contact-name" placeholder="Contact name...">
+      <input id="save-contact-name" placeholder="Contact name..." autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();doSaveContact();}">
     </div>
     <div class="dlg-btn-row">
       <button class="dlg-btn secondary" onclick="closeSaveContact()">Cancel</button>
@@ -862,7 +875,7 @@ function closeAllPanels() {
   if (actionShown) toggleActionPanel();
   document.getElementById('settings-btn')?.classList.remove('active');
   document.getElementById('emoji-picker')?.classList.remove('open');
-  document.getElementById('save-contact-dialog')?.classList.remove('open');
+  if (document.getElementById('save-contact-dialog')?.classList.contains('open')) closeSaveContact();
   document.getElementById('image-modal')?.classList.remove('open');
 }
 
@@ -1141,17 +1154,26 @@ function actionConnect() {
   toggleActionPanel();
 }
 
+function openSaveContactDialog(hash) {
+  document.getElementById('msg-input')?.blur();
+  document.getElementById('save-contact-hash').value = hash;
+  document.getElementById('save-contact-name').value = '';
+  document.body.classList.add('modal-open');
+  document.getElementById('save-contact-dialog').classList.add('open');
+  requestAnimationFrame(() => {
+    const nameInput = document.getElementById('save-contact-name');
+    nameInput?.focus();
+    nameInput?.select();
+  });
+}
+
 function actionSaveContact() {
-  if (ctxHash) {
-    document.getElementById('save-contact-hash').value = ctxHash;
-    document.getElementById('save-contact-name').value = '';
-    document.getElementById('save-contact-dialog').classList.add('open');
-    document.getElementById('save-contact-name').focus();
-  }
+  if (ctxHash) openSaveContactDialog(ctxHash);
   toggleActionPanel();
 }
 
 function closeSaveContact() {
+  document.body.classList.remove('modal-open');
   document.getElementById('save-contact-dialog').classList.remove('open');
 }
 
@@ -1282,14 +1304,18 @@ function saveSettings() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({name, history_retention: retention, received_dir})
-  }).then(r => r.json()).then(d => {
-    if (d.status === 'ok') {
+  }).then(async r => {
+    const d = await r.json();
+    if (r.ok && d.status === 'ok') {
+      if (d.settings?.received_dir) {
+        document.getElementById('settings-received-dir').value = d.settings.received_dir;
+      }
       toast('Settings saved');
       toggleSettings();
     } else {
-      toast('Failed to save settings');
+      toast('Failed to save: ' + (d.error || 'unknown error'));
     }
-  });
+  }).catch(() => toast('Failed to save settings'));
 }
 
 function clearHistory() {
@@ -1308,7 +1334,9 @@ function setConnected(hash) {
   document.getElementById('messages').style.display = 'flex';
   document.getElementById('input-area').style.display = 'block';
   document.getElementById('disconnect-btn').style.display = 'block';
-  document.getElementById('msg-input').focus();
+  if (!document.body.classList.contains('modal-open')) {
+    document.getElementById('msg-input').focus();
+  }
   setLinkStatus('connected', 'Active');
   fetchIdentity();
 }
@@ -1336,6 +1364,7 @@ function sendMessage() {
 }
 
 function onInputKey(e) {
+  if (document.body.classList.contains('modal-open')) return;
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendMessage();
@@ -1536,23 +1565,34 @@ function linkify(text) {
 
 async function pickReceivedDir() {
   try {
-    const handle = await window.showDirectoryPicker();
-    document.getElementById('settings-received-dir').value = handle.name;
-    document.getElementById('settings-received-dir').focus();
-    toast('Directory selected. If the path above is not absolute, edit it.');
-  } catch(e) {
-    if (e.name !== 'AbortError') {
-      document.getElementById('dir-picker-fallback').click();
+    const r = await fetch('/api/browse-dir');
+    const d = await r.json();
+    if (r.ok && d.path) {
+      document.getElementById('settings-received-dir').value = d.path;
+      toast('Folder selected — click Save to apply');
+      return;
+    }
+    if (d.error && d.error !== 'cancelled') toast('Browse failed: ' + d.error);
+  } catch (_) {}
+
+  if (window.showDirectoryPicker) {
+    try {
+      const handle = await window.showDirectoryPicker();
+      document.getElementById('settings-received-dir').value = handle.name;
+      toast('Only folder name available in browser — enter the full absolute path, then Save.');
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
     }
   }
+  document.getElementById('dir-picker-fallback').click();
 }
 function pickReceivedDirFallback(input) {
   if (input.files && input.files.length > 0) {
     const rel = input.files[0].webkitRelativePath;
     const hint = rel.substring(0, rel.indexOf('/'));
     document.getElementById('settings-received-dir').value = '.../' + hint;
-    document.getElementById('settings-received-dir').focus();
-    toast('Folder selected. Replace "..." with the full absolute path, then Save.');
+    toast('Enter the full absolute path, then Save.');
   }
 }
 
