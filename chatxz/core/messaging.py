@@ -5,6 +5,8 @@ import time
 import base64
 import os
 import tempfile
+import urllib.request
+import urllib.error
 from datetime import datetime
 
 APP_NAME = "chatxz"
@@ -59,7 +61,8 @@ class ChatMessage:
 
 class MessagingBackend:
     def __init__(self, identity, config_dir, on_message=None, on_file=None,
-                 display_name="", announce_interval=30, auto_announce=False):
+                 display_name="", announce_interval=30, auto_announce=False,
+                 my_ip=None, my_port=8742):
         self.identity = identity
         self.config_dir = config_dir
         self.on_message = on_message
@@ -67,12 +70,82 @@ class MessagingBackend:
         self.display_name = display_name
         self.announce_interval = announce_interval
         self.auto_announce = auto_announce
+        self.my_ip = my_ip
+        self.my_port = my_port
         self.destination = None
         self.links = {}
         self.active_link = None
         self.running = False
         self._announce_thread = None
         self._pending_files = {}
+        self.peer_ips = {}
+        self.direct_transfer_tokens = {}
+        self.queue_file = os.path.join(config_dir, "queue.json")
+        self.message_queue = self._load_queue()
+
+    def _load_queue(self):
+        try:
+            with open(self.queue_file) as f:
+                return json.load(f)
+        except:
+            return []
+
+    def _save_queue(self):
+        try:
+            with open(self.queue_file, "w") as f:
+                json.dump(self.message_queue, f, indent=2)
+        except:
+            pass
+
+    def enqueue(self, msg_type, content, target_hash=None, file_name=None, file_size=None, file_path=None):
+        entry = {
+            "type": msg_type,
+            "content": content,
+            "target_hash": target_hash,
+            "file_name": file_name,
+            "file_size": file_size,
+            "file_path": file_path,
+            "timestamp": time.time(),
+        }
+        self.message_queue.append(entry)
+        self._save_queue()
+        print(f"[queue] Enqueued {msg_type} for target {target_hash[:16] if target_hash else 'any (next peer)'}")
+
+    def drain_queue(self, link, target_hash):
+        remaining = []
+        sent = 0
+        for entry in self.message_queue:
+            tgt = entry.get("target_hash")
+            if tgt is None or tgt == "" or tgt == target_hash:
+                try:
+                    if entry["type"] in ("text", "emoji"):
+                        if self.send_message(entry["content"]):
+                            sent += 1
+                    elif entry["type"] in ("file", "image", "voice"):
+                        fp = entry.get("file_path") or entry.get("content")
+                        if fp and os.path.exists(fp):
+                            result = self.direct_send_file(fp, entry["type"])
+                            if result:
+                                sent += 1
+                            else:
+                                result2 = self.send_file(fp, entry["type"])
+                                if result2:
+                                    sent += 1
+                        else:
+                            print(f"[queue] File no longer exists: {fp}")
+                            remaining.append(entry)
+                except Exception as e:
+                    print(f"[queue] Failed to send: {e}")
+                    remaining.append(entry)
+            else:
+                remaining.append(entry)
+        if sent:
+            print(f"[queue] Drained {sent} queued items for {target_hash[:16] if target_hash else 'peer'}...")
+        self.message_queue = remaining
+        self._save_queue()
+
+    def queue_size(self):
+        return len(self.message_queue)
 
     def start(self):
         self.destination = RNS.Destination(
@@ -146,11 +219,22 @@ class MessagingBackend:
             print(f"[messaging] Resource strategy set to ACCEPT_ALL for link {link.link_id.hex()[:12]}")
         except Exception as e:
             print(f"[messaging] Failed to set resource strategy: {e}")
+        self._send_peer_info(link)
+
+    def _send_peer_info(self, link):
+        if self.my_ip:
+            try:
+                info = json.dumps({"type": "__peer_info", "ip": self.my_ip, "port": self.my_port}).encode("utf-8")
+                packet = RNS.Packet(link, info)
+                packet.send()
+            except:
+                pass
 
     def _link_callback(self, link):
         print(f"[messaging] Incoming link established: {link.link_id.hex()[:12]}")
         remote_hash = self._get_remote_hash(link)
         self._setup_link(link)
+        self.drain_queue(link, remote_hash)
 
         if self.on_message:
             system_msg = ChatMessage("system", f"Link established with {remote_hash}")
@@ -171,6 +255,25 @@ class MessagingBackend:
             try:
                 chat_msg = ChatMessage.from_json(message.decode("utf-8"))
                 remote_hash = self._get_remote_hash(link)
+
+                if chat_msg.msg_type == "__peer_info":
+                    try:
+                        info = json.loads(chat_msg.content)
+                        self.peer_ips[link.link_id] = {"ip": info["ip"], "port": info.get("port", 8742)}
+                        print(f"[peer_info] Remote is at {info['ip']}:{info.get('port', 8742)}")
+                    except:
+                        pass
+                    return
+
+                if chat_msg.msg_type == "__direct_offer":
+                    try:
+                        offer = json.loads(chat_msg.content)
+                        print(f"[direct] Received offer for {offer.get('file_name')}")
+                        self._handle_direct_offer(offer, link, remote_hash)
+                    except:
+                        pass
+                    return
+
                 chat_msg.sender = remote_hash
                 print(f"[messaging] Received {chat_msg.msg_type} from {remote_hash[:16]}...")
 
@@ -233,6 +336,48 @@ class MessagingBackend:
             except Exception as e:
                 print(f"[messaging] Resource concluded error: {e}")
         return callback
+
+    def _handle_direct_offer(self, offer, link, remote_hash):
+        def download():
+            peer = self.peer_ips.get(link.link_id)
+            if not peer:
+                print(f"[direct] No peer IP info for this link, cannot direct download")
+                return
+
+            token = offer.get("token")
+            fname = offer.get("file_name", "file")
+            fsize = offer.get("file_size", 0)
+            msg_type = offer.get("msg_type", "file")
+            url = f"http://{peer['ip']}:{peer['port']}/api/direct-transfer/{token}"
+
+            try:
+                print(f"[direct] Downloading {fname} ({fsize} bytes) from {url}")
+                receive_dir = os.path.join(self.config_dir, "received")
+                os.makedirs(receive_dir, exist_ok=True)
+                save_path = os.path.join(receive_dir, fname)
+
+                with urllib.request.urlopen(url, timeout=120) as resp:
+                    with open(save_path, "wb") as f:
+                        while True:
+                            chunk = resp.read(65536)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+
+                actual = os.path.getsize(save_path)
+                print(f"[direct] Saved to {save_path} ({actual} bytes)")
+                if self.on_message:
+                    msg = ChatMessage(msg_type, save_path, file_name=fname, file_size=actual, sender=remote_hash)
+                    self.on_message(msg, remote_hash)
+            except Exception as e:
+                print(f"[direct] HTTP transfer failed for {fname}: {e}")
+                if self.on_message:
+                    self.on_message(
+                        ChatMessage("system", f"Direct transfer failed for {fname}: {e}"),
+                        remote_hash
+                    )
+
+        threading.Thread(target=download, daemon=True).start()
 
     def connect_to(self, destination_hash_hex):
         try:
@@ -311,6 +456,7 @@ class MessagingBackend:
             print(f"[messaging] Outgoing link established: {link.link_id.hex()[:12]} -> {remote_hash[:16]}...")
             self._setup_link(link)
             self.active_link = link
+            self.drain_queue(link, remote_hash)
             if self.on_message:
                 self.on_message(
                     ChatMessage("system", f"Connected to {remote_hash}"),
@@ -344,13 +490,37 @@ class MessagingBackend:
 
             f = open(file_path, "rb")
             resource = RNS.Resource(f, self.active_link,
-                                    callback=self._resource_send_callback(fname),
-                                    progress_callback=progress_callback,
-                                    auto_compress=False)
+                                     callback=self._resource_send_callback(fname),
+                                     progress_callback=progress_callback,
+                                     auto_compress=False)
             print(f"[messaging] Sent file: {fname} ({fsize} bytes)")
             return chat_msg
         except Exception as e:
             print(f"[messaging] File send failed: {e}")
+            return False
+
+    def direct_send_file(self, file_path, msg_type=MESSAGE_TYPE_FILE):
+        if not self.active_link or not os.path.exists(file_path):
+            return False
+        fname = os.path.basename(file_path)
+        fsize = os.path.getsize(file_path)
+        token = os.urandom(16).hex()
+        self.direct_transfer_tokens[token] = {"path": file_path, "time": time.time()}
+        threading.Timer(600, lambda: self.direct_transfer_tokens.pop(token, None)).start()
+        offer = json.dumps({
+            "type": "__direct_offer",
+            "token": token,
+            "file_name": fname,
+            "file_size": fsize,
+            "msg_type": msg_type,
+        })
+        try:
+            packet = RNS.Packet(self.active_link, ChatMessage("__direct_offer", offer).to_json().encode("utf-8"))
+            packet.send()
+            print(f"[direct] Sent file offer: {fname} ({fsize} bytes)")
+            return ChatMessage(msg_type, file_path, file_name=fname, file_size=fsize)
+        except Exception as e:
+            print(f"[direct] File offer send failed: {e}")
             return False
 
     def _resource_send_callback(self, fname):

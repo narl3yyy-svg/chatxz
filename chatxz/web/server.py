@@ -5,6 +5,7 @@ import base64
 import tempfile
 import mimetypes
 import asyncio
+import socket
 from pathlib import Path
 
 import aiohttp
@@ -41,8 +42,19 @@ loglevel = 3
     listen_port = 4242
     forward_ip = 255.255.255.255
     forward_port = 4242
-    ifac_size = 8
+    ifac_size = 16
 """
+
+def detect_lan_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return None
 
 class ChatWebServer:
     def __init__(self, host="127.0.0.1", port=8742, verbose=False):
@@ -145,7 +157,7 @@ class ChatWebServer:
                 existing += "    listen_port = 4242\n"
                 existing += "    forward_ip = 255.255.255.255\n"
                 existing += "    forward_port = 4242\n"
-                existing += "    ifac_size = 8\n"
+                existing += "    ifac_size = 16\n"
                 modified = True
             elif "enabled = Yes" not in existing:
                 existing = existing.replace(
@@ -166,12 +178,17 @@ class ChatWebServer:
         RNS.Reticulum(self.config_dir, loglevel=loglevel)
         self.identity = self.identity_mgr.load_or_create()
         settings = self.load_settings()
+        my_ip = detect_lan_ip()
+        if my_ip:
+            print(f"[network] Detected LAN IP: {my_ip}")
         self.messaging = MessagingBackend(
             self.identity, self.config_dir,
             on_message=self._on_message,
             display_name=settings.get("name", ""),
             announce_interval=settings.get("announce_interval", 30),
             auto_announce=False,
+            my_ip=my_ip,
+            my_port=self.port,
         )
         self.file_transfer = FileTransfer(self.config_dir)
         self.voice_recorder = VoiceRecorder(self.config_dir)
@@ -361,8 +378,8 @@ class ChatWebServer:
         })
 
     async def handle_file_upload(self, request):
-        if not self.messaging or not self.messaging.active_link:
-            return web.json_response({"error": "not connected"}, status=400)
+        if not self.messaging:
+            return web.json_response({"error": "not ready"}, status=400)
         try:
             reader = await request.multipart()
             field = await reader.next()
@@ -384,9 +401,19 @@ class ChatWebServer:
                     f.write(chunk)
                     size += len(chunk)
 
+            if not self.messaging.active_link:
+                self.messaging.enqueue("image" if is_image else "file", save_path,
+                                        file_name=fname, file_size=size, file_path=save_path)
+                return web.json_response({"status": "queued", "name": fname, "size": size})
+
             msg_type = "image" if is_image else "file"
-            result = self.messaging.send_file(save_path, msg_type,
-                                               progress_callback=self._make_progress_callback(fname, size))
+            result = self.messaging.direct_send_file(save_path, msg_type)
+            if result:
+                method = "direct"
+            else:
+                result = self.messaging.send_file(save_path, msg_type,
+                                                   progress_callback=self._make_progress_callback(fname, size))
+                method = "resource" if result else None
             if result:
                 result.content = save_path
                 my_hash = self.identity_mgr.get_hex_hash()
@@ -401,22 +428,28 @@ class ChatWebServer:
                 self.message_history.append(entry)
                 self._save_history()
                 await self._broadcast({"type": "message", "data": entry})
-                return web.json_response({"status": "ok", "name": fname, "size": size})
+                return web.json_response({"status": "ok", "name": fname, "size": size, "method": method})
             return web.json_response({"error": "send failed"}, status=400)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
     def _make_progress_callback(self, fname, total_size):
+        start = time.time()
         def callback(resource):
             try:
                 progress = resource.get_progress()
                 pct = int(progress * 100)
+                elapsed = time.time() - start
+                bytes_xfer = progress * total_size
+                speed = bytes_xfer / elapsed if elapsed > 0 else 0
+                speed_str = format_size(speed) + "/s"
                 if self.websockets and self._loop:
                     asyncio.run_coroutine_threadsafe(
                         self._broadcast({"type": "progress", "data": {
                             "file_name": fname,
                             "progress": pct,
                             "size": total_size,
+                            "speed": speed_str,
                         }}),
                         self._loop
                     )
@@ -425,8 +458,8 @@ class ChatWebServer:
         return callback
 
     async def handle_voice_upload(self, request):
-        if not self.messaging or not self.messaging.active_link:
-            return web.json_response({"error": "not connected"}, status=400)
+        if not self.messaging:
+            return web.json_response({"error": "not ready"}, status=400)
         try:
             data = await request.json()
             audio_b64 = data.get("audio", "")
@@ -438,7 +471,13 @@ class ChatWebServer:
             voice_path = os.path.join(sent_dir, f"voice_{int(time.time())}.webm")
             with open(voice_path, "wb") as f:
                 f.write(audio_bytes)
-            result = self.messaging.send_file(voice_path, "voice")
+
+            if not self.messaging.active_link:
+                self.messaging.enqueue("voice", voice_path, file_name=os.path.basename(voice_path),
+                                        file_size=len(audio_bytes), file_path=voice_path)
+                return web.json_response({"status": "queued"})
+
+            result = self.messaging.direct_send_file(voice_path, "voice")
             if result:
                 result.content = voice_path
                 my_hash = self.identity_mgr.get_hex_hash()
@@ -484,6 +523,37 @@ class ChatWebServer:
         if ct:
             resp.headers['Content-Type'] = ct
         return resp
+
+    async def handle_direct_transfer(self, request):
+        token = request.match_info.get("token", "")
+        if not self.messaging:
+            return web.Response(text="Not ready", status=503)
+        info = self.messaging.direct_transfer_tokens.pop(token, None)
+        if not info:
+            return web.Response(text="Invalid or expired token", status=404)
+        file_path = info["path"]
+        if not os.path.exists(file_path):
+            return web.Response(text="File not found", status=404)
+        ct, _ = mimetypes.guess_type(file_path)
+        resp = web.FileResponse(file_path)
+        if ct:
+            resp.headers['Content-Type'] = ct
+        resp.headers['X-Direct-Transfer'] = '1'
+        return resp
+
+    async def handle_queue(self, request):
+        if not self.messaging:
+            return web.json_response({"count": 0, "items": []})
+        return web.json_response({
+            "count": self.messaging.queue_size(),
+            "items": self.messaging.message_queue[-20:],
+        })
+
+    async def handle_queue_clear(self, request):
+        if self.messaging:
+            self.messaging.message_queue = []
+            self.messaging._save_queue()
+        return web.json_response({"status": "ok"})
 
     async def handle_history(self, request):
         self._apply_retention()
@@ -540,18 +610,23 @@ class ChatWebServer:
         if msg_type == "send":
             text = data.get("text", "")
             if text and self.messaging:
-                result = self.messaging.send_message(text)
-                if result:
-                    my_hash = self.identity_mgr.get_hex_hash()
-                    entry = {
-                        "type": result.msg_type,
-                        "content": result.content,
-                        "sender": my_hash,
-                        "timestamp": result.timestamp,
-                    }
-                    self.message_history.append(entry)
-                    self._save_history()
-                    await self._broadcast({"type": "message", "data": entry})
+                if self.messaging.active_link:
+                    result = self.messaging.send_message(text)
+                    if result:
+                        my_hash = self.identity_mgr.get_hex_hash()
+                        entry = {
+                            "type": result.msg_type,
+                            "content": result.content,
+                            "sender": my_hash,
+                            "timestamp": result.timestamp,
+                        }
+                        self.message_history.append(entry)
+                        self._save_history()
+                        await self._broadcast({"type": "message", "data": entry})
+                else:
+                    self.messaging.enqueue("text", text)
+                    qsize = self.messaging.queue_size()
+                    await ws.send_str(json.dumps({"type": "info", "data": f"Message queued ({qsize} pending)"}))
         elif msg_type == "connect":
             peer_hash = data.get("hash", "")
             if peer_hash and self.messaging:
@@ -590,6 +665,9 @@ class ChatWebServer:
         app.router.add_get("/api/settings", self.handle_settings_get)
         app.router.add_post("/api/settings", self.handle_settings_post)
         app.router.add_get("/api/file/{filepath:.*}", self.handle_serve_file)
+        app.router.add_get("/api/direct-transfer/{token}", self.handle_direct_transfer)
+        app.router.add_get("/api/queue", self.handle_queue)
+        app.router.add_delete("/api/queue", self.handle_queue_clear)
         app.router.add_get("/ws", self.handle_websocket)
 
         my_hash = self.start_rns()

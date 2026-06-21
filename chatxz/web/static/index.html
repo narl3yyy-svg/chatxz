@@ -247,6 +247,7 @@ body {
       <div id="debug-bar" style="margin-top:8px;padding:6px 8px;font-size:10px;color:var(--text2);border-top:1px solid rgba(255,255,255,.05)">
         <div id="ws-status">WS: connecting...</div>
         <div id="peer-count">Peers: 0</div>
+        <div id="queue-count" style="display:none"></div>
       </div>
     </div>
   </div>
@@ -409,6 +410,17 @@ function fetchIdentity() {
         setConnected(d.connected);
       }
     });
+  fetch('/api/queue')
+    .then(r => r.json())
+    .then(q => {
+      var el = document.getElementById('queue-count');
+      if (q.count > 0) {
+        el.style.display = 'block';
+        el.textContent = 'Queue: ' + q.count + ' pending';
+      } else {
+        el.style.display = 'none';
+      }
+    });
 }
 
 function connectWS() {
@@ -449,6 +461,8 @@ function handleWSMessage(msg) {
     toast('Connected!');
   } else if (msg.type === 'connect_fail') {
     toast('Connection failed: ' + (msg.error || 'unknown'));
+  } else if (msg.type === 'info') {
+    toast(msg.data || '');
   }
 }
 
@@ -459,7 +473,10 @@ function showProgress(data) {
   bar.style.display = 'block';
   var pct = data.progress || 0;
   bar.querySelector('.progress-fill').style.width = pct + '%';
-  label.textContent = data.file_name + ' — ' + pct + '%' + (data.size ? ' (' + formatSize(data.size) + ')' : '');
+  var text = data.file_name + ' — ' + pct + '%';
+  if (data.size) text += ' (' + formatSize(data.size) + ')';
+  if (data.speed) text += ' @ ' + data.speed;
+  label.textContent = text;
   if (pct >= 100) {
     setTimeout(function() { bar.style.display = 'none'; }, 2000);
   }
@@ -745,6 +762,7 @@ function addMessage(data) {
     if (data.content) {
       const url = fileUrl(data.content);
       html += `<img class="msg-img" src="${url}" onclick="showImage(this.src)">`;
+      html += `<div style="margin-top:2px"><a href="${url}" download="${escapeHtml(data.file_name || 'image')}" style="color:var(--primary);font-size:11px">💾 Save image</a></div>`;
     }
   } else if (data.type === 'voice') {
     html = `<div>🎤 ${escapeHtml(data.file_name || 'Voice note')}</div>`;
@@ -844,7 +862,8 @@ function uploadFiles(files) {
     fetch('/api/file', {method: 'POST', body: formData})
       .then(r => r.json()).then(d => {
         if (d.status === 'ok') toast(`Sent ${d.name}`);
-        else toast('Upload failed');
+        else if (d.status === 'queued') toast(`Queued ${d.name} (${d.size})`);
+        else toast('Upload failed: ' + (d.error || ''));
       });
   });
 }
