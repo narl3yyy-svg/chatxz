@@ -517,8 +517,8 @@ class ChatWebServer:
             is_image = ext in ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
 
             sent_dir = os.path.join(self.config_dir, "sent")
-            os.makedirs(sent_dir, exist_ok=True)
             save_path = os.path.join(sent_dir, fname)
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
             size = 0
             with open(save_path, "wb") as f:
                 while True:

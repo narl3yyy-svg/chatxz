@@ -938,16 +938,33 @@ function uploadFiles(files) {
 }
 
 function uploadFolder(files) {
+  const total = files.length;
+  if (total === 0) return;
+  if (!confirm(`Upload ${total} file(s) from this folder and all subfolders?`)) return;
+  let done = 0;
+  let ok = 0;
+  let err = 0;
+  let notified = false;
+  const maybeFinal = () => {
+    if (notified) return;
+    if (done >= total) {
+      notified = true;
+      toast(`Sent ${ok}/${total} file(s)` + (err ? ` (${err} failed)` : ''));
+    }
+  };
   Array.from(files).forEach(file => {
     const formData = new FormData();
-    formData.append('file', file);
+    const path = file.webkitRelativePath || file.name;
+    formData.append('file', file, path);
     fetch('/api/file', {method: 'POST', body: formData})
       .then(r => r.json()).then(d => {
-        if (d.status === 'ok') toast(`Sent ${d.name}`);
-        else if (d.status === 'queued') toast(`Queued ${d.name} (${d.size})`);
-      });
+        done++;
+        (d.status === 'ok' || d.status === 'queued') ? ok++ : err++;
+        maybeFinal();
+      })
+      .catch(() => { done++; err++; maybeFinal(); });
   });
-  toast(`Uploading ${files.length} file(s)...`);
+  toast(`Uploading ${total} file(s)...`);
 }
 
 function pickReceivedDir(input) {
