@@ -39,8 +39,8 @@ android {
 }
 
 configurations.all {
-    exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk8"
-    exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk7"
+    exclude(mapOf("group" to "org.jetbrains.kotlin", "module" to "kotlin-stdlib-jdk8"))
+    exclude(mapOf("group" to "org.jetbrains.kotlin", "module" to "kotlin-stdlib-jdk7"))
 }
 
 chaquopy {
