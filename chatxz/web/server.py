@@ -1,7 +1,6 @@
 import os
 import json
 import time
-import socket
 import base64
 import tempfile
 import mimetypes
@@ -16,7 +15,7 @@ from chatxz.core.identity import IdentityManager
 from chatxz.core.messaging import MessagingBackend, ChatMessage
 from chatxz.core.filetransfer import FileTransfer
 from chatxz.core.voice import VoiceRecorder, VoicePlayer
-from chatxz.core.discovery import PeerDiscovery, DISCOVERY_PORT
+from chatxz.core.discovery import PeerDiscovery
 from chatxz.utils.helpers import get_config_dir, get_data_dir, format_size, truncate_hash
 
 CONFIG_DIR = get_config_dir()
@@ -54,7 +53,7 @@ class ChatWebServer:
         dest = self.messaging.start()
 
         my_hash = RNS.hexrep(dest.hash)
-        self.discovery = PeerDiscovery(my_hash, display_name="")
+        self.discovery = PeerDiscovery()
         self.discovery.start()
 
         asyncio.run_coroutine_threadsafe(
@@ -303,8 +302,10 @@ class ChatWebServer:
                 if ok:
                     self.active_peer = peer_hash
         elif msg_type == "announce":
-            if self.discovery:
-                self.discovery.send_beacon()
+            if self.messaging and self.messaging.destination:
+                import json as _json
+                ad = _json.dumps({"app": "chatzx", "name": ""}).encode("utf-8")
+                self.messaging.destination.announce(app_data=ad)
 
     # Start server
 

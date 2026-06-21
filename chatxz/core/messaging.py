@@ -77,7 +77,8 @@ class MessagingBackend:
         )
         self.destination.set_proof_strategy(RNS.Destination.PROVE_ALL)
         self.destination.set_link_established_callback(self._link_callback)
-        self.destination.announce()
+        announce_data = json.dumps({"app": APP_NAME, "name": ""}).encode("utf-8")
+        self.destination.announce(app_data=announce_data)
         self.running = True
         return self.destination
 
