@@ -227,8 +227,9 @@ class MessagingBackend:
                 msg = ChatMessage("__peer_info", json.dumps({"ip": self.my_ip, "port": self.my_port}))
                 packet = RNS.Packet(link, msg.to_json().encode("utf-8"))
                 packet.send()
-            except:
-                pass
+                print(f"[peer_info] Sent my IP {self.my_ip}:{self.my_port} to {link.link_id.hex()[:12]}")
+            except Exception as e:
+                print(f"[peer_info] Failed to send: {e}")
 
     def _link_callback(self, link):
         print(f"[messaging] Incoming link established: {link.link_id.hex()[:12]}")
@@ -260,9 +261,10 @@ class MessagingBackend:
                     try:
                         info = json.loads(chat_msg.content)
                         self.peer_ips[link.link_id] = {"ip": info["ip"], "port": info.get("port", 8742)}
-                        print(f"[peer_info] Remote is at {info['ip']}:{info.get('port', 8742)}")
-                    except:
-                        pass
+                        self.peer_ips[remote_hash] = {"ip": info["ip"], "port": info.get("port", 8742)}
+                        print(f"[peer_info] Remote {remote_hash[:16]} is at {info['ip']}:{info.get('port', 8742)}")
+                    except Exception as e:
+                        print(f"[peer_info] Parse error: {e}")
                     return
 
                 if chat_msg.msg_type == "__direct_offer":
@@ -341,7 +343,9 @@ class MessagingBackend:
         def download():
             peer = self.peer_ips.get(link.link_id)
             if not peer:
-                print(f"[direct] No peer IP info for this link, cannot direct download")
+                peer = self.peer_ips.get(remote_hash)
+            if not peer:
+                print(f"[direct] No peer IP info for link {link.link_id.hex()[:12]} or hash {remote_hash[:16] if remote_hash else '?'}, cannot direct download")
                 return
 
             token = offer.get("token")
@@ -371,11 +375,6 @@ class MessagingBackend:
                     self.on_message(msg, remote_hash)
             except Exception as e:
                 print(f"[direct] HTTP transfer failed for {fname}: {e}")
-                if self.on_message:
-                    self.on_message(
-                        ChatMessage("system", f"Direct transfer failed for {fname}: {e}"),
-                        remote_hash
-                    )
 
         threading.Thread(target=download, daemon=True).start()
 

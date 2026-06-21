@@ -438,28 +438,25 @@ class ChatWebServer:
                 return web.json_response({"status": "queued", "name": fname, "size": size})
 
             msg_type = "image" if is_image else "file"
-            result = self.messaging.direct_send_file(save_path, msg_type)
+            my_hash = self.identity_mgr.get_hex_hash()
+            ts = time.time()
+            entry = {
+                "type": msg_type,
+                "content": save_path,
+                "sender": my_hash,
+                "timestamp": ts,
+                "file_name": fname,
+                "file_size": size,
+            }
+            self.message_history.append(entry)
+            self._save_history()
+            await self._broadcast({"type": "message", "data": entry})
+
+            self.messaging.direct_send_file(save_path, msg_type)
+            result = self.messaging.send_file(save_path, msg_type,
+                                               progress_callback=self._make_progress_callback(fname, size))
             if result:
-                method = "direct"
-            else:
-                result = self.messaging.send_file(save_path, msg_type,
-                                                   progress_callback=self._make_progress_callback(fname, size))
-                method = "resource" if result else None
-            if result:
-                result.content = save_path
-                my_hash = self.identity_mgr.get_hex_hash()
-                entry = {
-                    "type": result.msg_type,
-                    "content": result.content,
-                    "sender": my_hash,
-                    "timestamp": result.timestamp,
-                    "file_name": result.file_name,
-                    "file_size": result.file_size,
-                }
-                self.message_history.append(entry)
-                self._save_history()
-                await self._broadcast({"type": "message", "data": entry})
-                return web.json_response({"status": "ok", "name": fname, "size": size, "method": method})
+                return web.json_response({"status": "ok", "name": fname, "size": size, "method": "resource"})
             return web.json_response({"error": "send failed"}, status=400)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -508,21 +505,24 @@ class ChatWebServer:
                                         file_size=len(audio_bytes), file_path=voice_path)
                 return web.json_response({"status": "queued"})
 
-            result = self.messaging.direct_send_file(voice_path, "voice")
+            my_hash = self.identity_mgr.get_hex_hash()
+            ts = time.time()
+            entry = {
+                "type": "voice",
+                "content": voice_path,
+                "sender": my_hash,
+                "timestamp": ts,
+                "file_name": os.path.basename(voice_path),
+                "file_size": len(audio_bytes),
+            }
+            self.message_history.append(entry)
+            self._save_history()
+            await self._broadcast({"type": "message", "data": entry})
+
+            self.messaging.direct_send_file(voice_path, "voice")
+            result = self.messaging.send_file(voice_path, "voice",
+                                               progress_callback=self._make_progress_callback(os.path.basename(voice_path), len(audio_bytes)))
             if result:
-                result.content = voice_path
-                my_hash = self.identity_mgr.get_hex_hash()
-                entry = {
-                    "type": result.msg_type,
-                    "content": result.content,
-                    "sender": my_hash,
-                    "timestamp": result.timestamp,
-                    "file_name": result.file_name,
-                    "file_size": result.file_size,
-                }
-                self.message_history.append(entry)
-                self._save_history()
-                await self._broadcast({"type": "message", "data": entry})
                 return web.json_response({"status": "ok"})
             return web.json_response({"error": "send failed"}, status=400)
         except Exception as e:
