@@ -1,36 +1,88 @@
-# Automatic APK builds on tags like v0.2.0, and manual dispatch from GitHub Actions tab.
+# Builds chatxz Android APK on version tags and manual dispatch.
+# Every successful build publishes to GitHub Releases.
 
 name: Build Android APK
 on:
-  push: { tags: ['v*'] }
-  workflow_dispatch: {}
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.3.1). Leave empty to use build.gradle + build number.'
+        required: false
+        default: ''
+
 permissions:
   contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
-      - uses: android-actions/setup-android@v3
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v4
+
       - name: Accept licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.13' }
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
       - name: Sync Python sources into Android bundle
         run: bash scripts/sync-android.sh
+
+      - name: Determine release version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            TAG="${GITHUB_REF_NAME}"
+          else
+            INPUT="${{ github.event.inputs.version }}"
+            if [ -n "$INPUT" ]; then
+              VERSION="${INPUT#v}"
+            else
+              VERSION=$(grep 'versionName' android/app/build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+              VERSION="${VERSION}-build.${GITHUB_RUN_NUMBER}"
+            fi
+            TAG="v${VERSION}"
+          fi
+          APK="chatxz-${VERSION}.apk"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "apk=${APK}" >> "$GITHUB_OUTPUT"
+          echo "Publishing version ${VERSION} (tag ${TAG})"
+
       - name: Build APK
         run: cd android && chmod +x gradlew && ./gradlew assembleDebug --no-daemon
-      - name: Rename
-        run: |
-          V=${GITHUB_REF_NAME#v}
-          cp android/app/build/outputs/apk/debug/app-debug.apk chatxz-${V}.apk
-      - uses: actions/upload-artifact@v4
-        with: { name: chatxz-apk, path: chatxz-*.apk }
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk "${{ steps.version.outputs.apk }}"
+
+      - uses: actions/upload-artifact@v7
         with:
-          name: chatxz ${{ github.ref_name }}
-          body: Android APK (arm64-v8a). Download and install on your device.
-          files: chatxz-*.apk
+          name: chatxz-${{ steps.version.outputs.version }}
+          path: ${{ steps.version.outputs.apk }}
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: chatxz v${{ steps.version.outputs.version }}
+          body: |
+            Android APK (arm64-v8a) for chatxz.
+
+            - **Version:** ${{ steps.version.outputs.version }}
+            - **Build:** #${{ github.run_number }}
+            - **Commit:** ${{ github.sha }}
+
+            Download `${{ steps.version.outputs.apk }}` below and install on your device.
+          files: ${{ steps.version.outputs.apk }}
+          make_latest: true
