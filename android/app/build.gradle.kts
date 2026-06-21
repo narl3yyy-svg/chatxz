@@ -46,8 +46,10 @@ configurations.all {
 
 chaquopy {
     defaultConfig {
-        version = "3.12"
+        version = "3.13"
         pip {
+            options("--no-binary", "rns")
+            options("--no-binary", "pyserial")
             install("rns")
             install("aiohttp")
         }
