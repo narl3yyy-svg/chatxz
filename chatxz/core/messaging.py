@@ -556,9 +556,9 @@ class MessagingBackend:
             os.unlink(tmp_path)
             return False
         try:
-            with open(tmp_path, "rb") as f:
-                RNS.Resource(f, self.active_link, callback=self._resource_send_callback("longtext"),
-                             progress_callback=None, auto_compress=True)
+            f = open(tmp_path, "rb")
+            RNS.Resource(f, self.active_link, callback=self._resource_send_callback("longtext"),
+                         progress_callback=None, auto_compress=True)
             print(f"[messaging] Sent long text: {text[:50]}... ({len(data)} bytes as resource)")
             self._sent_messages[msg.msg_id] = msg
             if receipt_callback:
@@ -581,11 +581,11 @@ class MessagingBackend:
                 packet = RNS.Packet(self.active_link, chat_msg.to_json().encode("utf-8"))
                 packet.send()
 
-                with open(file_path, "rb") as f:
-                    resource = RNS.Resource(f, self.active_link,
-                                             callback=self._resource_send_callback(fname),
-                                             progress_callback=progress_callback,
-                                             auto_compress=False)
+                f = open(file_path, "rb")
+                RNS.Resource(f, self.active_link,
+                             callback=self._resource_send_callback(fname),
+                             progress_callback=progress_callback,
+                             auto_compress=False)
                 print(f"[messaging] Sent file: {fname} ({fsize} bytes)")
                 self._sent_messages[chat_msg.msg_id] = chat_msg
                 return chat_msg
