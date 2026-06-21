@@ -1,11 +1,4 @@
-import os
-import json
-import time
-import base64
-import tempfile
-import mimetypes
-import asyncio
-import socket
+import os, json, time, base64, mimetypes, asyncio, socket, zipfile, shutil
 from pathlib import Path
 
 import aiohttp
@@ -17,9 +10,6 @@ from chatxz.core.messaging import MessagingBackend, ChatMessage
 from chatxz.core.filetransfer import FileTransfer
 from chatxz.core.voice import VoiceRecorder, VoicePlayer
 from chatxz.core.discovery import PeerDiscovery
-import zipfile
-import tempfile
-import shutil
 from chatxz.utils.helpers import get_config_dir, get_data_dir, format_size, truncate_hash
 
 CONFIG_DIR = get_config_dir()
@@ -244,6 +234,8 @@ class ChatWebServer:
             "timestamp": chat_msg.timestamp,
             "file_name": chat_msg.file_name,
             "file_size": chat_msg.file_size,
+            "msg_id": chat_msg.msg_id,
+            "status": "received" if sender_hash and sender_hash != "system" else "",
         }
         self.message_history.append(entry)
         self._save_history()
@@ -425,16 +417,23 @@ class ChatWebServer:
         import subprocess as _sp
         try:
             temps = {}
+
+            def read_sysfs_temp(path):
+                try:
+                    with open(path) as f:
+                        raw = f.read().strip()
+                    return int(raw) / 1000.0 if raw else None
+                except:
+                    return None
+
             for base in ["/sys/class/thermal", "/sys/devices/virtual/thermal"]:
                 if os.path.exists(base):
                     for name in os.listdir(base):
                         if name.startswith("thermal_zone"):
                             tpath = os.path.join(base, name, "temp")
                             ttype_path = os.path.join(base, name, "type")
-                            if os.path.exists(tpath):
-                                with open(tpath) as f:
-                                    raw = f.read().strip()
-                                    celsius = int(raw) / 1000.0 if raw else 0
+                            celsius = read_sysfs_temp(tpath)
+                            if celsius is not None:
                                 ttype = "unknown"
                                 if os.path.exists(ttype_path):
                                     with open(ttype_path) as f:
@@ -444,48 +443,78 @@ class ChatWebServer:
 
             hwmon = "/sys/class/hwmon"
             if os.path.exists(hwmon):
-                for name in os.listdir(hwmon):
+                for name in sorted(os.listdir(hwmon)):
                     hpath = os.path.join(hwmon, name)
-                    for entry in os.listdir(hpath):
+                    if not os.path.isdir(hpath):
+                        continue
+                    for entry in sorted(os.listdir(hpath)):
                         if entry.endswith("_input") and "temp" in entry:
-                            with open(os.path.join(hpath, entry)) as f:
-                                raw = f.read().strip()
-                                celsius = int(raw) / 1000.0 if raw else 0
+                            celsius = read_sysfs_temp(os.path.join(hpath, entry))
+                            if celsius is None:
+                                continue
                             label = name
                             lpath = os.path.join(hpath, entry.replace("_input", "_label"))
                             if os.path.exists(lpath):
                                 with open(lpath) as f:
                                     label = f.read().strip()
+                            name_path = os.path.join(hpath, "name")
+                            if os.path.exists(name_path) and label == name:
+                                with open(name_path) as f:
+                                    label = f.read().strip()
                             if label not in temps:
                                 temps[label] = round(celsius, 1)
 
             if not temps:
-                r = _sp.run(["sensors", "-j"], capture_output=True, text=True, timeout=5)
-                if r.returncode == 0:
-                    import json as _json
-                    try:
+                try:
+                    r = _sp.run(["sensors", "-j"], capture_output=True, text=True, timeout=3)
+                    if r.returncode == 0 and r.stdout.strip():
+                        import json as _json
                         data = _json.loads(r.stdout)
                         for chip, vals in data.items():
                             for key, val in vals.items():
-                                if isinstance(val, dict) and "temp1_input" in val:
-                                    temps[f"{chip} {key}"] = round(val["temp1_input"], 1)
-                    except:
-                        pass
+                                if isinstance(val, dict):
+                                    for sk, sv in val.items():
+                                        if sk.endswith("_input") and isinstance(sv, (int, float)):
+                                            label = f"{chip} {key}".replace("-", " ").title()
+                                            if label not in temps:
+                                                temps[label] = round(sv, 1)
+                except:
+                    pass
             if not temps:
-                r = _sp.run(["acpi", "-t"], capture_output=True, text=True, timeout=5)
-                if r.returncode == 0:
-                    for line in r.stdout.strip().split("\n"):
-                        line = line.strip()
-                        if "thermal" in line.lower() and "degrees" in line.lower():
-                            parts = line.split(",")
-                            for p in parts:
-                                p = p.strip()
-                                if "degrees C" in p:
-                                    val = p.replace("degrees C", "").strip()
+                try:
+                    r = _sp.run(["sensors", "-u"], capture_output=True, text=True, timeout=3)
+                    if r.returncode == 0:
+                        for line in r.stdout.split("\n"):
+                            if "temp" in line and "_input" in line:
+                                parts = line.split(":")
+                                if len(parts) == 2:
                                     try:
-                                        temps["acpi"] = round(float(val), 1)
+                                        val = float(parts[1].strip())
+                                        label = parts[0].strip().replace("_input", "").replace("_", " ").title()
+                                        if label not in temps:
+                                            temps[label] = round(val, 1)
                                     except:
                                         pass
+                except:
+                    pass
+            if not temps:
+                try:
+                    r = _sp.run(["acpi", "-t"], capture_output=True, text=True, timeout=3)
+                    if r.returncode == 0:
+                        for line in r.stdout.strip().split("\n"):
+                            line = line.strip()
+                            if "thermal" in line.lower() and "degrees" in line.lower():
+                                parts = line.split(",")
+                                for p in parts:
+                                    p = p.strip()
+                                    if "degrees C" in p:
+                                        val = p.replace("degrees C", "").strip()
+                                        try:
+                                            temps["acpi"] = round(float(val), 1)
+                                        except:
+                                            pass
+                except:
+                    pass
             return web.json_response({"temperatures": temps})
         except:
             return web.json_response({"temperatures": {}})
@@ -546,6 +575,8 @@ class ChatWebServer:
                 "timestamp": ts,
                 "file_name": fname,
                 "file_size": size,
+                "msg_id": str(int(ts * 1000))[-12:],
+                "status": "sent",
             }
             self.message_history.append(entry)
             self._save_history()
@@ -613,6 +644,8 @@ class ChatWebServer:
                 "timestamp": ts,
                 "file_name": zip_name,
                 "file_size": zsize,
+                "msg_id": str(int(ts * 1000))[-12:],
+                "status": "sent",
             }
             self.message_history.append(entry)
             self._save_history()
@@ -679,6 +712,8 @@ class ChatWebServer:
                 "timestamp": ts,
                 "file_name": os.path.basename(voice_path),
                 "file_size": len(audio_bytes),
+                "msg_id": str(int(ts * 1000))[-12:],
+                "status": "sent",
             }
             self.message_history.append(entry)
             self._save_history()
@@ -802,10 +837,15 @@ class ChatWebServer:
                     await self._broadcast({"type": "peers", "data": peers})
 
     async def handle_discover(self, request):
-        if self.discovery:
-            peers = self.discovery.get_peers()
-            return web.json_response({"peers": peers})
-        return web.json_response({"peers": []})
+        peers = self.discovery.get_peers() if self.discovery else []
+        if self.active_peer and not any(p.get("hash", "").replace(":", "") == self.active_peer for p in peers):
+            peers.append({
+                "hash": self.active_peer,
+                "name": self.active_peer[:8],
+                "app": "chatxz",
+                "connected": True,
+            })
+        return web.json_response({"peers": peers})
 
     async def _handle_ws_message(self, ws, data):
         msg_type = data.get("type")
@@ -813,7 +853,13 @@ class ChatWebServer:
             text = data.get("text", "")
             if text and self.messaging:
                 if self.messaging.active_link:
-                    result = self.messaging.send_message(text)
+                    def on_receipt(status, receipt):
+                        if self._loop:
+                            asyncio.run_coroutine_threadsafe(
+                                self._broadcast({"type": "receipt", "data": {"msg_id": receipt.get("msg_id"), "status": status}}),
+                                self._loop
+                            )
+                    result = self.messaging.send_message(text, receipt_callback=on_receipt)
                     if result:
                         my_hash = self.identity_mgr.get_hex_hash()
                         entry = {
@@ -821,6 +867,8 @@ class ChatWebServer:
                             "content": result.content,
                             "sender": my_hash,
                             "timestamp": result.timestamp,
+                            "msg_id": result.msg_id,
+                            "status": "sent",
                         }
                         self.message_history.append(entry)
                         self._save_history()
@@ -842,6 +890,10 @@ class ChatWebServer:
         elif msg_type == "announce":
             if self.messaging and self.messaging.destination:
                 self.messaging.announce()
+        elif msg_type == "read_receipt":
+            msg_id = data.get("msg_id", "")
+            if msg_id and self.messaging and self.messaging.active_link:
+                self.messaging.send_read_receipt(self.messaging.active_link, msg_id)
 
     async def _on_startup(self, app):
         self._loop = asyncio.get_running_loop()

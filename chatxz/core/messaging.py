@@ -1,13 +1,7 @@
-import threading
-import RNS
-import json
-import time
-import base64
-import os
-import tempfile
-import urllib.request
-import urllib.error
+import threading, RNS, json, time, base64, os, tempfile
+import urllib.request, urllib.error
 from datetime import datetime
+import uuid
 
 APP_NAME = "chatxz"
 ANNOUNCE_INTERVAL = 30
@@ -19,19 +13,21 @@ MESSAGE_TYPE_VOICE = "voice"
 MESSAGE_TYPE_EMOJI = "emoji"
 
 class ChatMessage:
-    def __init__(self, msg_type, content, sender=None, timestamp=None, file_name=None, file_size=None):
+    def __init__(self, msg_type, content, sender=None, timestamp=None, file_name=None, file_size=None, msg_id=None):
         self.msg_type = msg_type
         self.content = content
         self.sender = sender
         self.timestamp = timestamp or time.time()
         self.file_name = file_name
         self.file_size = file_size
+        self.msg_id = msg_id or str(uuid.uuid4())[:12]
 
     def to_dict(self):
         d = {
             "type": self.msg_type,
             "content": self.content,
             "timestamp": self.timestamp,
+            "msg_id": self.msg_id,
         }
         if self.sender:
             d["sender"] = self.sender
@@ -50,6 +46,7 @@ class ChatMessage:
             timestamp=d.get("timestamp", time.time()),
             file_name=d.get("file_name"),
             file_size=d.get("file_size"),
+            msg_id=d.get("msg_id"),
         )
 
     def to_json(self):
@@ -83,6 +80,9 @@ class MessagingBackend:
         self.direct_transfer_tokens = {}
         self.queue_file = os.path.join(config_dir, "queue.json")
         self.message_queue = self._load_queue()
+        self._file_send_lock = threading.Lock()
+        self._sent_messages = {}
+        self._receipt_callbacks = {}
 
     def _load_queue(self):
         try:
@@ -232,6 +232,24 @@ class MessagingBackend:
             except Exception as e:
                 print(f"[peer_info] Failed to send: {e}")
 
+    def _send_receipt(self, link, msg_id, status):
+        try:
+            receipt = json.dumps({"msg_id": msg_id, "status": status})
+            msg = ChatMessage("__receipt", receipt)
+            packet = RNS.Packet(link, msg.to_json().encode("utf-8"))
+            packet.send()
+        except:
+            pass
+
+    def send_read_receipt(self, link, msg_id):
+        try:
+            receipt = json.dumps({"msg_id": msg_id})
+            msg = ChatMessage("__read_receipt", receipt)
+            packet = RNS.Packet(link, msg.to_json().encode("utf-8"))
+            packet.send()
+        except:
+            pass
+
     def _link_callback(self, link):
         print(f"[messaging] Incoming link established: {link.link_id.hex()[:12]}")
         remote_hash = self._get_remote_hash(link)
@@ -277,6 +295,31 @@ class MessagingBackend:
                         pass
                     return
 
+                if chat_msg.msg_type == "__receipt":
+                    try:
+                        receipt = json.loads(chat_msg.content)
+                        msg_id = receipt.get("msg_id")
+                        status = receipt.get("status", "received")
+                        cb = self._receipt_callbacks.pop(msg_id, None)
+                        if cb:
+                            cb(status, receipt)
+                        print(f"[receipt] Received {status} for msg {msg_id[:8]} from {remote_hash[:16]}")
+                    except Exception as e:
+                        print(f"[receipt] Error: {e}")
+                    return
+
+                if chat_msg.msg_type == "__read_receipt":
+                    try:
+                        receipt = json.loads(chat_msg.content)
+                        msg_id = receipt.get("msg_id")
+                        cb = self._receipt_callbacks.pop(msg_id, None)
+                        if cb:
+                            cb("read", receipt)
+                        print(f"[receipt] Read receipt for msg {msg_id[:8]} from {remote_hash[:16]}")
+                    except Exception as e:
+                        print(f"[receipt] Read receipt error: {e}")
+                    return
+
                 chat_msg.sender = remote_hash
                 print(f"[messaging] Received {chat_msg.msg_type} from {remote_hash[:16]}...")
 
@@ -285,6 +328,9 @@ class MessagingBackend:
                     print(f"[messaging] Waiting for resource data for {chat_msg.file_name}...")
                 elif self.on_message:
                     self.on_message(chat_msg, remote_hash)
+
+                if chat_msg.msg_type in (MESSAGE_TYPE_TEXT, MESSAGE_TYPE_EMOJI):
+                    self._send_receipt(link, chat_msg.msg_id, "received")
             except Exception as e:
                 print(f"[messaging] Packet callback error: {e}")
                 if self.on_message:
@@ -327,6 +373,7 @@ class MessagingBackend:
                     remote_hash = self._get_remote_hash(link)
                     if self.on_message:
                         self.on_message(chat_msg, remote_hash)
+                    self._send_receipt(link, chat_msg.msg_id, "received")
                 else:
                     print(f"[messaging] Resource transfer failed (status={resource.status})")
                     chat_msg = self._pending_files.pop(link.link_id, None)
@@ -462,7 +509,7 @@ class MessagingBackend:
                 )
         return callback
 
-    def send_message(self, text):
+    def send_message(self, text, receipt_callback=None):
         if not self.active_link:
             print("[messaging] send_message: no active link")
             return False
@@ -471,6 +518,9 @@ class MessagingBackend:
             packet = RNS.Packet(self.active_link, msg.to_json().encode("utf-8"))
             packet.send()
             print(f"[messaging] Sent text message: {text[:50]}...")
+            self._sent_messages[msg.msg_id] = msg
+            if receipt_callback:
+                self._receipt_callbacks[msg.msg_id] = receipt_callback
             return msg
         except Exception as e:
             print(f"[messaging] Send failed: {e}")
@@ -479,23 +529,25 @@ class MessagingBackend:
     def send_file(self, file_path, msg_type=MESSAGE_TYPE_FILE, progress_callback=None):
         if not self.active_link or not os.path.exists(file_path):
             return False
-        fname = os.path.basename(file_path)
-        fsize = os.path.getsize(file_path)
-        chat_msg = ChatMessage(msg_type, str(time.time()), file_name=fname, file_size=fsize)
-        try:
-            packet = RNS.Packet(self.active_link, chat_msg.to_json().encode("utf-8"))
-            packet.send()
+        with self._file_send_lock:
+            fname = os.path.basename(file_path)
+            fsize = os.path.getsize(file_path)
+            chat_msg = ChatMessage(msg_type, str(time.time()), file_name=fname, file_size=fsize)
+            try:
+                packet = RNS.Packet(self.active_link, chat_msg.to_json().encode("utf-8"))
+                packet.send()
 
-            f = open(file_path, "rb")
-            resource = RNS.Resource(f, self.active_link,
-                                     callback=self._resource_send_callback(fname),
-                                     progress_callback=progress_callback,
-                                     auto_compress=False)
-            print(f"[messaging] Sent file: {fname} ({fsize} bytes)")
-            return chat_msg
-        except Exception as e:
-            print(f"[messaging] File send failed: {e}")
-            return False
+                with open(file_path, "rb") as f:
+                    resource = RNS.Resource(f, self.active_link,
+                                             callback=self._resource_send_callback(fname),
+                                             progress_callback=progress_callback,
+                                             auto_compress=False)
+                print(f"[messaging] Sent file: {fname} ({fsize} bytes)")
+                self._sent_messages[chat_msg.msg_id] = chat_msg
+                return chat_msg
+            except Exception as e:
+                print(f"[messaging] File send failed: {e}")
+                return False
 
     def direct_send_file(self, file_path, msg_type=MESSAGE_TYPE_FILE):
         if not self.active_link or not os.path.exists(file_path):

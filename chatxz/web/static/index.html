@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>chatxz</title>
+<link rel="manifest" href="/static/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 :root {
@@ -67,20 +70,7 @@ body {
 .contact-name { font-size: 14px; font-weight: 500; }
 .contact-hash { font-size: 11px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Context menu */
-#context-menu {
-  display: none; position: fixed; z-index: 500;
-  background: var(--surface); border: 1px solid rgba(255,255,255,.15);
-  border-radius: 8px; padding: 4px; min-width: 160px;
-  box-shadow: 0 4px 12px rgba(0,0,0,.4);
-}
-#context-menu.open { display: block; }
-.ctx-item {
-  padding: 8px 14px; border-radius: 4px; cursor: pointer; font-size: 13px;
-  display: flex; align-items: center; gap: 8px;
-}
-.ctx-item:hover { background: rgba(255,255,255,.08); }
-.ctx-item.danger:hover { background: var(--danger); color: #fff; }
+/* Context menu (replaced by sidebar panel) */
 
 /* Main */
 #main { flex: 1; display: flex; flex-direction: column; }
@@ -320,6 +310,17 @@ body {
         <button class="dlg-btn primary" style="flex:1" onclick="saveSettings()">Save</button>
       </div>
     </div>
+    <div id="action-panel" style="display:none;flex-direction:column;flex:1;overflow-y:auto;padding:12px;font-size:13px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h3 style="font-size:14px;color:var(--text)" id="action-panel-title">Actions</h3>
+        <button onclick="toggleActionPanel()" style="background:none;border:none;color:var(--text2);font-size:18px;cursor:pointer;line-height:1" title="Close">&times;</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="dlg-btn primary" style="width:100%" onclick="actionConnect()">Connect</button>
+        <button class="dlg-btn secondary" style="width:100%" onclick="actionSaveContact()">Save as Contact</button>
+        <button class="dlg-btn secondary" style="width:100%;color:var(--danger)" onclick="actionDelete()">Delete Contact</button>
+      </div>
+    </div>
     <div id="connect-panel" style="display:none;flex-direction:column;flex:1;overflow-y:auto;padding:12px;font-size:13px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
         <h3 style="font-size:14px;color:var(--text)">Connect to Peer</h3>
@@ -374,13 +375,6 @@ body {
       <div id="progress-label">Sending...</div>
     </div>
   </div>
-</div>
-
-<!-- Context menu -->
-<div id="context-menu">
-  <div class="ctx-item" onclick="ctxConnect()">Connect</div>
-  <div class="ctx-item" onclick="ctxSaveContact()">Save as Contact</div>
-  <div class="ctx-item danger" onclick="ctxDelete()">Delete</div>
 </div>
 
 <!-- Save contact dialog -->
@@ -482,6 +476,10 @@ function handleWSMessage(msg) {
   console.log('[ws] Message type:', msg.type);
   if (msg.type === 'message') {
     addMessage(msg.data);
+  } else if (msg.type === 'receipt') {
+    const r = msg.data;
+    const el = document.querySelector(`.msg[data-msgid="${r.msg_id}"] .receipt`);
+    if (el) el.textContent = receiptIcon(r.status);
   } else if (msg.type === 'peers') {
     console.log('[ws] Peers received:', msg.data ? msg.data.length : 0, msg.data);
     renderDiscovered(msg.data);
@@ -494,6 +492,12 @@ function handleWSMessage(msg) {
     toast('Connection failed: ' + (msg.error || 'unknown'));
   } else if (msg.type === 'info') {
     toast(msg.data || '');
+  }
+}
+
+function sendReadReceipt(msgId) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({type: 'read_receipt', msg_id: msgId}));
   }
 }
 
@@ -580,7 +584,7 @@ function renderContacts(contacts) {
         <div class="contact-hash">${truncateHash(c.hash)}</div>
       </div>`;
     div.onclick = () => connectTo(c.hash);
-    div.oncontextmenu = (e) => { e.preventDefault(); showContextMenu(e, c.hash); };
+    div.oncontextmenu = (e) => { e.preventDefault(); showActionPanel(e, c.hash); };
     el.appendChild(div);
   });
 }
@@ -589,13 +593,15 @@ function renderDiscovered(peers) {
   console.log('[render] Discovered peers:', peers);
   const el = document.getElementById('discovered-list');
   el.innerHTML = '';
-  const count = peers ? peers.length : 0;
-  document.getElementById('peer-count').textContent = 'Peers: ' + count;
-  if (!peers || peers.length === 0) {
+  let connected = document.getElementById('peer-name').textContent !== 'No one connected';
+  let discovered = peers ? peers.filter(p => !p.connected) : [];
+  let count = discovered.length;
+  document.getElementById('peer-count').textContent = 'Peers: ' + count + (connected ? ' (1 connected)' : '');
+  if (!discovered || discovered.length === 0) {
     el.innerHTML = '<div style="font-size:12px;color:var(--text2);padding:8px">No peers found on LAN</div>';
-    return;
+    if (!connected) return;
   }
-  peers.forEach(p => {
+  discovered.forEach(p => {
     const div = document.createElement('div');
     div.className = 'contact-item';
     const name = p.name || truncateHash(p.hash);
@@ -608,46 +614,47 @@ function renderDiscovered(peers) {
     div.onclick = () => connectTo(p.hash);
     div.oncontextmenu = (e) => {
       e.preventDefault();
-      showContextMenu(e, p.hash);
+      showActionPanel(e, p.hash);
     };
     el.appendChild(div);
   });
 }
 
-function showContextMenu(e, hash) {
+let actionShown = false;
+
+function showActionPanel(e, hash) {
   ctxHash = hash;
-  const menu = document.getElementById('context-menu');
-  menu.classList.add('open');
-  menu.style.left = e.clientX + 'px';
-  menu.style.top = e.clientY + 'px';
+  if (settingsShown) { settingsShown = false; document.getElementById('settings-panel').style.display = 'none'; }
+  if (connectShown) { connectShown = false; document.getElementById('connect-panel').style.display = 'none'; }
+  document.getElementById('contacts-section').style.display = 'none';
+  document.getElementById('action-panel').style.display = 'flex';
+  document.getElementById('action-panel-title').textContent = truncateHash(hash);
+  actionShown = true;
 }
 
-document.addEventListener('click', (e) => {
-  const menu = document.getElementById('context-menu');
-  if (!menu.contains(e.target)) {
-    menu.classList.remove('open');
-  }
-});
+function toggleActionPanel() {
+  actionShown = !actionShown;
+  document.getElementById('action-panel').style.display = actionShown ? 'flex' : 'none';
+  if (!actionShown) document.getElementById('contacts-section').style.display = 'flex';
+}
 
-function ctxConnect() {
+function actionConnect() {
   if (ctxHash) connectTo(ctxHash);
-  document.getElementById('context-menu').classList.remove('open');
+  toggleActionPanel();
 }
 
-function ctxSaveContact() {
+function actionSaveContact() {
   if (ctxHash) {
     document.getElementById('save-contact-hash').value = ctxHash;
     document.getElementById('save-contact-name').value = '';
     document.getElementById('save-contact-dialog').classList.add('open');
-    document.body.classList.add('dialog-open');
     document.getElementById('save-contact-name').focus();
   }
-  document.getElementById('context-menu').classList.remove('open');
+  toggleActionPanel();
 }
 
 function closeSaveContact() {
   document.getElementById('save-contact-dialog').classList.remove('open');
-  document.body.classList.remove('dialog-open');
 }
 
 function doSaveContact() {
@@ -665,7 +672,7 @@ function doSaveContact() {
   });
 }
 
-function ctxDelete() {
+function actionDelete() {
   if (ctxHash) {
     fetch('/api/contacts/' + ctxHash.replace(/:/g, ''), { method: 'DELETE' })
       .then(() => {
@@ -673,7 +680,7 @@ function ctxDelete() {
         fetchIdentity();
       });
   }
-  document.getElementById('context-menu').classList.remove('open');
+  toggleActionPanel();
 }
 
 function connectTo(hash) {
@@ -707,6 +714,7 @@ let connectShown = false;
 function toggleSettings() {
   settingsShown = !settingsShown;
   if (connectShown) { connectShown = false; document.getElementById('connect-panel').style.display = 'none'; }
+  if (actionShown) { actionShown = false; document.getElementById('action-panel').style.display = 'none'; }
   const contacts = document.getElementById('contacts-section');
   const panel = document.getElementById('settings-panel');
   if (settingsShown) {
@@ -729,6 +737,7 @@ function toggleSettings() {
 function toggleConnectPanel() {
   connectShown = !connectShown;
   if (settingsShown) { settingsShown = false; document.getElementById('settings-panel').style.display = 'none'; }
+  if (actionShown) { actionShown = false; document.getElementById('action-panel').style.display = 'none'; }
   const contacts = document.getElementById('contacts-section');
   const panel = document.getElementById('connect-panel');
   if (connectShown) {
@@ -778,7 +787,7 @@ function saveSettings() {
 
 function clearHistory() {
   if (!confirm('Delete all chat history?')) return;
-  fetch('/api/history?limit=0').then(() => {
+  fetch('/api/history/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'}).then(() => {
     document.getElementById('messages').innerHTML = '';
     toast('History cleared');
   });
@@ -840,13 +849,36 @@ function fileUrl(path) {
   return '';
 }
 
+function receiptIcon(status) {
+  if (status === 'sending') return '🕐';
+  if (status === 'sent') return '✓';
+  if (status === 'received') return '✓✓';
+  if (status === 'read') return '👁';
+  if (status === 'failed') return '✗';
+  return '';
+}
+
 function addMessage(data) {
   const msgs = document.getElementById('messages');
   if (msgs.style.display === 'none') return;
+
+  if (data.msg_id) {
+    const existing = document.querySelector(`.msg[data-msgid="${data.msg_id}"]`);
+    if (existing) {
+      const statusEl = existing.querySelector('.receipt');
+      if (statusEl) statusEl.textContent = receiptIcon(data.status || '');
+      if (data.status === 'received' || data.status === 'read') {
+        data.type === 'text' && data.sender !== myHash && sendReadReceipt(data.msg_id);
+      }
+      return;
+    }
+  }
+
   const div = document.createElement('div');
   const isSelf = data.sender === myHash;
   const isSystem = data.sender === 'system' || data.type === 'system';
   div.className = 'msg ' + (isSystem ? 'system' : isSelf ? 'self' : 'other');
+  if (data.msg_id) div.setAttribute('data-msgid', data.msg_id);
   const time = new Date(data.timestamp * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
   let html = '';
   if (data.type === 'text' || data.type === 'emoji') {
@@ -874,10 +906,15 @@ function addMessage(data) {
   } else if (data.type === 'system') {
     html = escapeHtml(data.content);
   }
-  html += `<div class="time">${time}</div>`;
+  const icon = receiptIcon(data.status || (isSelf && data.type !== 'system' ? 'sending' : ''));
+  html += `<div class="time">${time}${icon ? ' <span class="receipt" style="font-size:11px;margin-left:4px">' + icon + '</span>' : ''}</div>`;
   div.innerHTML = html;
   msgs.appendChild(div);
   msgs.scrollTop = msgs.scrollHeight;
+
+  if (isSelf && data.msg_id && (data.status === 'received' || data.status === 'read')) {
+    data.type === 'text' && sendReadReceipt(data.msg_id);
+  }
 }
 
 function toggleEmoji() {
@@ -1076,6 +1113,10 @@ window.addEventListener('beforeunload', () => {
     navigator.sendBeacon('/api/history/clear', '{}');
   }
 });
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/static/sw.js');
+}
 </script>
 </body>
 </html>

@@ -8,23 +8,25 @@ Send text, emoji, files and folders of any size, images/screenshots (viewable in
 
 - **End-to-end encrypted** messaging via Reticulum
 - **Unlimited file sizes** — send any file over RNS Resources with progress bar + MB/s
-- **Folder upload** — send entire directories (files are transferred individually)
+- **Folder upload** — send entire directories as compressed zip
 - **Screenshot preview** — images display inline, click to enlarge, save button
 - **Voice notes** — record from browser mic (MediaRecorder API) and send
 - **Emoji picker** — full Unicode emoji support
 - **Drag & drop** — drag files onto the page to upload
 - **Clipboard paste** — paste screenshots from clipboard
 - **Message queue** — messages queued when offline, auto-drained on connection
-- **Chat history** — persisted locally, configurable retention (1d / 1w / 1m / 6m / 12m / never), clear anytime
-- **Contacts** — save peers with names, right-click context menu
+- **Delivery receipts** — sent/delivered/read indicators on messages
+- **Chat history** — persisted locally, configurable retention (1d / 1w / 1m / 6m / 12m / never / on restart / on close), clear anytime
+- **Contacts** — save peers with names, right-click sidebar panel
 - **LAN discovery** — auto-discovers peers broadcasting on the same network
 - **Manual announce only** — you decide when to broadcast your presence
-- **CPU temperature** — live system temp shown in sidebar
+- **CPU temperature** — live system temp shown in sidebar (Arch, Ubuntu, Debian)
 - **Connection status** — colored indicators for WebSocket and link state
-- **Change identity** — regenerate your keypair (old one is backed up)
+- **Change identity** — regenerate your keypair (old key is deleted)
 - **Restart server** — restart from the GUI
 - **Configurable received files directory** — choose where incoming files are saved
 - **Off-grid capable** — works over LoRa, packet radio, WiFi, or the internet
+- **PWA ready** — install as standalone app on Android/iOS via Chrome "Add to Home Screen"
 - **No accounts, no servers** — your identity is your key
 
 ## Platform Support
@@ -34,6 +36,7 @@ Send text, emoji, files and folders of any size, images/screenshots (viewable in
 | Arch Linux | Supported |
 | Ubuntu | Supported |
 | Debian | Supported |
+| Android (PWA) | Supported |
 | macOS | Planned |
 | Windows | Planned |
 
@@ -79,16 +82,25 @@ The web interface runs at **http://localhost:8742** (or your LAN IP when using `
 
 1. **Share your identity hash** — shown at the top of the sidebar and on server startup (e.g. `ab12cd34...`). Give this to your friend.
 2. **Get their hash** — they share theirs with you.
-3. **Click "Add"** in the sidebar, paste their hash, optionally save as a contact.
+3. **Click "+ Add"** in the sidebar, paste their hash, optionally save as a contact.
 4. **Click the contact** to connect. A green "Link: active" indicator appears.
 5. **Announce** — click "Announce" to broadcast your presence on the LAN. Others will appear under "Discovered on LAN".
+6. **Right-click** any contact or discovered peer to open the action panel (Connect, Save Contact, Delete).
 
 ### Sending Files
 
 - **Single file** — click the 📎 button or drag & drop a file onto the page
 - **Multiple files** — same, select multiple in the file picker
-- **Folder** — click the 📁 button and select a folder (all files inside are sent)
+- **Folder** — click the 📁 button and select a folder (all files inside are compressed and sent as zip)
 - **Progress** — a progress bar shows transfer percentage, file size, and MB/s
+
+### Delivery Receipts
+
+Messages show status indicators:
+- 🕐 Sending
+- ✓ Sent
+- ✓✓ Delivered (peer received it)
+- 👁 Read (peer viewed it)
 
 ### Settings
 
@@ -97,10 +109,10 @@ Click ⚙ in the sidebar header:
 | Setting | Description |
 |---------|-------------|
 | Display Name | Shown in LAN announces |
-| History Retention | Auto-delete messages older than 1d/1w/1m/6m/12m, or never |
+| History Retention | Auto-delete by time, on restart, or on browser close |
 | Clear History Now | Immediately delete all chat history |
 | Save Received Files To | Directory where incoming files are saved |
-| Regenerate Identity | Create a new keypair (old one is backed up) |
+| Regenerate Identity | Create a new keypair (old key is deleted) |
 | Restart Server | Restart the web server from the GUI |
 
 ### Sidebar Indicators
@@ -108,6 +120,28 @@ Click ⚙ in the sidebar header:
 - **WS dot** — WebSocket connection to the server (green = connected, orange = connecting, red = disconnected)
 - **Link dot** — Reticulum link to peer (green = active, gray = inactive)
 - **🌡** — Live CPU temperature (updates every 5 seconds)
+- **Peers** — Discovered LAN peers + connected peer count
+
+## Android (PWA)
+
+chatxz is PWA-ready — install it as a standalone app on your phone:
+
+1. **Run the server** on your LAN machine with `--share` flag
+2. **Open** `http://<server-lan-ip>:8742` in Chrome on Android
+3. **Tap menu** → "Add to Home Screen"
+4. A native-feeling app icon appears on your home screen
+
+### Run Server on Phone (Termux)
+
+```bash
+pkg install python git
+pip install rns aiohttp
+git clone https://github.com/narl3yyy-svg/chatzx.git
+cd chatzx
+python -m chatxz.web.server --share --port 8742
+```
+
+For a standalone APK with embedded Python, see `build-android.sh`.
 
 ## CLI Usage
 
@@ -159,10 +193,11 @@ All data is encrypted end-to-end by Reticulum. No plaintext is ever sent.
 1. **Web UI** connects to the local server via WebSocket at `/ws`
 2. **Server** manages Reticulum identity, links, and message routing
 3. **Peer discovery** is manual — click "Announce" to broadcast on LAN
-4. **File transfer** uses RNS Resources (reliable) + direct HTTP (fast) as a bonus
-5. **History** is persisted to `~/.config/chatxz/history.json`
-6. **Settings** stored in `~/.config/chatxz/settings.json`
-7. **Queue** stores offline messages in `~/.config/chatxz/queue.json`
+4. **File transfer** uses RNS Resources (reliable, with progress) + direct HTTP (bonus)
+5. **Delivery receipts** are sent automatically when messages are received and read
+6. **History** is persisted to `~/.config/chatxz/history.json`
+7. **Settings** stored in `~/.config/chatxz/settings.json`
+8. **Queue** stores offline messages in `~/.config/chatxz/queue.json`
 
 ## Directory Structure
 
