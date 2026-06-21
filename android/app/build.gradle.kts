@@ -47,9 +47,8 @@ chaquopy {
     defaultConfig {
         version = "3.13"
         pip {
-            options("--no-binary", "rns")
-            options("--no-binary", "pyserial")
-            install("rns")
+            install("../deps/rns-1.3.5.tar.gz")
+            install("../deps/pyserial-3.5.tar.gz")
             install("aiohttp")
         }
     }
