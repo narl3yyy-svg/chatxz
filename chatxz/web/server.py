@@ -76,15 +76,26 @@ class ChatWebServer:
 
     # HTTP handlers
 
+    def _static_dir(self):
+        candidates = [
+            Path(__file__).parent / "static",
+            Path.cwd() / "chatxz" / "web" / "static",
+            Path.cwd() / "static",
+        ]
+        for p in candidates:
+            if p.exists() and (p / "index.html").exists():
+                return p
+        return candidates[0]
+
     async def handle_index(self, request):
-        static_dir = Path(__file__).parent / "static"
+        static_dir = self._static_dir()
         index_path = static_dir / "index.html"
         if not index_path.exists():
-            return web.Response(text="Frontend not found", status=500)
+            return web.Response(text="Frontend not found - tried " + str(static_dir), status=500)
         return web.FileResponse(index_path)
 
     async def handle_static(self, request):
-        static_dir = Path(__file__).parent / "static"
+        static_dir = self._static_dir()
         filepath = static_dir / request.match_info["filename"]
         if not filepath.exists() or not filepath.is_file():
             return web.Response(text="Not found", status=404)

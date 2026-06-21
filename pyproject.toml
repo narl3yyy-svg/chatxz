@@ -20,5 +20,8 @@ tui = ["textual>=0.52"]
 full = ["pyaudio", "textual>=0.52"]
 
 [project.scripts]
-chatxz = "chatxz.app:main"
+chatzx = "chatxz.app:main"
 chatzx-web = "chatxz.web.server:main"
+
+[tool.setuptools.package-data]
+chatxz = ["web/static/*"]
