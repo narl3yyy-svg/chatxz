@@ -46,10 +46,6 @@ share_instance = No
 loglevel = 4
 
 [interfaces]
-  [[Default Interface]]
-    type = AutoInterface
-    enabled = Yes
-
   [[UDP Interface]]
     type = UDPInterface
     enabled = Yes
@@ -233,6 +229,7 @@ class ChatWebServer:
         self.active_peer = None
         self.discovery = None
         self._loop = None
+        self.rns_init_error = None
 
     def load_settings(self):
         try:
@@ -289,7 +286,11 @@ class ChatWebServer:
     def start_rns(self):
         rns_config_path = os.path.join(self.config_dir, "config")
         os.makedirs(self.config_dir, exist_ok=True)
-        if os.path.exists(rns_config_path):
+        if is_android():
+            with open(rns_config_path, "w") as f:
+                f.write(ANDROID_RNS_CONFIG)
+            print(f"[config] Applied Android RNS config at {rns_config_path}")
+        elif os.path.exists(rns_config_path):
             with open(rns_config_path) as f:
                 existing = f.read()
             modified = False
@@ -354,7 +355,7 @@ class ChatWebServer:
                 sys.exit(1)
             RNS.Reticulum(self.config_dir, loglevel=loglevel)
         except Exception as e:
-            if is_android() and not isinstance(e, OSError):
+            if self.embedded:
                 raise RuntimeError(f"RNS init failed: {e}") from e
             raise
         self.identity = self.identity_mgr.load_or_create()
@@ -456,6 +457,11 @@ class ChatWebServer:
         return resp
 
     async def handle_identity(self, request):
+        if not self.identity_mgr.identity:
+            try:
+                self.identity_mgr.load_or_create()
+            except Exception:
+                pass
         h = self.identity_mgr.get_hex_hash()
         contacts = []
         contacts_dir = os.path.join(self.config_dir, "contacts")
@@ -1158,16 +1164,39 @@ class ChatWebServer:
         app.router.add_get("/ws", self.handle_websocket)
 
     async def handle_health(self, request):
-        return web.Response(text="ok")
+        status = "ok" if not self.rns_init_error else "rns_error"
+        return web.json_response({
+            "status": status,
+            "rns_ready": self.messaging is not None,
+            "rns_error": self.rns_init_error,
+        })
+
+    async def _embedded_init_rns(self, app):
+        """Start Reticulum after the HTTP server is already listening."""
+        try:
+            my_hash = await asyncio.to_thread(self.start_rns)
+            print(f"[embedded] RNS ready, identity: {my_hash}")
+        except Exception:
+            import traceback
+            self.rns_init_error = traceback.format_exc()
+            print(f"[embedded] RNS init failed:\n{self.rns_init_error}")
 
     def run_embedded(self):
         """Blocking server loop for embedded hosts (Android/Chaquopy)."""
         app = web.Application()
         self._register_routes(app)
-        my_hash = self.start_rns()
-        app.on_startup.append(self._on_startup)
-        print(f"[embedded] chatxz identity: {my_hash}")
-        print(f"[embedded] http://{self.host}:{self.port}")
+
+        async def _embedded_startup(app):
+            self._loop = asyncio.get_running_loop()
+            asyncio.create_task(self._discovery_broadcaster())
+            asyncio.create_task(self._embedded_init_rns(app))
+            retention = self.load_settings().get("history_retention", "never")
+            if retention == "on_restart":
+                self.message_history = []
+                self._save_history()
+
+        app.on_startup.append(_embedded_startup)
+        print(f"[embedded] starting http://{self.host}:{self.port}")
 
         async def _serve():
             runner = web.AppRunner(app, access_log=None)

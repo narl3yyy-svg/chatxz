@@ -1,6 +1,7 @@
 package com.chatzx.android;
 
 import android.Manifest;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.webkit.WebView;
@@ -11,20 +12,27 @@ import android.webkit.WebChromeClient;
 import android.widget.Toast;
 import android.app.AlertDialog;
 
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 import com.chaquo.python.Python;
 import com.chaquo.python.PyObject;
-import com.chaquo.python.android.AndroidPlatform;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.util.ArrayList;
+import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
+    private static final int PERM_REQUEST = 1001;
+
     private WebView webView;
     private String serverUrl = "http://127.0.0.1:8742";
+    private boolean serverStarted = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -39,24 +47,19 @@ public class MainActivity extends AppCompatActivity {
                 FileOutputStream fos = openFileOutput("crash_log.txt", MODE_PRIVATE);
                 fos.write(stack.getBytes());
                 fos.close();
-                runOnUiThread(() -> new AlertDialog.Builder(this)
-                    .setTitle("App Error")
-                    .setMessage(stack.length() > 3000 ? stack.substring(stack.length() - 3000) : stack)
-                    .setPositiveButton("OK", null)
-                    .show());
+                runOnUiThread(() -> showError("App Error", stack));
             } catch (Exception ignored) {}
         });
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            requestPermissions(new String[]{
-                Manifest.permission.RECORD_AUDIO,
-                Manifest.permission.POST_NOTIFICATIONS,
-            }, 1);
-        }
-
         webView = new WebView(this);
         setContentView(webView);
+        setupWebView();
 
+        showLoading("Starting chatxz...");
+        requestNeededPermissions();
+    }
+
+    private void setupWebView() {
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -67,9 +70,10 @@ public class MainActivity extends AppCompatActivity {
 
         webView.setWebViewClient(new WebViewClient() {
             private int retryCount = 0;
+
             @Override
             public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
-                if (retryCount < 10) {
+                if (retryCount < 15) {
                     retryCount++;
                     view.postDelayed(() -> view.loadUrl(serverUrl), 1500);
                 }
@@ -82,20 +86,75 @@ public class MainActivity extends AppCompatActivity {
                 request.grant(request.getResources());
             }
         });
-
-        webView.loadDataWithBaseURL(null,
-            "<html><body style='background:#1a1a2e;color:#eee;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-family:sans-serif;font-size:18px'>Starting chatxz...</body></html>",
-            "text/html", "UTF-8", null);
-
-        startPythonServer();
     }
 
-    private void startPythonServer() {
+    private void showLoading(String message) {
+        String html = "<html><body style='background:#080a0f;color:#eef1f6;display:flex;"
+            + "align-items:center;justify-content:center;height:100vh;margin:0;"
+            + "font-family:sans-serif;font-size:18px'>" + escapeHtml(message) + "</body></html>";
+        webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
+    }
+
+    private void showError(String title, String message) {
+        String shortMsg = message.length() > 3500 ? message.substring(message.length() - 3500) : message;
+        String html = "<html><body style='background:#080a0f;color:#eef1f6;padding:20px;"
+            + "font-family:monospace;font-size:12px;white-space:pre-wrap'>"
+            + "<h2 style='color:#ff6b7a;font-family:sans-serif'>" + escapeHtml(title) + "</h2>"
+            + escapeHtml(shortMsg) + "</body></html>";
+        webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
+        new AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(shortMsg.length() > 2000 ? shortMsg.substring(shortMsg.length() - 2000) : shortMsg)
+            .setPositiveButton("OK", null)
+            .show();
+    }
+
+    private static String escapeHtml(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    private void requestNeededPermissions() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            startPythonServer();
+            return;
+        }
+
+        List<String> needed = new ArrayList<>();
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.RECORD_AUDIO);
+        }
+        // POST_NOTIFICATIONS only exists on Android 13+ — requesting it earlier crashes the app.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.POST_NOTIFICATIONS);
+        }
+
+        if (needed.isEmpty()) {
+            startPythonServer();
+        } else {
+            ActivityCompat.requestPermissions(this, needed.toArray(new String[0]), PERM_REQUEST);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == PERM_REQUEST) {
+            startPythonServer();
+        }
+    }
+
+    private synchronized void startPythonServer() {
+        if (serverStarted) return;
+        serverStarted = true;
+
         new Thread(() -> {
             try {
-                System.setProperty("CHATXZ_ANDROID", "1");
                 if (!Python.isStarted()) {
-                    Python.start(new AndroidPlatform(getApplicationContext()));
+                    throw new IllegalStateException("Python was not started in ChatxzApplication");
                 }
                 Python python = Python.getInstance();
                 PyObject module = python.getModule("main");
@@ -106,40 +165,30 @@ public class MainActivity extends AppCompatActivity {
                     serverUrl = "http://" + host + ":" + port;
                     runOnUiThread(() -> {
                         webView.loadUrl(serverUrl);
-                        Toast.makeText(this, "chatxz starting...", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(this, "chatxz ready", Toast.LENGTH_SHORT).show();
                     });
                 } else {
                     final String error = port;
-                    runOnUiThread(() -> {
-                        new AlertDialog.Builder(this)
-                            .setTitle("Server Error")
-                            .setMessage(error)
-                            .setPositiveButton("OK", null)
-                            .show();
-                    });
+                    File crashFile = new File(getFilesDir(), "python_crash_log.txt");
+                    try {
+                        FileOutputStream fos = new FileOutputStream(crashFile);
+                        fos.write(error.getBytes());
+                        fos.close();
+                    } catch (Exception ignored) {}
+                    runOnUiThread(() -> showError("Server Error", error));
                 }
             } catch (Exception e) {
-                String msg = e.getMessage();
-                if (msg == null) msg = "Python call error (null message)";
                 String stack = android.util.Log.getStackTraceString(e);
-                final String fullError = msg + "\n\n" + stack;
-
+                final String fullError = (e.getMessage() != null ? e.getMessage() : "Python error") + "\n\n" + stack;
                 File crashFile = new File(getFilesDir(), "python_crash_log.txt");
                 try {
                     FileOutputStream fos = new FileOutputStream(crashFile);
                     fos.write(fullError.getBytes());
                     fos.close();
                 } catch (Exception ignored) {}
-
-                runOnUiThread(() -> {
-                    new AlertDialog.Builder(this)
-                        .setTitle("Python Error")
-                        .setMessage(fullError)
-                        .setPositiveButton("OK", null)
-                        .show();
-                });
+                runOnUiThread(() -> showError("Python Error", fullError));
             }
-        }).start();
+        }, "chatxz-python").start();
     }
 
     @Override
