@@ -101,6 +101,12 @@ Open **http://localhost:8742** (or your LAN IP with `--share`).
 4. Click **Announce** to broadcast on LAN; discovered peers appear in the sidebar.
 5. Right-click any contact for Connect, Save Contact, or Delete.
 
+### Session & Startup Behavior
+
+- **Server restart** (including `git pull` + restart, or Restart Server from Settings) always starts **disconnected**. The main window shows the **Welcome to chatxz** screen — no chat messages until you connect to a peer.
+- **While the server stays running**, your active peer and chat stay visible. Refreshing the browser tab reconnects to the live session if the Reticulum link is still up.
+- **Chat history is saved locally** per peer. When you connect, messages for that peer load automatically. Disconnecting returns to the welcome screen without deleting history.
+
 ### Sending Files
 
 - **Single / multiple files** — 📎 button, or drag & drop onto the page

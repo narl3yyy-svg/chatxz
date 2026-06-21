@@ -231,6 +231,37 @@ class ChatWebServer:
         self._loop = None
         self.rns_init_error = None
 
+    @staticmethod
+    def _clean_hash(h):
+        return (h or "").replace("<", "").replace(">", "").replace(":", "").strip()
+
+    def _reset_connection_state(self):
+        """Clear peer session on server start — UI reconnects explicitly."""
+        if self.messaging and self.messaging.active_link:
+            try:
+                self.messaging.active_link.teardown()
+            except Exception:
+                pass
+            self.messaging.active_link = None
+        self.active_peer = None
+
+    def _history_for_peer(self, peer_hash, limit=500):
+        peer = self._clean_hash(peer_hash)
+        if not peer:
+            return self.message_history[-limit:]
+        my_hash = self._clean_hash(self.identity_mgr.get_hex_hash())
+        filtered = []
+        for m in self.message_history:
+            mp = self._clean_hash(m.get("peer"))
+            if mp:
+                if mp == peer:
+                    filtered.append(m)
+                continue
+            sender = self._clean_hash(m.get("sender"))
+            if sender in (peer, my_hash, "system"):
+                filtered.append(m)
+        return filtered[-limit:]
+
     def load_settings(self):
         try:
             with open(SETTINGS_FILE) as f:
@@ -384,10 +415,12 @@ class ChatWebServer:
         return my_hash
 
     def _on_message(self, chat_msg, sender_hash):
+        peer = self._clean_hash(sender_hash) if sender_hash and sender_hash != "system" else self._clean_hash(self.active_peer)
         entry = {
             "type": chat_msg.msg_type,
             "content": chat_msg.content,
             "sender": sender_hash or "system",
+            "peer": peer,
             "timestamp": chat_msg.timestamp,
             "file_name": chat_msg.file_name,
             "file_size": chat_msg.file_size,
@@ -475,9 +508,11 @@ class ChatWebServer:
             except:
                 contacts.append({"hash": f, "name": f})
         discovered = self.discovery.get_peers() if self.discovery else []
+        link_active = bool(self.messaging and self.messaging.active_link)
+        connected = self.active_peer if link_active and self.active_peer else None
         return web.json_response({
             "hash": h,
-            "connected": self.active_peer,
+            "connected": connected,
             "contacts": contacts,
             "discovered": discovered,
         })
@@ -715,6 +750,7 @@ class ChatWebServer:
                 "type": msg_type,
                 "content": save_path,
                 "sender": my_hash,
+                "peer": self._clean_hash(self.active_peer),
                 "timestamp": ts,
                 "file_name": fname,
                 "file_size": size,
@@ -783,6 +819,7 @@ class ChatWebServer:
                 "type": "file",
                 "content": zip_path,
                 "sender": my_hash,
+                "peer": self._clean_hash(self.active_peer),
                 "timestamp": ts,
                 "file_name": zip_name,
                 "file_size": zsize,
@@ -864,6 +901,7 @@ class ChatWebServer:
                 "type": "voice",
                 "content": voice_path,
                 "sender": my_hash,
+                "peer": self._clean_hash(self.active_peer),
                 "timestamp": ts,
                 "file_name": os.path.basename(voice_path),
                 "file_size": len(audio_bytes),
@@ -1020,6 +1058,9 @@ class ChatWebServer:
     async def handle_history(self, request):
         self._apply_retention()
         limit = int(request.query.get("limit", 500))
+        peer = request.query.get("peer", "")
+        if peer:
+            return web.json_response(self._history_for_peer(peer, limit))
         return web.json_response(self.message_history[-limit:])
 
     async def handle_websocket(self, request):
@@ -1092,6 +1133,7 @@ class ChatWebServer:
                             "type": result.msg_type,
                             "content": result.content,
                             "sender": my_hash,
+                            "peer": self._clean_hash(self.active_peer),
                             "timestamp": result.timestamp,
                             "msg_id": result.msg_id,
                             "status": "sent",
@@ -1123,6 +1165,7 @@ class ChatWebServer:
 
     async def _on_startup(self, app):
         self._loop = asyncio.get_running_loop()
+        self._reset_connection_state()
         print(f"[startup] Event loop captured: {self._loop}")
         asyncio.create_task(self._discovery_broadcaster())
         retention = self.load_settings().get("history_retention", "never")
@@ -1188,6 +1231,7 @@ class ChatWebServer:
 
         async def _embedded_startup(app):
             self._loop = asyncio.get_running_loop()
+            self._reset_connection_state()
             asyncio.create_task(self._discovery_broadcaster())
             asyncio.create_task(self._embedded_init_rns(app))
             retention = self.load_settings().get("history_retention", "never")
