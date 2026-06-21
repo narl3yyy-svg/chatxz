@@ -1,5 +1,7 @@
 package com.chatzx.android;
 
+import android.Manifest;
+import android.os.Build;
 import android.os.Bundle;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -37,9 +39,20 @@ public class MainActivity extends AppCompatActivity {
                 FileOutputStream fos = openFileOutput("crash_log.txt", MODE_PRIVATE);
                 fos.write(stack.getBytes());
                 fos.close();
+                runOnUiThread(() -> new AlertDialog.Builder(this)
+                    .setTitle("App Error")
+                    .setMessage(stack.length() > 3000 ? stack.substring(stack.length() - 3000) : stack)
+                    .setPositiveButton("OK", null)
+                    .show());
             } catch (Exception ignored) {}
-            android.os.Process.killProcess(android.os.Process.myPid());
         });
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            requestPermissions(new String[]{
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.POST_NOTIFICATIONS,
+            }, 1);
+        }
 
         webView = new WebView(this);
         setContentView(webView);
@@ -80,6 +93,7 @@ public class MainActivity extends AppCompatActivity {
     private void startPythonServer() {
         new Thread(() -> {
             try {
+                System.setProperty("CHATXZ_ANDROID", "1");
                 if (!Python.isStarted()) {
                     Python.start(new AndroidPlatform(getApplicationContext()));
                 }

@@ -3,7 +3,6 @@ import urllib.request
 from chatxz.utils.helpers import format_speed
 
 APP_NAME = "chatxz"
-ANNOUNCE_INTERVAL = 30
 DIRECT_TRANSFER_THRESHOLD = 256 * 1024
 
 MESSAGE_TYPE_TEXT = "text"

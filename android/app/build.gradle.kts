@@ -11,8 +11,8 @@ android {
         applicationId = "com.chatzx.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.2.0"
+        versionCode = 2
+        versionName = "0.3.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -47,8 +47,9 @@ chaquopy {
     defaultConfig {
         version = "3.13"
         pip {
-            install("../deps/rns-1.3.5.tar.gz")
+            install("cryptography>=41.0.0")
             install("../deps/pyserial-3.5.tar.gz")
+            install("../deps/rns-1.3.5.tar.gz")
             install("aiohttp")
         }
     }

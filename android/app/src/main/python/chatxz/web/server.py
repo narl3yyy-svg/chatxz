@@ -1,4 +1,4 @@
-import os, json, time, base64, mimetypes, asyncio, socket, zipfile, shutil, subprocess, tempfile
+import os, json, time, base64, mimetypes, asyncio, socket, zipfile, shutil, subprocess, tempfile, signal, re, sys
 from pathlib import Path
 
 from aiohttp import web
@@ -8,7 +8,8 @@ from chatxz.core.identity import IdentityManager
 from chatxz.core.messaging import MessagingBackend
 from chatxz.core.voice import VoiceRecorder, VoicePlayer
 from chatxz.core.discovery import PeerDiscovery
-from chatxz.utils.helpers import get_config_dir, get_data_dir, format_size, format_speed, truncate_hash
+from chatxz.utils.helpers import get_config_dir, get_data_dir, format_speed
+from chatxz.utils.platform import is_android, lan_ip as platform_lan_ip
 from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 
 CONFIG_DIR = get_config_dir()
@@ -37,7 +38,31 @@ loglevel = 3
     ifac_size = 16
 """
 
+ANDROID_RNS_CONFIG = """[reticulum]
+enable_transport = No
+share_instance = No
+
+[logging]
+loglevel = 4
+
+[interfaces]
+  [[Default Interface]]
+    type = AutoInterface
+    enabled = Yes
+
+  [[UDP Interface]]
+    type = UDPInterface
+    enabled = Yes
+    listen_ip = 0.0.0.0
+    listen_port = 4242
+    forward_ip = 255.255.255.255
+    forward_port = 4242
+    ifac_size = 16
+"""
+
 def detect_lan_ip():
+    if is_android():
+        return platform_lan_ip()
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.5)
@@ -45,28 +70,151 @@ def detect_lan_ip():
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except:
+    except OSError:
         return None
 
 def cleanup_rns_stale():
+    if is_android():
+        return
     import glob as _glob
     for p in _glob.glob("/tmp/rns/*/socket"):
         try:
             os.unlink(p)
             print(f"[cleanup] Removed stale RNS socket: {p}")
-        except:
+        except OSError:
             pass
     for p in _glob.glob("/tmp/rns/*"):
         try:
             os.rmdir(p)
-        except:
+        except OSError:
             pass
 
+
+def _proc_cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _is_chatzx_process(pid):
+    cmd = _proc_cmdline(pid)
+    return "chatxz" in cmd and "grok" not in cmd.lower()
+
+
+def _port_holder_pids(port, udp=True):
+    pids = []
+    try:
+        flag = "-u" if udp else "-t"
+        result = subprocess.run(
+            ["ss", "-H", "-n", flag, "-lp"],
+            capture_output=True, text=True, timeout=3,
+        )
+        needle = f":{port}"
+        for line in result.stdout.splitlines():
+            if needle not in line:
+                continue
+            for match in re.finditer(r"pid=(\d+)", line):
+                pids.append(int(match.group(1)))
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return list(dict.fromkeys(pids))
+
+
+def _is_port_in_use(port, sock_type=socket.SOCK_DGRAM, host="0.0.0.0"):
+    try:
+        s = socket.socket(socket.AF_INET, sock_type)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, port))
+        s.close()
+        return False
+    except OSError:
+        return True
+
+
+def stop_stale_chatzx_servers(exclude_pid=None):
+    """Stop other chatxz server/cli processes holding RNS ports."""
+    if is_android():
+        return 0
+    exclude_pid = exclude_pid or os.getpid()
+    targets = set()
+    for port in (4242, 8742):
+        for pid in _port_holder_pids(port, udp=(port == 4242)):
+            if pid != exclude_pid and _is_chatzx_process(pid):
+                targets.add(pid)
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "chatxz\\.web\\.server|chatxz\\.app|chatxz-web"],
+            capture_output=True, text=True, timeout=3,
+        )
+        for pid_str in result.stdout.split():
+            pid = int(pid_str)
+            if pid != exclude_pid:
+                targets.add(pid)
+    except (ValueError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    if not targets:
+        return 0
+
+    print(f"[startup] Stopping stale chatxz process(es): {', '.join(str(p) for p in sorted(targets))}")
+    for pid in sorted(targets):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            print(f"[startup] No permission to stop PID {pid}")
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if not any(os.path.exists(f"/proc/{p}") for p in targets):
+            break
+        time.sleep(0.2)
+
+    for pid in sorted(targets):
+        if os.path.exists(f"/proc/{pid}"):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    cleanup_rns_stale()
+    return len(targets)
+
+
+def ensure_rns_ports_free(force=False):
+    """Free UDP 4242 (RNS) before startup; exit with a clear message if blocked."""
+    if is_android():
+        return True
+    if not _is_port_in_use(4242):
+        return True
+
+    holders = _port_holder_pids(4242, udp=True)
+    chatxz_holders = [p for p in holders if _is_chatzx_process(p)]
+
+    if chatxz_holders or force:
+        stop_stale_chatzx_servers()
+        time.sleep(0.5)
+        if not _is_port_in_use(4242):
+            return True
+
+    holders = _port_holder_pids(4242, udp=True)
+    holder_txt = ", ".join(f"PID {p} ({_proc_cmdline(p)[:60]})" for p in holders) or "unknown"
+    print(f"[startup] ERROR: UDP port 4242 is already in use by {holder_txt}")
+    print("[startup] Another chatxz/RNS instance is probably still running.")
+    print("[startup] Stop it with:  pkill -f chatxz.web.server")
+    print("[startup] Or restart with:  ./run.sh web --share --force")
+    return False
+
 class ChatWebServer:
-    def __init__(self, host="127.0.0.1", port=8742, verbose=False):
+    def __init__(self, host="127.0.0.1", port=8742, verbose=False, force=False, embedded=False):
         self.host = host
         self.port = port
         self.verbose = verbose
+        self.force = force
+        self.embedded = embedded
         self.config_dir = CONFIG_DIR
         self.data_dir = DATA_DIR
         os.makedirs(self.config_dir, exist_ok=True)
@@ -81,7 +229,7 @@ class ChatWebServer:
 
         self.websockets = set()
         self.message_history = self._load_history()
-        self.contact_list = {}
+
         self.active_peer = None
         self.discovery = None
         self._loop = None
@@ -179,24 +327,36 @@ class ChatWebServer:
                     f.write(existing)
                 print(f"[config] Disabled share_instance")
         else:
+            template = ANDROID_RNS_CONFIG if is_android() else DEFAULT_RNS_CONFIG
             with open(rns_config_path, "w") as f:
-                f.write(DEFAULT_RNS_CONFIG)
+                f.write(template)
             print(f"[config] Created RNS config at {rns_config_path}")
 
-        cleanup_rns_stale()
+        if not ensure_rns_ports_free(force=self.force):
+            msg = "UDP port 4242 is already in use"
+            if self.embedded:
+                raise RuntimeError(msg)
+            sys.exit(1)
 
         loglevel = RNS.LOG_DEBUG if self.verbose else RNS.LOG_NOTICE
         try:
             RNS.Reticulum(self.config_dir, loglevel=loglevel)
         except OSError as e:
             print(f"[RNS] Bind error: {e}")
-            print("[RNS] Cleaning up and retrying...")
-            import subprocess
-            subprocess.run(["pkill", "-f", "Reticulum"], capture_output=True)
-            import time
-            time.sleep(2)
-            cleanup_rns_stale()
+            if is_android():
+                raise RuntimeError(f"RNS failed to start: {e}") from e
+            print("[RNS] Retrying after stopping stale instances...")
+            stop_stale_chatzx_servers()
+            time.sleep(1)
+            if not ensure_rns_ports_free(force=True):
+                if self.embedded:
+                    raise RuntimeError("UDP port 4242 is already in use")
+                sys.exit(1)
             RNS.Reticulum(self.config_dir, loglevel=loglevel)
+        except Exception as e:
+            if is_android() and not isinstance(e, OSError):
+                raise RuntimeError(f"RNS init failed: {e}") from e
+            raise
         self.identity = self.identity_mgr.load_or_create()
         settings = self.load_settings()
         my_ip = detect_lan_ip()
@@ -270,6 +430,8 @@ class ChatWebServer:
             Path.cwd() / "chatxz" / "web" / "static",
             Path.cwd() / "static",
         ]
+        if is_android():
+            candidates.append(Path(__file__).resolve().parent / "static")
         for p in candidates:
             if p.exists() and (p / "index.html").exists():
                 return p
@@ -348,7 +510,7 @@ class ChatWebServer:
             peer_hash = data.get("hash", "").strip()
             if not peer_hash:
                 return web.json_response({"error": "hash required"}, status=400)
-            ok = self.messaging.connect_to(peer_hash)
+            ok = await asyncio.to_thread(self.messaging.connect_to, peer_hash)
             if ok:
                 clean = peer_hash.replace("<", "").replace(">", "").replace(":", "").strip()
                 self.active_peer = clean
@@ -396,6 +558,8 @@ class ChatWebServer:
             self.messaging.receive_dir = path
 
     def _pick_directory_native(self):
+        if is_android():
+            return None
         settings = self.load_settings()
         start = settings.get("received_dir", os.path.join(self.config_dir, "received"))
         start = os.path.expanduser(start)
@@ -469,6 +633,8 @@ class ChatWebServer:
             return web.json_response({"error": str(e)}, status=400)
 
     async def handle_restart(self, request):
+        if is_android():
+            return web.json_response({"error": "Restart is not supported on Android"}, status=400)
         import sys, os
         args = [sys.executable]
         if sys.argv and (sys.argv[0].endswith('.py') or os.sep in sys.argv[0]):
@@ -880,14 +1046,15 @@ class ChatWebServer:
         last_count = -1
         while True:
             await asyncio.sleep(3)
-            if self.discovery:
-                peers = self.discovery.get_peers()
-                count = len(peers)
-                if count != last_count:
-                    print(f"[broadcaster] {count} peer(s), {len(self.websockets)} ws client(s)")
-                    last_count = count
-                if peers:
-                    await self._broadcast({"type": "peers", "data": peers})
+            if not self.websockets or not self.discovery:
+                continue
+            peers = self.discovery.get_peers()
+            count = len(peers)
+            if count != last_count:
+                print(f"[broadcaster] {count} peer(s), {len(self.websockets)} ws client(s)")
+                last_count = count
+            if peers:
+                await self._broadcast({"type": "peers", "data": peers})
 
     async def handle_discover(self, request):
         peers = self.discovery.get_peers() if self.discovery else []
@@ -933,7 +1100,7 @@ class ChatWebServer:
         elif msg_type == "connect":
             peer_hash = data.get("hash", "")
             if peer_hash and self.messaging:
-                ok = self.messaging.connect_to(peer_hash)
+                ok = await asyncio.to_thread(self.messaging.connect_to, peer_hash)
                 if ok:
                     clean = peer_hash.replace("<", "").replace(">", "").replace(":", "").strip()
                     self.active_peer = clean
@@ -958,9 +1125,7 @@ class ChatWebServer:
             self._save_history()
             print("[history] Cleared on restart")
 
-    def run(self):
-        app = web.Application()
-
+    def _register_routes(self, app):
         app.router.add_get("/", self.handle_index)
         app.router.add_get("/static/{filename:.*}", self.handle_static)
         app.router.add_get("/api/identity", self.handle_identity)
@@ -989,10 +1154,35 @@ class ChatWebServer:
         app.router.add_post("/api/restart", self.handle_restart)
         app.router.add_get("/api/temperature", self.handle_temperature)
         app.router.add_get("/api/cpu", self.handle_cpu)
+        app.router.add_get("/api/health", self.handle_health)
         app.router.add_get("/ws", self.handle_websocket)
 
-        my_hash = self.start_rns()
+    async def handle_health(self, request):
+        return web.Response(text="ok")
 
+    def run_embedded(self):
+        """Blocking server loop for embedded hosts (Android/Chaquopy)."""
+        app = web.Application()
+        self._register_routes(app)
+        my_hash = self.start_rns()
+        app.on_startup.append(self._on_startup)
+        print(f"[embedded] chatxz identity: {my_hash}")
+        print(f"[embedded] http://{self.host}:{self.port}")
+
+        async def _serve():
+            runner = web.AppRunner(app, access_log=None)
+            await runner.setup()
+            site = web.TCPSite(runner, self.host, self.port, reuse_address=True)
+            await site.start()
+            while True:
+                await asyncio.sleep(3600)
+
+        asyncio.run(_serve())
+
+    def run(self):
+        app = web.Application()
+        self._register_routes(app)
+        my_hash = self.start_rns()
         app.on_startup.append(self._on_startup)
 
         print(f"chatxz web server v0.1.0")
@@ -1010,9 +1200,11 @@ def main():
     parser.add_argument("--port", type=int, default=8742, help="Port")
     parser.add_argument("--share", action="store_true", help="Listen on 0.0.0.0 (accessible on LAN)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show RNS debug logs")
+    parser.add_argument("--force", "-f", action="store_true",
+                        help="Stop any existing chatxz server before starting")
     args = parser.parse_args()
     host = "0.0.0.0" if args.share else args.host
-    server = ChatWebServer(host=host, port=args.port, verbose=args.verbose)
+    server = ChatWebServer(host=host, port=args.port, verbose=args.verbose, force=args.force)
     server.run()
 
 

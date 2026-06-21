@@ -1,18 +1,24 @@
 import os
 
+from chatxz.utils.platform import is_android, storage_root
+
+
 def get_config_dir():
+    if is_android():
+        return storage_root()
     xdg = os.environ.get("XDG_CONFIG_HOME")
     if xdg:
         return os.path.join(xdg, "chatxz")
-    home = os.path.expanduser("~")
-    return os.path.join(home, ".config", "chatxz")
+    return os.path.join(os.path.expanduser("~"), ".config", "chatxz")
+
 
 def get_data_dir():
+    if is_android():
+        return os.path.join(storage_root(), "data")
     xdg = os.environ.get("XDG_DATA_HOME")
     if xdg:
         return os.path.join(xdg, "chatxz")
-    home = os.path.expanduser("~")
-    return os.path.join(home, ".local", "share", "chatxz")
+    return os.path.join(os.path.expanduser("~"), ".local", "share", "chatxz")
 
 def format_size(size_bytes):
     if size_bytes < 0:

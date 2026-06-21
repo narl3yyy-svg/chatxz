@@ -184,14 +184,21 @@ Web UI (browser)  ←WebSocket/HTTP→  Local Server (aiohttp)
 
 Download `chatxz.apk` from [Releases](https://github.com/narl3yyy-svg/chatzx/releases).
 
-The APK bundles Python 3.13, RNS, aiohttp, and the chatxz web UI in a WebView. Built automatically on version tags via GitHub Actions.
+The APK bundles Python 3.13, RNS, cryptography, aiohttp, and the full chatxz web server in a WebView. On launch it starts the same `ChatWebServer` used on desktop (Reticulum + WebSocket + file transfer), with Android-specific storage paths and RNS config.
+
+### Build locally
 
 ```bash
+# Sync latest Python sources into the Android bundle
+bash scripts/sync-android.sh
+
 cd android && ./gradlew assembleDebug
 # Output: android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 Requires Android SDK 34, JDK 17, Gradle 8.x. CPU: arm64-v8a.
+
+GitHub Actions runs `scripts/sync-android.sh` before each APK build. Push a tag like `v0.3.0` or use **workflow_dispatch** to trigger a build.
 
 ## Development
 
