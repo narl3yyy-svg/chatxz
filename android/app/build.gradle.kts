@@ -40,7 +40,7 @@ android {
 
 chaquopy {
     defaultConfig {
-        buildPython("/usr/bin/python3")
+        version = "3.13"
         pip {
             install("rns")
             install("aiohttp")
