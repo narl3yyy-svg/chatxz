@@ -5,6 +5,28 @@ import sys
 
 _android = None
 _files_dir = None
+_signals_patched = False
+
+
+def patch_embedded_signals():
+    """RNS registers SIG handlers; Android/Chaquopy runs Python off the main interpreter thread."""
+    global _signals_patched
+    if _signals_patched:
+        return
+    import signal
+
+    _real_signal = signal.signal
+
+    def _safe_signal(signum, handler):
+        try:
+            return _real_signal(signum, handler)
+        except ValueError as exc:
+            if "signal only works in main thread" in str(exc):
+                return None
+            raise
+
+    signal.signal = _safe_signal
+    _signals_patched = True
 
 
 def is_android():

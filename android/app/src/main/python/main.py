@@ -8,6 +8,12 @@ import traceback
 
 os.environ.setdefault("CHATXZ_ANDROID", "1")
 
+try:
+    from chatxz.utils.platform import patch_embedded_signals
+    patch_embedded_signals()
+except Exception:
+    pass
+
 HOST, PORT = "127.0.0.1", 8742
 _server_error = []
 

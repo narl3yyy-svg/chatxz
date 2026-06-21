@@ -14,6 +14,7 @@ from chatxz.utils.platform import (
     lan_ip as platform_lan_ip,
     lan_broadcast,
     android_storage_dirs,
+    patch_embedded_signals,
 )
 from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 
@@ -333,6 +334,8 @@ class ChatWebServer:
             ]
 
     def start_rns(self):
+        if self.embedded or is_android():
+            patch_embedded_signals()
         rns_config_path = os.path.join(self.config_dir, "config")
         os.makedirs(self.config_dir, exist_ok=True)
         if is_android():
