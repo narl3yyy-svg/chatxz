@@ -87,18 +87,46 @@ def start_server():
 
     async def cpu(request):
         try:
-            with open("/proc/stat") as f:
-                p = [int(x) for x in f.readline().split()[1:]]
-            t1, i1 = sum(p), p[3]
-            await asyncio.sleep(0.3)
-            with open("/proc/stat") as f:
-                p = [int(x) for x in f.readline().split()[1:]]
-            t2, i2 = sum(p), p[3]
-            td, id_ = t2 - t1, i2 - i1
-            pct = round(100.0 * (1.0 - id_ / td), 1) if td > 0 else 0.0
-            return web.json_response({"cpu_percent": pct})
+            # Count CPUs for loadavg fallback
+            nproc = 0
+            try:
+                with open("/proc/cpuinfo") as f:
+                    nproc = sum(1 for l in f if l.startswith("processor"))
+            except:
+                pass
+            if nproc == 0:
+                try:
+                    nproc = len(os.listdir("/sys/devices/system/cpu/"))
+                except:
+                    pass
+
+            # Try /proc/stat with delta
+            try:
+                with open("/proc/stat") as f:
+                    p = [int(x) for x in f.readline().split()[1:]]
+                t1, i1 = sum(p), p[3]
+                await asyncio.sleep(0.3)
+                with open("/proc/stat") as f:
+                    p = [int(x) for x in f.readline().split()[1:]]
+                t2, i2 = sum(p), p[3]
+                td, id_ = t2 - t1, i2 - i1
+                pct = round(100.0 * (1.0 - id_ / td), 1) if td > 0 else 0.0
+                return web.json_response({"cpu_percent": pct})
+            except (PermissionError, FileNotFoundError, IndexError, ValueError) as e:
+                # Fallback: estimate from loadavg
+                try:
+                    with open("/proc/loadavg") as f:
+                        la = float(f.read().split()[0])
+                    if nproc > 0:
+                        pct = min(round(la / nproc * 100, 1), 100.0)
+                        return web.json_response({"cpu_percent": pct, "approx": True})
+                except:
+                    pass
+                raise  # re-raise original if loadavg fallback also fails
         except Exception as e:
-            return web.json_response({"cpu_percent": None, "error": str(e)})
+            import traceback
+            tb = traceback.format_exc()
+            return web.json_response({"cpu_percent": None, "error": str(e), "traceback": tb})
 
     app.router.add_get("/", index)
     app.router.add_get("/static/{filename:.*}", static)

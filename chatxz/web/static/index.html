@@ -548,9 +548,10 @@ function pollCpu() {
     .then(d => {
       const el = document.getElementById('cpu-display');
       if (d.cpu_percent != null) {
-        el.textContent = '⚡ ' + d.cpu_percent + '%';
+        el.textContent = '⚡ ' + d.cpu_percent + '%' + (d.approx ? '~' : '');
       } else {
         el.textContent = '⚡ --%';
+        if (d.traceback) console.warn('CPU error:\n' + d.traceback);
       }
     })
     .catch(() => {
