@@ -215,6 +215,12 @@ body {
 }
 
 /* Scrollbar */
+#ws-dot.connected { background: var(--success); }
+#ws-dot.disconnected { background: #f00; }
+#ws-dot.connecting { background: #ffa500; }
+#link-dot.connected { background: var(--success); }
+#link-dot.disconnected { background: #666; }
+
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.1); border-radius: 3px; }
@@ -244,10 +250,18 @@ body {
       </div>
       <h3 style="margin-top:12px">Discovered on LAN</h3>
       <div id="discovered-list"></div>
-      <div id="debug-bar" style="margin-top:8px;padding:6px 8px;font-size:10px;color:var(--text2);border-top:1px solid rgba(255,255,255,.05)">
-        <div id="ws-status">WS: connecting...</div>
-        <div id="peer-count">Peers: 0</div>
-        <div id="queue-count" style="display:none"></div>
+      <div id="debug-bar" style="padding:8px;font-size:10px;color:var(--text2);border-top:1px solid rgba(255,255,255,.05)">
+        <div id="ws-status" style="display:flex;align-items:center;gap:4px">
+          <span id="ws-dot" style="width:6px;height:6px;border-radius:50%;background:#666;display:inline-block"></span>
+          WS: connecting...
+        </div>
+        <div id="link-status" style="display:flex;align-items:center;gap:4px;margin-top:2px">
+          <span id="link-dot" style="width:6px;height:6px;border-radius:50%;background:#666;display:inline-block"></span>
+          Link: inactive
+        </div>
+        <div id="peer-count" style="margin-top:2px">Peers: 0</div>
+        <div id="temp-display" style="margin-top:2px">🌡 --°C</div>
+        <div id="queue-count" style="display:none;margin-top:2px"></div>
       </div>
     </div>
   </div>
@@ -275,6 +289,8 @@ body {
           <button class="input-btn" id="voice-btn" onclick="toggleVoice()" title="Voice note">🎤</button>
           <button class="input-btn" id="file-btn" onclick="document.getElementById('file-input').click()" title="Attach file">📎</button>
           <input type="file" id="file-input" style="display:none" multiple onchange="uploadFiles(this.files)">
+          <button class="input-btn" id="folder-btn" onclick="document.getElementById('folder-input').click()" title="Attach folder">📁</button>
+          <input type="file" id="folder-input" style="display:none" webkitdirectory multiple onchange="uploadFolder(this.files)">
           <button class="input-btn" id="send-btn" onclick="sendMessage()" title="Send">➤</button>
         </div>
       </div>
@@ -321,15 +337,11 @@ body {
 
 <!-- Settings dialog -->
 <div id="settings-dialog">
-  <div class="dialog">
+  <div class="dialog" style="max-height:90vh;overflow-y:auto">
     <h2>Settings</h2>
     <div class="settings-section">
       <label>Display Name (shown in announces)</label>
       <input id="settings-name" placeholder="Your name...">
-    </div>
-    <div class="settings-section">
-      <label>Announce Interval (seconds)</label>
-      <input id="settings-interval" type="number" value="30" min="5" max="3600">
     </div>
     <div class="settings-section">
       <label>Chat History Retention</label>
@@ -341,16 +353,26 @@ body {
         <option value="12m">12 months</option>
         <option value="never">Never delete</option>
       </select>
+      <button class="dlg-btn secondary" style="margin-top:6px;width:100%" onclick="clearHistory()">Clear History Now</button>
     </div>
     <div class="settings-section">
+      <label>Save Received Files To</label>
+      <div style="display:flex;gap:4px">
+        <input id="settings-files-dir" style="flex:1;font-size:11px;color:var(--text2)">
+        <button class="dlg-btn secondary" onclick="document.getElementById('folder-picker').click()" title="Browse">📂</button>
+      </div>
+      <input type="file" id="folder-picker" style="display:none" webkitdirectory onchange="pickReceivedDir(this)">
+    </div>
+    <div class="settings-section" style="border-top:1px solid rgba(255,255,255,.1);padding-top:12px">
       <p>Your identity hash:</p>
-      <input id="settings-hash" readonly style="font-size:11px;color:var(--text2)">
+      <input id="settings-hash" readonly style="font-size:11px;color:var(--text2);margin-bottom:6px">
+      <button class="dlg-btn secondary" style="width:100%" onclick="regenerateIdentity()">🔄 Regenerate Identity</button>
+      <div style="font-size:11px;color:var(--text2);margin-top:4px">Old identity is backed up. Reconnect all peers after changing.</div>
     </div>
-    <div class="settings-section">
-      <p>Received files are saved to:</p>
-      <input id="settings-files-dir" readonly style="font-size:11px;color:var(--text2)">
+    <div class="settings-section" style="border-top:1px solid rgba(255,255,255,.1);padding-top:12px">
+      <button class="dlg-btn secondary" style="width:100%;color:var(--danger)" onclick="restartServer()">🔄 Restart Server</button>
     </div>
-    <div class="dlg-btn-row">
+    <div class="dlg-btn-row" style="margin-top:12px">
       <button class="dlg-btn secondary" onclick="closeSettings()">Cancel</button>
       <button class="dlg-btn primary" onclick="saveSettings()">Save</button>
     </div>
@@ -410,18 +432,7 @@ function fetchIdentity() {
         setConnected(d.connected);
       }
     });
-  fetch('/api/queue')
-    .then(r => r.json())
-    .then(q => {
-      var el = document.getElementById('queue-count');
-      if (q.count > 0) {
-        el.style.display = 'block';
-        el.textContent = 'Queue: ' + q.count + ' pending';
-      } else {
-        el.style.display = 'none';
-      }
-    })
-    .catch(() => {});
+  pollQueue();
 }
 
 function connectWS() {
@@ -429,7 +440,7 @@ function connectWS() {
   ws = new WebSocket(proto + '//' + location.host + '/ws');
   ws.onopen = () => {
     console.log('[ws] Connected');
-    document.getElementById('ws-status').textContent = 'WS: connected';
+    document.getElementById('ws-status').innerHTML = '<span id="ws-dot" class="connected" style="width:6px;height:6px;border-radius:50%;display:inline-block"></span> WS: connected';
   };
   ws.onmessage = e => {
     console.log('[ws] Received:', e.data.substring(0, 200));
@@ -440,7 +451,8 @@ function connectWS() {
   };
   ws.onclose = () => {
     console.log('[ws] Disconnected, reconnecting...');
-    document.getElementById('ws-status').textContent = 'WS: disconnected';
+    document.getElementById('ws-status').innerHTML = '<span id="ws-dot" class="disconnected" style="width:6px;height:6px;border-radius:50%;display:inline-block"></span> WS: disconnected';
+    document.getElementById('link-status').innerHTML = '<span id="link-dot" class="disconnected" style="width:6px;height:6px;border-radius:50%;display:inline-block"></span> Link: inactive';
     setTimeout(connectWS, 2000);
   };
   ws.onerror = (e) => {
@@ -489,11 +501,52 @@ function startPeerPolling() {
     fetch('/api/discover')
       .then(r => r.json())
       .then(d => {
-        console.log('[poll] /api/discover returned', d.peers ? d.peers.length : 0, 'peers');
         renderDiscovered(d.peers);
       })
-      .catch((e) => console.error('[poll] error:', e));
+      .catch(() => {});
+    pollTemperature();
+    pollQueue();
   }, 5000);
+}
+
+function pollTemperature() {
+  fetch('/api/temperature')
+    .then(r => r.json())
+    .then(d => {
+      const temps = d.temperatures || {};
+      const el = document.getElementById('temp-display');
+      if (Object.keys(temps).length === 0) {
+        el.textContent = '🌡 --°C';
+        return;
+      }
+      let labels = [];
+      for (const [k, v] of Object.entries(temps)) {
+        if (typeof v === 'number') labels.push(k + ': ' + v + '°C');
+      }
+      if (labels.length === 0) {
+        el.textContent = '🌡 --°C';
+      } else {
+        el.textContent = '🌡 ' + labels.join(' | ');
+      }
+    })
+    .catch(() => {
+      document.getElementById('temp-display').textContent = '🌡 --°C';
+    });
+}
+
+function pollQueue() {
+  fetch('/api/queue')
+    .then(r => r.json())
+    .then(q => {
+      var el = document.getElementById('queue-count');
+      if (q.count > 0) {
+        el.style.display = 'block';
+        el.textContent = 'Queue: ' + q.count + ' pending';
+      } else {
+        el.style.display = 'none';
+      }
+    })
+    .catch(() => {});
 }
 
 function renderContacts(contacts) {
@@ -659,15 +712,10 @@ function showSettings() {
     .then(r => r.json())
     .then(s => {
       document.getElementById('settings-name').value = s.name || '';
-      document.getElementById('settings-interval').value = s.announce_interval || 30;
       document.getElementById('settings-retention').value = s.history_retention || 'never';
       document.getElementById('settings-hash').value = myHash;
+      document.getElementById('settings-files-dir').value = s.received_dir || '';
       document.getElementById('settings-dialog').classList.add('open');
-    });
-  fetch('/api/debug')
-    .then(r => r.json())
-    .then(d => {
-      document.getElementById('settings-files-dir').value = d.received_files_dir || '~/.config/chatxz/received';
     });
 }
 
@@ -677,12 +725,12 @@ function closeSettings() {
 
 function saveSettings() {
   const name = document.getElementById('settings-name').value.trim();
-  const interval = parseInt(document.getElementById('settings-interval').value) || 30;
   const retention = document.getElementById('settings-retention').value;
+  const received_dir = document.getElementById('settings-files-dir').value.trim();
   fetch('/api/settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name, announce_interval: interval, history_retention: retention})
+    body: JSON.stringify({name, history_retention: retention, received_dir})
   }).then(r => r.json()).then(d => {
     if (d.status === 'ok') {
       toast('Settings saved');
@@ -690,6 +738,14 @@ function saveSettings() {
     } else {
       toast('Failed to save settings');
     }
+  });
+}
+
+function clearHistory() {
+  if (!confirm('Delete all chat history?')) return;
+  fetch('/api/history?limit=0').then(() => {
+    document.getElementById('messages').innerHTML = '';
+    toast('History cleared');
   });
 }
 
@@ -702,6 +758,7 @@ function setConnected(hash) {
   document.getElementById('input-area').style.display = 'block';
   document.getElementById('disconnect-btn').style.display = 'block';
   document.getElementById('msg-input').focus();
+  document.getElementById('link-status').innerHTML = '<span id="link-dot" class="connected" style="width:6px;height:6px;border-radius:50%;display:inline-block"></span> Link: active';
   fetchIdentity();
 }
 
@@ -714,6 +771,7 @@ function disconnect() {
   document.getElementById('messages').style.display = 'none';
   document.getElementById('input-area').style.display = 'none';
   document.getElementById('disconnect-btn').style.display = 'none';
+  document.getElementById('link-status').innerHTML = '<span id="link-dot" class="disconnected" style="width:6px;height:6px;border-radius:50%;display:inline-block"></span> Link: inactive';
   fetchIdentity();
 }
 
@@ -866,6 +924,51 @@ function uploadFiles(files) {
         else if (d.status === 'queued') toast(`Queued ${d.name} (${d.size})`);
         else toast('Upload failed: ' + (d.error || ''));
       });
+  });
+}
+
+function uploadFolder(files) {
+  Array.from(files).forEach(file => {
+    const formData = new FormData();
+    formData.append('file', file);
+    fetch('/api/file', {method: 'POST', body: formData})
+      .then(r => r.json()).then(d => {
+        if (d.status === 'ok') toast(`Sent ${d.name}`);
+        else if (d.status === 'queued') toast(`Queued ${d.name} (${d.size})`);
+      });
+  });
+  toast(`Uploading ${files.length} file(s)...`);
+}
+
+function pickReceivedDir(input) {
+  if (input.files && input.files.length > 0) {
+    const path = input.files[0].webkitRelativePath || input.files[0].name;
+    const dir = path.substring(0, path.lastIndexOf('/'));
+    document.getElementById('settings-files-dir').value = dir || '/home/' + input.files[0].name;
+  }
+}
+
+function regenerateIdentity() {
+  if (!confirm('Generate a new identity? Your old identity will be backed up. All peers will need to reconnect with the new hash.')) return;
+  fetch('/api/identity/regenerate', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.status === 'ok') {
+        myHash = d.new_hash;
+        document.getElementById('settings-hash').value = myHash;
+        document.getElementById('identity-box').textContent = 'ID: ' + myHash;
+        toast('New identity: ' + d.new_hash.substring(0, 16) + '...');
+      } else {
+        toast('Failed: ' + (d.error || ''));
+      }
+    });
+}
+
+function restartServer() {
+  if (!confirm('Restart the server? The web interface will be unavailable for a few seconds.')) return;
+  fetch('/api/restart', {method: 'POST'}).then(() => {
+    toast('Server restarting...');
+    setTimeout(() => { location.reload(); }, 3000);
   });
 }
 

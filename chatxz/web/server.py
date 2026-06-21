@@ -100,11 +100,12 @@ class ChatWebServer:
             with open(SETTINGS_FILE) as f:
                 s = json.load(f)
                 s.setdefault("name", "")
-                s.setdefault("announce_interval", 30)
                 s.setdefault("history_retention", "never")
+                s.setdefault("received_dir", os.path.join(self.config_dir, "received"))
                 return s
         except:
-            return {"name": "", "announce_interval": 30, "history_retention": "never"}
+            return {"name": "", "history_retention": "never",
+                    "received_dir": os.path.join(self.config_dir, "received")}
 
     def save_settings(self, settings):
         with open(SETTINGS_FILE, "w") as f:
@@ -212,14 +213,15 @@ class ChatWebServer:
         my_ip = detect_lan_ip()
         if my_ip:
             print(f"[network] Detected LAN IP: {my_ip}")
+        received_dir = settings.get("received_dir", os.path.join(self.config_dir, "received"))
         self.messaging = MessagingBackend(
             self.identity, self.config_dir,
             on_message=self._on_message,
             display_name=settings.get("name", ""),
-            announce_interval=settings.get("announce_interval", 30),
             auto_announce=False,
             my_ip=my_ip,
             my_port=self.port,
+            receive_dir=received_dir,
         )
         self.file_transfer = FileTransfer(self.config_dir)
         self.voice_recorder = VoiceRecorder(self.config_dir)
@@ -376,26 +378,70 @@ class ChatWebServer:
             settings = self.load_settings()
             if "name" in data:
                 settings["name"] = data["name"].strip()[:50]
-            if "announce_interval" in data:
-                val = int(data["announce_interval"])
-                settings["announce_interval"] = max(5, min(3600, val))
             if "history_retention" in data:
                 valid = ["1d", "1w", "1m", "6m", "12m", "never"]
                 if data["history_retention"] in valid:
                     settings["history_retention"] = data["history_retention"]
+            if "received_dir" in data:
+                raw = data["received_dir"].strip()
+                if os.path.isdir(raw) or os.path.exists(os.path.dirname(raw)):
+                    settings["received_dir"] = raw
+                    os.makedirs(raw, exist_ok=True)
             self.save_settings(settings)
             if self.messaging:
                 self.messaging.display_name = settings.get("name", "")
-                self.messaging.announce_interval = settings.get("announce_interval", 30)
             self._apply_retention()
             self._save_history()
             return web.json_response({"status": "ok", "settings": settings})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
+    async def handle_regenerate_identity(self, request):
+        try:
+            old_hash = self.identity_mgr.get_hex_hash()
+            self.identity = self.identity_mgr.regenerate()
+            if self.messaging:
+                print("[identity] Restart required for new identity to take full effect")
+            return web.json_response({"status": "ok", "old_hash": old_hash, "new_hash": self.identity_mgr.get_hex_hash()})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def handle_restart(self, request):
+        import sys
+        asyncio.get_event_loop().call_later(0.5, lambda: os._exit(42))
+        return web.json_response({"status": "restarting"})
+
+    async def handle_temperature(self, request):
+        try:
+            temps = {}
+            base = "/sys/class/thermal"
+            if os.path.exists(base):
+                for name in os.listdir(base):
+                    if name.startswith("thermal_zone"):
+                        tpath = os.path.join(base, name, "temp")
+                        ttype_path = os.path.join(base, name, "type")
+                        if os.path.exists(tpath):
+                            with open(tpath) as f:
+                                raw = f.read().strip()
+                                celsius = int(raw) / 1000.0 if raw else 0
+                            ttype = "unknown"
+                            if os.path.exists(ttype_path):
+                                with open(ttype_path) as f:
+                                    ttype = f.read().strip()
+                            temps[ttype] = round(celsius, 1)
+            if not temps:
+                import subprocess
+                r = subprocess.run(["sensors", "-j"], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    temps = {"raw": r.stdout[:500]}
+            return web.json_response({"temperatures": temps})
+        except:
+            return web.json_response({"temperatures": {}})
+
     async def handle_debug(self, request):
         peers = self.discovery.get_peers() if self.discovery else []
-        received_dir = os.path.join(self.config_dir, "received")
+        settings = self.load_settings()
+        received_dir = settings.get("received_dir", os.path.join(self.config_dir, "received"))
         return web.json_response({
             "identity_hash": self.identity_mgr.get_hex_hash() if self.identity_mgr else None,
             "ws_clients": len(self.websockets),
@@ -406,6 +452,7 @@ class ChatWebServer:
             "loop_running": self._loop is not None and self._loop.is_running(),
             "rns_interfaces": len(RNS.Transport.interfaces) if hasattr(RNS.Transport, 'interfaces') else "unknown",
             "received_files_dir": received_dir,
+            "settings": settings,
         })
 
     async def handle_file_upload(self, request):
@@ -541,7 +588,8 @@ class ChatWebServer:
 
     async def handle_serve_file(self, request):
         filepath = request.match_info["filepath"]
-        received_dir = os.path.normpath(os.path.join(self.config_dir, "received"))
+        settings = self.load_settings()
+        received_dir = os.path.normpath(settings.get("received_dir", os.path.join(self.config_dir, "received")))
         sent_dir = os.path.normpath(os.path.join(self.config_dir, "sent"))
         full_path = os.path.normpath(os.path.join(self.config_dir, filepath))
 
@@ -699,6 +747,9 @@ class ChatWebServer:
         app.router.add_get("/api/direct-transfer/{token}", self.handle_direct_transfer)
         app.router.add_get("/api/queue", self.handle_queue)
         app.router.add_delete("/api/queue", self.handle_queue_clear)
+        app.router.add_post("/api/identity/regenerate", self.handle_regenerate_identity)
+        app.router.add_post("/api/restart", self.handle_restart)
+        app.router.add_get("/api/temperature", self.handle_temperature)
         app.router.add_get("/ws", self.handle_websocket)
 
         my_hash = self.start_rns()

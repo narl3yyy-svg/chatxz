@@ -61,14 +61,14 @@ class ChatMessage:
 
 class MessagingBackend:
     def __init__(self, identity, config_dir, on_message=None, on_file=None,
-                 display_name="", announce_interval=30, auto_announce=False,
-                 my_ip=None, my_port=8742):
+                 display_name="", auto_announce=False,
+                 my_ip=None, my_port=8742, receive_dir=None):
         self.identity = identity
         self.config_dir = config_dir
+        self.receive_dir = receive_dir or os.path.join(config_dir, "received")
         self.on_message = on_message
         self.on_file = on_file
         self.display_name = display_name
-        self.announce_interval = announce_interval
         self.auto_announce = auto_announce
         self.my_ip = my_ip
         self.my_port = my_port
@@ -302,10 +302,9 @@ class MessagingBackend:
                     if chat_msg is None:
                         chat_msg = ChatMessage(MESSAGE_TYPE_FILE, "", file_name="unknown")
 
-                    receive_dir = os.path.join(self.config_dir, "received")
-                    os.makedirs(receive_dir, exist_ok=True)
+                    os.makedirs(self.receive_dir, exist_ok=True)
                     fname = chat_msg.file_name or f"file_{int(time.time())}"
-                    save_path = os.path.join(receive_dir, fname)
+                    save_path = os.path.join(self.receive_dir, fname)
 
                     if hasattr(resource, 'data') and resource.data is not None:
                         if hasattr(resource.data, 'read'):
@@ -356,9 +355,8 @@ class MessagingBackend:
 
             try:
                 print(f"[direct] Downloading {fname} ({fsize} bytes) from {url}")
-                receive_dir = os.path.join(self.config_dir, "received")
-                os.makedirs(receive_dir, exist_ok=True)
-                save_path = os.path.join(receive_dir, fname)
+                os.makedirs(self.receive_dir, exist_ok=True)
+                save_path = os.path.join(self.receive_dir, fname)
 
                 with urllib.request.urlopen(url, timeout=120) as resp:
                     with open(save_path, "wb") as f:
