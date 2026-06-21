@@ -8,6 +8,7 @@ from chatxz.core.identity import IdentityManager
 from chatxz.core.messaging import MessagingBackend
 from chatxz.core.voice import VoiceRecorder, VoicePlayer
 from chatxz.core.discovery import PeerDiscovery
+from chatxz.core.lan_beacon import LanBeacon, BEACON_PORT
 from chatxz.utils.helpers import get_config_dir, get_data_dir, format_speed
 from chatxz.utils.platform import (
     is_android,
@@ -22,7 +23,8 @@ CONFIG_DIR = get_config_dir()
 DATA_DIR = get_data_dir()
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 
-DEFAULT_RNS_CONFIG = """[reticulum]
+def build_desktop_rns_config(broadcast_ip="255.255.255.255"):
+    return f"""[reticulum]
 enable_transport = Yes
 share_instance = No
 
@@ -39,7 +41,7 @@ loglevel = 3
     enabled = Yes
     listen_ip = 0.0.0.0
     listen_port = 4242
-    forward_ip = 255.255.255.255
+    forward_ip = {broadcast_ip}
     forward_port = 4242
     ifac_size = 16
 """
@@ -62,6 +64,14 @@ loglevel = 4
     forward_port = 4242
     ifac_size = 16
 """
+
+def _patch_rns_forward_ip(config_text, broadcast_ip):
+    if not broadcast_ip:
+        return config_text
+    if "forward_ip" in config_text:
+        return re.sub(r"forward_ip\s*=\s*[^\n]+", f"forward_ip = {broadcast_ip}", config_text)
+    return config_text
+
 
 def detect_lan_ip():
     if is_android():
@@ -235,6 +245,7 @@ class ChatWebServer:
 
         self.active_peer = None
         self.discovery = None
+        self.lan_beacon = None
         self._loop = None
         self.rns_init_error = None
 
@@ -371,17 +382,21 @@ class ChatWebServer:
                     "type = UDPInterface\n    enabled = Yes"
                 )
                 modified = True
+            if "share_instance = Yes" in existing:
+                existing = existing.replace("share_instance = Yes", "share_instance = No")
+                modified = True
+            bcast = lan_broadcast()
+            patched = _patch_rns_forward_ip(existing, bcast)
+            if patched != existing:
+                existing = patched
+                modified = True
             if modified:
                 with open(rns_config_path, "w") as f:
                     f.write(existing)
-                print(f"[config] Updated {rns_config_path}")
-            elif "share_instance = Yes" in existing:
-                existing = existing.replace("share_instance = Yes", "share_instance = No")
-                with open(rns_config_path, "w") as f:
-                    f.write(existing)
-                print(f"[config] Disabled share_instance")
+                print(f"[config] Updated {rns_config_path} (broadcast={bcast})")
         else:
-            template = build_android_rns_config(lan_broadcast()) if is_android() else DEFAULT_RNS_CONFIG
+            bcast = lan_broadcast()
+            template = build_android_rns_config(bcast) if is_android() else build_desktop_rns_config(bcast)
             with open(rns_config_path, "w") as f:
                 f.write(template)
             print(f"[config] Created RNS config at {rns_config_path}")
@@ -433,6 +448,15 @@ class ChatWebServer:
         my_hash = RNS.hexrep(dest.hash)
         self.discovery = PeerDiscovery()
         self.discovery.start()
+        self.lan_beacon = LanBeacon(
+            self.discovery,
+            my_hash,
+            display_name=settings.get("name", ""),
+            ip=my_ip,
+            port=self.port,
+        )
+        self.lan_beacon.start()
+        self.lan_beacon.send(count=2)
 
         return my_hash
 
@@ -594,10 +618,14 @@ class ChatWebServer:
                 await asyncio.to_thread(self.messaging.announce)
                 if i < 2:
                     await asyncio.sleep(0.4)
-            bcast = lan_broadcast() if is_android() else None
+            beacon_sent = 0
+            if self.lan_beacon:
+                beacon_sent = await asyncio.to_thread(self.lan_beacon.send, 3)
             return web.json_response({
                 "status": "ok",
-                "broadcast": bcast,
+                "broadcast": lan_broadcast(),
+                "beacon_port": BEACON_PORT,
+                "beacon_sent": beacon_sent,
                 "lan_ip": detect_lan_ip(),
             })
         except Exception as e:
@@ -775,6 +803,11 @@ class ChatWebServer:
             "ws_clients": len(self.websockets),
             "discovered_peers": peers,
             "discovery_running": self.discovery.running if self.discovery else False,
+            "lan_beacon_port": BEACON_PORT,
+            "lan_beacon_running": bool(self.lan_beacon and self.lan_beacon.running),
+            "lan_beacon_targets": self.lan_beacon.last_send_targets if self.lan_beacon else [],
+            "lan_beacon_sent": self.lan_beacon.packets_sent if self.lan_beacon else 0,
+            "lan_beacon_received": self.lan_beacon.packets_received if self.lan_beacon else 0,
             "active_peer": self.active_peer,
             "message_count": len(self.message_history),
             "loop_running": self._loop is not None and self._loop.is_running(),
@@ -1231,6 +1264,8 @@ class ChatWebServer:
                     await asyncio.to_thread(self.messaging.announce)
                     if i < 2:
                         await asyncio.sleep(0.4)
+                if self.lan_beacon:
+                    await asyncio.to_thread(self.lan_beacon.send, 3)
             elif err:
                 await ws.send_str(json.dumps({"type": "info", "data": "Announce failed: " + err}))
         elif msg_type == "read_receipt":

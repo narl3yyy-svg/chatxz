@@ -55,7 +55,28 @@ class PeerDiscovery:
             "app": app_name,
             "last_seen": time.time(),
         }
-        print(f"[discovery] Peer discovered: {name or hash_hex[:12]}...")
+        print(f"[discovery] RNS peer discovered: {name or hash_hex[:12]}...")
+
+    def _on_beacon(self, data, my_hash):
+        if not self.running:
+            return
+        if data.get("app") != APP_NAME:
+            return
+        hash_hex = (data.get("hash") or "").replace(":", "")
+        my_clean = (my_hash or "").replace(":", "")
+        if not hash_hex or hash_hex == my_clean:
+            return
+        name = data.get("name", "") or hash_hex[:8]
+        self.peers[hash_hex] = {
+            "hash": hash_hex,
+            "name": name,
+            "app": APP_NAME,
+            "ip": data.get("ip"),
+            "port": data.get("port", 8742),
+            "last_seen": time.time(),
+            "via": "beacon",
+        }
+        print(f"[discovery] Beacon peer discovered: {name} ({data.get('ip', '?')})")
 
     def get_peers(self):
         now = time.time()

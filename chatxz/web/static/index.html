@@ -1459,8 +1459,8 @@ function announceSelf() {
     .then(async r => {
       const d = await r.json();
       if (r.ok && d.status === 'ok') {
-        const hint = d.broadcast ? ` (${d.broadcast})` : '';
-        toast('Announcing on LAN' + hint);
+        const hint = d.broadcast ? ` via ${d.broadcast}` : '';
+        toast('Announcing on LAN' + hint + ' (beacon :8743)');
         return;
       }
       if (ws && ws.readyState === WebSocket.OPEN) {

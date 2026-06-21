@@ -194,7 +194,13 @@ The APK bundles Python 3.13, RNS, cryptography, aiohttp, and the full chatxz web
 
 On phone-sized screens the chat area fills the display by default. Tap **☰** in the header to open the sidebar (contacts, connect, settings). The sidebar stays open while you use it and only closes when you connect to a peer, tap outside, or press the Android back button.
 
-**LAN discovery from Android:** the app uses directed UDP broadcast (e.g. `192.168.1.255`) instead of `255.255.255.255`, which Android often blocks. Wait until the bottom dock shows **Link** / network is ready (RNS starts a few seconds after launch), then tap **Announce** on the phone; your desktop instance should show the device under **Discovered** within a few seconds when both are on the same Wi‑Fi.
+**LAN discovery:** chatxz uses two mechanisms on the same Wi‑Fi — Reticulum UDP (port **4242**) plus a simple LAN beacon (port **8743**). All platforms broadcast to your subnet address (e.g. `192.168.1.255`). Peers also beacon automatically every 30 seconds; tap **Announce** for an immediate burst.
+
+If devices never appear under **Discovered**:
+- Confirm all devices are on the **same Wi‑Fi subnet** (not guest/isolated VLAN)
+- Disable **AP/client isolation** on your router if enabled
+- On Linux desktops, allow UDP **4242** and **8743** through the firewall (`ufw allow 4242/udp && ufw allow 8743/udp`)
+- Check `http://localhost:8742/api/debug` — `lan_beacon_received` should increase when another device announces
 
 **Received files folder on Android:** Settings → Received Files Folder → **Browse** opens the native Android folder picker. Pick a folder, then **Save**.
 
