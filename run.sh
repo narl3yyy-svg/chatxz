@@ -39,7 +39,7 @@ case "${1:-}" in
         echo
         echo "Commands:"
         echo "  install          Install dependencies and package"
-        echo "  web [--share]    Start web server (http://localhost:8742)"
+        echo "  web [--share] [--force]  Start web server (http://localhost:8742)"
         echo "  cli [options]    Start CLI mode"
         echo
         echo "Examples:"

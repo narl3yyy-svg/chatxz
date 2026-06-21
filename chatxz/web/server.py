@@ -1,4 +1,4 @@
-import os, json, time, base64, mimetypes, asyncio, socket, zipfile, shutil, subprocess, tempfile
+import os, json, time, base64, mimetypes, asyncio, socket, zipfile, shutil, subprocess, tempfile, signal, re, sys
 from pathlib import Path
 
 from aiohttp import web
@@ -54,19 +54,135 @@ def cleanup_rns_stale():
         try:
             os.unlink(p)
             print(f"[cleanup] Removed stale RNS socket: {p}")
-        except:
+        except OSError:
             pass
     for p in _glob.glob("/tmp/rns/*"):
         try:
             os.rmdir(p)
-        except:
+        except OSError:
             pass
 
+
+def _proc_cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _is_chatzx_process(pid):
+    cmd = _proc_cmdline(pid)
+    return "chatxz" in cmd and "grok" not in cmd.lower()
+
+
+def _port_holder_pids(port, udp=True):
+    pids = []
+    try:
+        flag = "-u" if udp else "-t"
+        result = subprocess.run(
+            ["ss", "-H", "-n", flag, "-lp"],
+            capture_output=True, text=True, timeout=3,
+        )
+        needle = f":{port}"
+        for line in result.stdout.splitlines():
+            if needle not in line:
+                continue
+            for match in re.finditer(r"pid=(\d+)", line):
+                pids.append(int(match.group(1)))
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return list(dict.fromkeys(pids))
+
+
+def _is_port_in_use(port, sock_type=socket.SOCK_DGRAM, host="0.0.0.0"):
+    try:
+        s = socket.socket(socket.AF_INET, sock_type)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, port))
+        s.close()
+        return False
+    except OSError:
+        return True
+
+
+def stop_stale_chatzx_servers(exclude_pid=None):
+    """Stop other chatxz server/cli processes holding RNS ports."""
+    exclude_pid = exclude_pid or os.getpid()
+    targets = set()
+    for port in (4242, 8742):
+        for pid in _port_holder_pids(port, udp=(port == 4242)):
+            if pid != exclude_pid and _is_chatzx_process(pid):
+                targets.add(pid)
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "chatxz\\.web\\.server|chatxz\\.app|chatxz-web"],
+            capture_output=True, text=True, timeout=3,
+        )
+        for pid_str in result.stdout.split():
+            pid = int(pid_str)
+            if pid != exclude_pid:
+                targets.add(pid)
+    except (ValueError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    if not targets:
+        return 0
+
+    print(f"[startup] Stopping stale chatxz process(es): {', '.join(str(p) for p in sorted(targets))}")
+    for pid in sorted(targets):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            print(f"[startup] No permission to stop PID {pid}")
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if not any(os.path.exists(f"/proc/{p}") for p in targets):
+            break
+        time.sleep(0.2)
+
+    for pid in sorted(targets):
+        if os.path.exists(f"/proc/{pid}"):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    cleanup_rns_stale()
+    return len(targets)
+
+
+def ensure_rns_ports_free(force=False):
+    """Free UDP 4242 (RNS) before startup; exit with a clear message if blocked."""
+    if not _is_port_in_use(4242):
+        return True
+
+    holders = _port_holder_pids(4242, udp=True)
+    chatxz_holders = [p for p in holders if _is_chatzx_process(p)]
+
+    if chatxz_holders or force:
+        stop_stale_chatzx_servers()
+        time.sleep(0.5)
+        if not _is_port_in_use(4242):
+            return True
+
+    holders = _port_holder_pids(4242, udp=True)
+    holder_txt = ", ".join(f"PID {p} ({_proc_cmdline(p)[:60]})" for p in holders) or "unknown"
+    print(f"[startup] ERROR: UDP port 4242 is already in use by {holder_txt}")
+    print("[startup] Another chatxz/RNS instance is probably still running.")
+    print("[startup] Stop it with:  pkill -f chatxz.web.server")
+    print("[startup] Or restart with:  ./run.sh web --share --force")
+    return False
+
 class ChatWebServer:
-    def __init__(self, host="127.0.0.1", port=8742, verbose=False):
+    def __init__(self, host="127.0.0.1", port=8742, verbose=False, force=False):
         self.host = host
         self.port = port
         self.verbose = verbose
+        self.force = force
         self.config_dir = CONFIG_DIR
         self.data_dir = DATA_DIR
         os.makedirs(self.config_dir, exist_ok=True)
@@ -183,19 +299,19 @@ class ChatWebServer:
                 f.write(DEFAULT_RNS_CONFIG)
             print(f"[config] Created RNS config at {rns_config_path}")
 
-        cleanup_rns_stale()
+        if not ensure_rns_ports_free(force=self.force):
+            sys.exit(1)
 
         loglevel = RNS.LOG_DEBUG if self.verbose else RNS.LOG_NOTICE
         try:
             RNS.Reticulum(self.config_dir, loglevel=loglevel)
         except OSError as e:
             print(f"[RNS] Bind error: {e}")
-            print("[RNS] Cleaning up and retrying...")
-            import subprocess
-            subprocess.run(["pkill", "-f", "Reticulum"], capture_output=True)
-            import time
-            time.sleep(2)
-            cleanup_rns_stale()
+            print("[RNS] Retrying after stopping stale instances...")
+            stop_stale_chatzx_servers()
+            time.sleep(1)
+            if not ensure_rns_ports_free(force=True):
+                sys.exit(1)
             RNS.Reticulum(self.config_dir, loglevel=loglevel)
         self.identity = self.identity_mgr.load_or_create()
         settings = self.load_settings()
@@ -1011,9 +1127,11 @@ def main():
     parser.add_argument("--port", type=int, default=8742, help="Port")
     parser.add_argument("--share", action="store_true", help="Listen on 0.0.0.0 (accessible on LAN)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show RNS debug logs")
+    parser.add_argument("--force", "-f", action="store_true",
+                        help="Stop any existing chatxz server before starting")
     args = parser.parse_args()
     host = "0.0.0.0" if args.share else args.host
-    server = ChatWebServer(host=host, port=args.port, verbose=args.verbose)
+    server = ChatWebServer(host=host, port=args.port, verbose=args.verbose, force=args.force)
     server.run()
 
 
