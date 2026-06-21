@@ -24,7 +24,7 @@ from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 CONFIG_DIR = get_config_dir()
 DATA_DIR = get_data_dir()
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
-APP_VERSION = "0.3.8"
+APP_VERSION = "0.3.9"
 
 def build_desktop_rns_config(broadcast_ip="255.255.255.255"):
     return f"""[reticulum]
@@ -247,6 +247,7 @@ class ChatWebServer:
         self.message_history = self._load_history()
 
         self.active_peer = None
+        self.destination_hash = None
         self.discovery = None
         self.lan_beacon = None
         self._loop = None
@@ -449,7 +450,8 @@ class ChatWebServer:
         dest = self.messaging.start()
 
         my_hash = RNS.hexrep(dest.hash)
-        self.discovery = PeerDiscovery()
+        self.destination_hash = my_hash
+        self.discovery = PeerDiscovery(on_peer_seen=self._on_peer_discovered)
         self.discovery.start()
         self.lan_beacon = LanBeacon(
             self.discovery,
@@ -491,6 +493,10 @@ class ChatWebServer:
                 await ws.send_str(msg)
             except:
                 self.websockets.discard(ws)
+
+    def _on_peer_discovered(self, peer):
+        if self.messaging and peer.get("ip"):
+            self.messaging.prepare_connect(peer.get("hash"), peer)
 
     def _on_transfer_progress(self, data):
         if self.websockets and self._loop:
@@ -547,7 +553,7 @@ class ChatWebServer:
                 self.identity_mgr.load_or_create()
             except Exception:
                 pass
-        h = self.identity_mgr.get_hex_hash()
+        h = self.destination_hash or self.identity_mgr.get_hex_hash()
         contacts = []
         contacts_dir = os.path.join(self.config_dir, "contacts")
         os.makedirs(contacts_dir, exist_ok=True)
@@ -607,7 +613,18 @@ class ChatWebServer:
             peer_hash = data.get("hash", "").strip()
             if not peer_hash:
                 return web.json_response({"error": "hash required"}, status=400)
-            ok = await asyncio.to_thread(self.messaging.connect_to, peer_hash)
+            peer_info = None
+            resolved_hash = peer_hash
+            if self.discovery:
+                target = self._clean_hash(peer_hash)
+                for p in self.discovery.get_peers():
+                    if self._clean_hash(p.get("hash")) == target:
+                        peer_info = p
+                        resolved_hash = p.get("hash", peer_hash)
+                        break
+            if self.messaging:
+                self.messaging.prepare_connect(resolved_hash, peer_info)
+            ok = await asyncio.to_thread(self.messaging.connect_to, resolved_hash)
             if ok:
                 clean = peer_hash.replace("<", "").replace(">", "").replace(":", "").strip()
                 self.active_peer = clean
@@ -620,7 +637,7 @@ class ChatWebServer:
         return {
             "app": "chatxz",
             "v": 1,
-            "hash": self.identity_mgr.get_hex_hash() if self.identity_mgr else "",
+            "hash": (self.destination_hash or self.identity_mgr.get_hex_hash() if self.identity_mgr else ""),
             "name": self.load_settings().get("name", ""),
             "ip": detect_lan_ip() or "",
             "port": self.port,
@@ -663,7 +680,7 @@ class ChatWebServer:
                 remote = request.remote or ""
                 if remote and not data.get("ip"):
                     data["ip"] = remote
-                my_hash = self.identity_mgr.get_hex_hash() if self.identity_mgr else ""
+                my_hash = self.destination_hash or (self.identity_mgr.get_hex_hash() if self.identity_mgr else "")
                 self.discovery._on_beacon(data, my_hash)
             return web.json_response({"status": "ok"})
         except Exception as e:
@@ -701,18 +718,29 @@ class ChatWebServer:
             "queue_size": self.messaging.queue_size() if self.messaging else 0,
         })
 
+    async def handle_rns_info(self, request):
+        if request.query.get("announce") and self.messaging:
+            await asyncio.to_thread(self.messaging.announce)
+        dest_hash = self.destination_hash
+        pub_key = b""
+        if self.identity_mgr and self.identity_mgr.identity:
+            pub_key = self.identity_mgr.identity.get_public_key()
+        return web.json_response({
+            "destination_hash": dest_hash,
+            "public_key": base64.b64encode(pub_key).decode("ascii") if pub_key else "",
+            "name": self.load_settings().get("name", ""),
+            "app": "chatxz",
+        })
+
     async def handle_announce(self, request):
         ok, err = await self._wait_for_rns()
         if not ok:
             return web.json_response({"error": err or "not ready"}, status=400)
         try:
-            for i in range(3):
-                await asyncio.to_thread(self.messaging.announce)
-                if i < 2:
-                    await asyncio.sleep(0.4)
+            await asyncio.to_thread(self.messaging.announce)
             beacon_sent = 0
             if self.lan_beacon:
-                beacon_sent = await asyncio.to_thread(self.lan_beacon.send, 3, True)
+                beacon_sent = await asyncio.to_thread(self.lan_beacon.send, 2, True)
             http_hits = await self._fanout_beacon_http()
             return web.json_response({
                 "status": "ok",
@@ -1344,7 +1372,17 @@ class ChatWebServer:
         elif msg_type == "connect":
             peer_hash = data.get("hash", "")
             if peer_hash and self.messaging:
-                ok = await asyncio.to_thread(self.messaging.connect_to, peer_hash)
+                peer_info = None
+                resolved_hash = peer_hash
+                if self.discovery:
+                    target = self._clean_hash(peer_hash)
+                    for p in self.discovery.get_peers():
+                        if self._clean_hash(p.get("hash")) == target:
+                            peer_info = p
+                            resolved_hash = p.get("hash", peer_hash)
+                            break
+                self.messaging.prepare_connect(resolved_hash, peer_info)
+                ok = await asyncio.to_thread(self.messaging.connect_to, resolved_hash)
                 if ok:
                     clean = peer_hash.replace("<", "").replace(">", "").replace(":", "").strip()
                     self.active_peer = clean
@@ -1354,12 +1392,9 @@ class ChatWebServer:
         elif msg_type == "announce":
             ok, err = await self._wait_for_rns(timeout=30.0)
             if ok:
-                for i in range(3):
-                    await asyncio.to_thread(self.messaging.announce)
-                    if i < 2:
-                        await asyncio.sleep(0.4)
+                await asyncio.to_thread(self.messaging.announce)
                 if self.lan_beacon:
-                    await asyncio.to_thread(self.lan_beacon.send, 3, True)
+                    await asyncio.to_thread(self.lan_beacon.send, 2, True)
                 await self._fanout_beacon_http()
             elif err:
                 await ws.send_str(json.dumps({"type": "info", "data": "Announce failed: " + err}))
@@ -1387,6 +1422,7 @@ class ChatWebServer:
         app.router.add_delete("/api/contacts/{hash}", self.handle_delete_contact)
         app.router.add_post("/api/connect", self.handle_connect)
         app.router.add_post("/api/announce", self.handle_announce)
+        app.router.add_get("/api/rns-info", self.handle_rns_info)
         app.router.add_post("/api/beacon-ingest", self.handle_beacon_ingest)
         app.router.add_get("/api/network-status", self.handle_network_status)
         app.router.add_post("/api/disconnect", self.handle_disconnect)

@@ -1,6 +1,7 @@
-import threading, RNS, json, time, os, tempfile, uuid
+import threading, RNS, json, time, os, tempfile, uuid, base64
 import urllib.request
 from chatxz.utils.helpers import format_speed
+from chatxz.core.discovery import normalize_hash
 
 APP_NAME = "chatxz"
 DIRECT_TRANSFER_THRESHOLD = 256 * 1024
@@ -508,10 +509,97 @@ class MessagingBackend:
 
         threading.Thread(target=download, daemon=True).start()
 
-    def connect_to(self, destination_hash_hex):
+    def prepare_connect(self, peer_hash, peer_info=None):
+        if peer_info:
+            ip = peer_info.get("ip")
+            port = peer_info.get("port", 8742)
+            if ip:
+                self._register_peer_ip(peer_hash, ip, port)
+
+    def _register_peer_ip(self, peer_hash, ip, port=8742):
+        if not ip or not peer_hash:
+            return
+        info = {"ip": ip, "port": port}
+        clean = normalize_hash(peer_hash)
+        if not clean:
+            return
+        self.peer_ips[clean] = info
         try:
-            clean = destination_hash_hex.replace("<", "").replace(">", "").strip()
-            dest_hash = bytes.fromhex(clean.replace(":", ""))
+            self.peer_ips[RNS.hexrep(bytes.fromhex(clean))] = info
+        except ValueError:
+            pass
+
+    def _lookup_peer_ip(self, peer_hash):
+        clean = normalize_hash(peer_hash)
+        if clean in self.peer_ips:
+            return self.peer_ips[clean]
+        try:
+            rep = RNS.hexrep(bytes.fromhex(clean))
+            if rep in self.peer_ips:
+                return self.peer_ips[rep]
+        except ValueError:
+            pass
+        return None
+
+    def _udp_interface(self):
+        for iface in getattr(RNS.Transport, "interfaces", []) or []:
+            if type(iface).__name__ == "UDPInterface":
+                return iface
+        return None
+
+    def _bootstrap_via_http(self, dest_hash, ip, port):
+        url = f"http://{ip}:{port}/api/rns-info?announce=1"
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                info = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            print(f"[connect] HTTP bootstrap failed for {ip}:{port}: {e}")
+            return dest_hash
+
+        remote_hex = normalize_hash(info.get("destination_hash"))
+        pub_b64 = info.get("public_key", "")
+        if not remote_hex or not pub_b64:
+            print(f"[connect] HTTP bootstrap: incomplete rns-info from {ip}:{port}")
+            return dest_hash
+
+        try:
+            remote_dest = bytes.fromhex(remote_hex)
+            pub_key = base64.b64decode(pub_b64)
+            RNS.Identity.remember(
+                RNS.Identity.get_random_hash(),
+                remote_dest,
+                pub_key,
+                info.get("app_data"),
+            )
+            self._register_peer_ip(remote_hex, ip, port)
+            print(f"[connect] Remembered identity from HTTP ({ip}:{port})")
+            return remote_dest
+        except Exception as e:
+            print(f"[connect] HTTP bootstrap remember failed: {e}")
+            return dest_hash
+
+    def _request_path(self, dest_hash):
+        iface = self._udp_interface()
+        if iface:
+            RNS.Transport.request_path(dest_hash, on_interface=iface)
+        else:
+            RNS.Transport.request_path(dest_hash)
+        if hasattr(RNS.Transport, "await_path"):
+            return RNS.Transport.await_path(dest_hash, timeout=12)
+        for _ in range(24):
+            time.sleep(0.5)
+            if RNS.Transport.has_path(dest_hash):
+                return True
+        return RNS.Transport.has_path(dest_hash)
+
+    def connect_to(self, destination_hash_hex):
+        clean = normalize_hash(destination_hash_hex)
+        if len(clean) != 32:
+            print(f"[connect] Invalid hash length ({len(clean)} chars, expected 32)")
+            return False
+        try:
+            dest_hash = bytes.fromhex(clean)
         except Exception as e:
             print(f"[connect] Invalid hash: {e}")
             return False
@@ -521,16 +609,29 @@ class MessagingBackend:
         try:
             known_identity = RNS.Identity.recall(dest_hash)
             if known_identity is None:
+                known_identity = RNS.Identity.recall(dest_hash, from_identity_hash=True)
+
+            if known_identity is None:
+                peer = self._lookup_peer_ip(clean)
+                if peer:
+                    print(f"[connect] Bootstrapping identity via HTTP {peer['ip']}:{peer['port']}...")
+                    dest_hash = self._bootstrap_via_http(dest_hash, peer["ip"], peer["port"])
+                    known_identity = RNS.Identity.recall(dest_hash)
+
+            if known_identity is None:
                 print(f"[connect] No known identity, requesting path...")
                 if not RNS.Transport.has_path(dest_hash):
-                    RNS.Transport.request_path(dest_hash)
-                    for _ in range(10):
-                        time.sleep(0.5)
-                        if RNS.Transport.has_path(dest_hash):
-                            break
-                    if not RNS.Transport.has_path(dest_hash):
-                        print(f"[connect] No path to destination")
-                        return False
+                    if not self._request_path(dest_hash):
+                        peer = self._lookup_peer_ip(clean)
+                        if peer:
+                            print(f"[connect] Retrying path via HTTP announce at {peer['ip']}...")
+                            self._bootstrap_via_http(dest_hash, peer["ip"], peer["port"])
+                            if not self._request_path(dest_hash):
+                                print(f"[connect] No path to destination")
+                                return False
+                        else:
+                            print(f"[connect] No path to destination")
+                            return False
                 known_identity = RNS.Identity.recall(dest_hash)
                 if known_identity is None:
                     print(f"[connect] Could not recall identity after path request")
