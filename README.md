@@ -2,15 +2,28 @@
 
 Decentralized instant messaging powered by the [Reticulum Network Stack](https://reticulum.network/).
 
-Send text, emoji, files of any size, images/screenshots (viewable inline), and voice notes — all encrypted by default, no servers needed.
+Send text, emoji, files and folders of any size, images/screenshots (viewable inline), and voice notes — all encrypted by default, no servers needed.
 
 ## Features
 
 - **End-to-end encrypted** messaging via Reticulum
-- **Unlimited file sizes** — send any file over RNS Resources
-- **Screenshot preview** — images display inline in supported terminals (Kitty, iTerm2, Sixel, chafa)
-- **Voice notes** — record from mic and send (requires pyaudio)
-- **Emoji** — full Unicode support
+- **Unlimited file sizes** — send any file over RNS Resources with progress bar + MB/s
+- **Folder upload** — send entire directories (files are transferred individually)
+- **Screenshot preview** — images display inline, click to enlarge, save button
+- **Voice notes** — record from browser mic (MediaRecorder API) and send
+- **Emoji picker** — full Unicode emoji support
+- **Drag & drop** — drag files onto the page to upload
+- **Clipboard paste** — paste screenshots from clipboard
+- **Message queue** — messages queued when offline, auto-drained on connection
+- **Chat history** — persisted locally, configurable retention (1d / 1w / 1m / 6m / 12m / never), clear anytime
+- **Contacts** — save peers with names, right-click context menu
+- **LAN discovery** — auto-discovers peers broadcasting on the same network
+- **Manual announce only** — you decide when to broadcast your presence
+- **CPU temperature** — live system temp shown in sidebar
+- **Connection status** — colored indicators for WebSocket and link state
+- **Change identity** — regenerate your keypair (old one is backed up)
+- **Restart server** — restart from the GUI
+- **Configurable received files directory** — choose where incoming files are saved
 - **Off-grid capable** — works over LoRa, packet radio, WiFi, or the internet
 - **No accounts, no servers** — your identity is your key
 
@@ -18,68 +31,91 @@ Send text, emoji, files of any size, images/screenshots (viewable inline), and v
 
 | Platform | Status |
 |----------|--------|
-| Arch Linux | Supported (install script) |
-| Ubuntu | Supported (install script) |
-| Debian | Supported (install script) |
+| Arch Linux | Supported |
+| Ubuntu | Supported |
+| Debian | Supported |
 | macOS | Planned |
 | Windows | Planned |
-| iPhone | Planned |
-| Android | Planned |
 
 ## Quick Start (Linux)
 
-### Clone & run
-```bash
-git clone https://github.com/narl3yyy-svg/chatzx.git
-cd chatzx
-bash scripts/install-arch.sh    # Arch Linux
-# or
-bash scripts/install-debian.sh  # Ubuntu / Debian
-```
+### Clone & Install
 
-### Manual install
 ```bash
 git clone https://github.com/narl3yyy-svg/chatzx.git
 cd chatzx
-pip install rns
+
+# Arch Linux
+bash scripts/install-arch.sh
+
+# Ubuntu / Debian
+bash scripts/install-debian.sh
+
+# Or install manually
+pip install rns aiohttp
 pip install .
 ```
 
-## Usage
-
-### Web UI (recommended)
+### Run
 
 ```bash
-# Development mode (hot-reload, verbose logging)
+# Web UI (development mode, verbose logging)
 ./run.sh web --share --verbose
 
-# Production
-chatzx-web
-
-# Share with LAN (auto-discovers peers on the same network)
+# Web UI (production)
 chatzx-web --share
+
+# CLI mode
+./run.sh cli
+# or
+chatzx
 ```
 
-The web interface runs at **http://localhost:8742**. Share your identity hash (shown on startup) with friends so they can connect. Click *Connect* in the UI, paste their hash, and start chatting.
+The web interface runs at **http://localhost:8742** (or your LAN IP when using `--share`).
 
-The web interface includes:
-- Real-time messaging over WebSocket
-- Emoji picker
-- File upload (drag & drop, paste screenshots)
-- Voice recording (browser MediaRecorder API)
-- Image preview inline
-- Contact management
+## Web Interface Guide
 
-### CLI
+### Connecting to a Peer
+
+1. **Share your identity hash** — shown at the top of the sidebar and on server startup (e.g. `ab12cd34...`). Give this to your friend.
+2. **Get their hash** — they share theirs with you.
+3. **Click "Add"** in the sidebar, paste their hash, optionally save as a contact.
+4. **Click the contact** to connect. A green "Link: active" indicator appears.
+5. **Announce** — click "Announce" to broadcast your presence on the LAN. Others will appear under "Discovered on LAN".
+
+### Sending Files
+
+- **Single file** — click the 📎 button or drag & drop a file onto the page
+- **Multiple files** — same, select multiple in the file picker
+- **Folder** — click the 📁 button and select a folder (all files inside are sent)
+- **Progress** — a progress bar shows transfer percentage, file size, and MB/s
+
+### Settings
+
+Click ⚙ in the sidebar header:
+
+| Setting | Description |
+|---------|-------------|
+| Display Name | Shown in LAN announces |
+| History Retention | Auto-delete messages older than 1d/1w/1m/6m/12m, or never |
+| Clear History Now | Immediately delete all chat history |
+| Save Received Files To | Directory where incoming files are saved |
+| Regenerate Identity | Create a new keypair (old one is backed up) |
+| Restart Server | Restart the web server from the GUI |
+
+### Sidebar Indicators
+
+- **WS dot** — WebSocket connection to the server (green = connected, orange = connecting, red = disconnected)
+- **Link dot** — Reticulum link to peer (green = active, gray = inactive)
+- **🌡** — Live CPU temperature (updates every 5 seconds)
+
+## CLI Usage
 
 ```bash
-# Development mode
-./run.sh cli
-
-# Start interactive mode
+# Interactive mode
 chatzx
 
-# Send a one-off message to a peer
+# Send a one-off message
 chatzx --connect <peer_hash> --send "Hello!"
 
 # Send a file
@@ -91,8 +127,6 @@ chatzx --connect <peer_hash> --voice
 # Listen daemon
 chatzx --daemon
 ```
-
-> **Tip:** Run `./run.sh` to see all available commands.
 
 ### Interactive Commands
 
@@ -109,17 +143,50 @@ chatzx --daemon
 /quit             - Exit
 ```
 
-Your identity hash is shown on startup — share it with friends so they can connect to you.
-
 ## Architecture
 
 chatxz uses [Reticulum](https://reticulum.network/) (RNS) for all networking:
-- **Identities** — Ed25519/X25519 key pairs, stored locally
+
+- **Identities** — Ed25519/X25519 key pairs, stored locally in `~/.config/chatxz/identities/identity`
 - **Destinations** — announced on the network as `chatxz.messages`
 - **Links** — encrypted bi-directional channels between peers
 - **Resources** — reliable transfer of arbitrary-size data (files, images, voice)
 
 All data is encrypted end-to-end by Reticulum. No plaintext is ever sent.
+
+### Data Flow
+
+1. **Web UI** connects to the local server via WebSocket at `/ws`
+2. **Server** manages Reticulum identity, links, and message routing
+3. **Peer discovery** is manual — click "Announce" to broadcast on LAN
+4. **File transfer** uses RNS Resources (reliable) + direct HTTP (fast) as a bonus
+5. **History** is persisted to `~/.config/chatxz/history.json`
+6. **Settings** stored in `~/.config/chatxz/settings.json`
+7. **Queue** stores offline messages in `~/.config/chatxz/queue.json`
+
+## Directory Structure
+
+```
+~/.config/chatxz/
+  config              # RNS configuration
+  settings.json       # User settings (name, history_retention, received_dir)
+  history.json        # Chat message history
+  queue.json          # Queued offline messages
+  identities/
+    identity          # Your Reticulum keypair
+  contacts/           # Saved contacts (filename = hash, content = name)
+  received/           # Default received files directory
+  sent/               # All sent files (permanently saved)
+```
+
+## Development
+
+```bash
+# Run with verbose RNS logging
+./run.sh web --share --verbose
+
+# Run.sh is in the repo root — it auto-installs deps and starts the server
+```
 
 ## License
 
