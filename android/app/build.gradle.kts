@@ -14,15 +14,6 @@ android {
         versionCode = 1
         versionName = "0.2.0"
 
-        python {
-            buildPython = "/usr/bin/python3"
-            pip {
-                install("rns")
-                install("aiohttp")
-            }
-            src("../../chatxz")
-        }
-
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -44,6 +35,17 @@ android {
         resources {
             excludes += setOf("META-INF/DEPENDENCIES", "META-INF/LICENSE", "META-INF/NOTICE")
         }
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        buildPython = "/usr/bin/python3"
+        pip {
+            install("rns")
+            install("aiohttp")
+        }
+        src("../../chatxz")
     }
 }
 
