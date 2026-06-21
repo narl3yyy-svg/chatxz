@@ -17,6 +17,9 @@ from chatxz.core.messaging import MessagingBackend, ChatMessage
 from chatxz.core.filetransfer import FileTransfer
 from chatxz.core.voice import VoiceRecorder, VoicePlayer
 from chatxz.core.discovery import PeerDiscovery
+import zipfile
+import tempfile
+import shutil
 from chatxz.utils.helpers import get_config_dir, get_data_dir, format_size, truncate_hash
 
 CONFIG_DIR = get_config_dir()
@@ -407,15 +410,15 @@ class ChatWebServer:
             return web.json_response({"error": str(e)}, status=400)
 
     async def handle_restart(self, request):
-        import sys, subprocess
-        try:
-            args = [sys.executable, "-m", "chatxz.web.server"] + sys.argv[1:]
-            subprocess.Popen(args)
-        except:
-            args = [sys.executable] + sys.argv
-            subprocess.Popen(args)
-        print("[restart] Spawned new process, exiting old one")
-        asyncio.get_event_loop().call_later(1, lambda: os._exit(0))
+        import sys, os
+        args = [sys.executable]
+        if sys.argv and (sys.argv[0].endswith('.py') or os.sep in sys.argv[0]):
+            args.append(sys.argv[0])
+        else:
+            args += ["-m", "chatxz.web.server"]
+        args += sys.argv[1:]
+        print(f"[restart] Re-exec'ing: {args}")
+        asyncio.get_event_loop().call_later(0.3, lambda: (sys.stdout.flush(), os.execv(sys.executable, args)))
         return web.json_response({"status": "restarting"})
 
     async def handle_temperature(self, request):
@@ -553,6 +556,72 @@ class ChatWebServer:
                                                progress_callback=self._make_progress_callback(fname, size))
             if result:
                 return web.json_response({"status": "ok", "name": fname, "size": size, "method": "resource"})
+            return web.json_response({"error": "send failed"}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def handle_folder_upload(self, request):
+        if not self.messaging:
+            return web.json_response({"error": "not ready"}, status=400)
+        try:
+            folder_name = request.query.get("name", f"folder_{int(time.time())}")
+            reader = await request.multipart()
+            tmpdir = tempfile.mkdtemp(prefix="chatzx_folder_")
+            total_size = 0
+            file_count = 0
+            while True:
+                field = await reader.next()
+                if not field:
+                    break
+                fname = field.filename or f"file_{file_count}"
+                fpath = os.path.join(tmpdir, fname)
+                os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                with open(fpath, "wb") as f:
+                    while True:
+                        chunk = await field.read_chunk(8192)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        total_size += len(chunk)
+                file_count += 1
+            if file_count == 0:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                return web.json_response({"error": "no files"}, status=400)
+            zip_name = folder_name.rstrip("/") + ".zip"
+            sent_dir = os.path.join(self.config_dir, "sent")
+            os.makedirs(sent_dir, exist_ok=True)
+            zip_path = os.path.join(sent_dir, zip_name)
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for root, dirs, files in os.walk(tmpdir):
+                    for fname in files:
+                        fpath = os.path.join(root, fname)
+                        arcname = os.path.relpath(fpath, tmpdir)
+                        zf.write(fpath, arcname)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            zsize = os.path.getsize(zip_path)
+            print(f"[folder] Created {zip_name} ({zsize} bytes, {file_count} files)")
+            if not self.messaging.active_link:
+                self.messaging.enqueue("file", zip_path,
+                                        file_name=zip_name, file_size=zsize, file_path=zip_path)
+                return web.json_response({"status": "queued", "name": zip_name, "size": zsize})
+            my_hash = self.identity_mgr.get_hex_hash()
+            ts = time.time()
+            entry = {
+                "type": "file",
+                "content": zip_path,
+                "sender": my_hash,
+                "timestamp": ts,
+                "file_name": zip_name,
+                "file_size": zsize,
+            }
+            self.message_history.append(entry)
+            self._save_history()
+            await self._broadcast({"type": "message", "data": entry})
+            self.messaging.direct_send_file(zip_path, "file")
+            result = self.messaging.send_file(zip_path, "file",
+                                               progress_callback=self._make_progress_callback(zip_name, zsize))
+            if result:
+                return web.json_response({"status": "ok", "name": zip_name, "size": zsize})
             return web.json_response({"error": "send failed"}, status=400)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -785,6 +854,7 @@ class ChatWebServer:
         app.router.add_post("/api/connect", self.handle_connect)
         app.router.add_post("/api/disconnect", self.handle_disconnect)
         app.router.add_post("/api/file", self.handle_file_upload)
+        app.router.add_post("/api/folder", self.handle_folder_upload)
         app.router.add_post("/api/voice", self.handle_voice_upload)
         app.router.add_post("/api/play", self.handle_play_voice)
         app.router.add_get("/api/history", self.handle_history)

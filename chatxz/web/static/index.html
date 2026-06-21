@@ -159,6 +159,7 @@ body {
   margin-bottom: 12px; outline: none;
 }
 .dialog input:focus { border-color: var(--primary); }
+.dialog select option { background: var(--surface); color: var(--text); }
 .dialog label { font-size: 12px; color: var(--text2); display: block; margin-bottom: 4px; }
 .dlg-btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .dlg-btn { padding: 8px 20px; border-radius: 6px; border: none; font-size: 14px; cursor: pointer; }
@@ -340,8 +341,8 @@ body {
 
 <!-- Settings dialog -->
 <div id="settings-dialog" onclick="if(event.target===this)closeSettings()">
-  <div class="dialog" style="max-height:90vh;overflow-y:auto;position:relative">
-    <button onclick="closeSettings()" style="position:absolute;top:12px;right:16px;background:none;border:none;color:var(--text2);font-size:20px;cursor:pointer;line-height:1" title="Close">&times;</button>
+  <div class="dialog" style="position:relative;padding-top:40px">
+    <button onclick="closeSettings()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:var(--text2);font-size:22px;cursor:pointer;line-height:1;z-index:10" title="Close">&times;</button>
     <h2>Settings</h2>
     <div class="settings-section">
       <label>Display Name (shown in announces)</label>
@@ -374,6 +375,7 @@ body {
       <div style="font-size:11px;color:var(--text2);margin-top:4px">Old identity is backed up. Reconnect all peers after changing.</div>
     </div>
     <div class="settings-section" style="border-top:1px solid rgba(255,255,255,.1);padding-top:12px">
+      <label>Server</label>
       <button class="dlg-btn secondary" style="width:100%;color:var(--danger)" onclick="restartServer()">🔄 Restart Server</button>
     </div>
     <div class="dlg-btn-row" style="margin-top:12px">
@@ -940,31 +942,23 @@ function uploadFiles(files) {
 function uploadFolder(files) {
   const total = files.length;
   if (total === 0) return;
-  if (!confirm(`Upload ${total} file(s) from this folder and all subfolders?`)) return;
-  let done = 0;
-  let ok = 0;
-  let err = 0;
-  let notified = false;
-  const maybeFinal = () => {
-    if (notified) return;
-    if (done >= total) {
-      notified = true;
-      toast(`Sent ${ok}/${total} file(s)` + (err ? ` (${err} failed)` : ''));
-    }
-  };
+  const folderPath = files[0].webkitRelativePath || files[0].name;
+  const folderName = folderPath.split('/')[0];
+  if (!confirm(`Compress "${folderName}" (${total} files) and send as ${folderName}.zip?`)) return;
+  const formData = new FormData();
   Array.from(files).forEach(file => {
-    const formData = new FormData();
     const path = file.webkitRelativePath || file.name;
     formData.append('file', file, path);
-    fetch('/api/file', {method: 'POST', body: formData})
-      .then(r => r.json()).then(d => {
-        done++;
-        (d.status === 'ok' || d.status === 'queued') ? ok++ : err++;
-        maybeFinal();
-      })
-      .catch(() => { done++; err++; maybeFinal(); });
   });
-  toast(`Uploading ${total} file(s)...`);
+  toast(`Zipping ${total} file(s)...`);
+  fetch('/api/folder?name=' + encodeURIComponent(folderName), {method: 'POST', body: formData})
+    .then(r => r.json())
+    .then(d => {
+      if (d.status === 'ok') toast(`Sent ${d.name} (${formatSize(d.size)})`);
+      else if (d.status === 'queued') toast(`Queued ${d.name} (${formatSize(d.size)})`);
+      else toast('Folder upload failed: ' + (d.error || ''));
+    })
+    .catch(() => toast('Folder upload failed'));
 }
 
 function pickReceivedDir(input) {
