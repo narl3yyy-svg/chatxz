@@ -142,11 +142,11 @@ body {
 #send-btn:hover { opacity: .8; }
 
 /* Dialog */
-#connect-dialog, #settings-dialog, #save-contact-dialog {
+#connect-dialog, #save-contact-dialog {
   display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
   background: rgba(0,0,0,.6); z-index: 1000; align-items: center; justify-content: center;
 }
-#connect-dialog.open, #settings-dialog.open, #save-contact-dialog.open { display: flex; }
+#connect-dialog.open, #save-contact-dialog.open { display: flex; }
 .dialog-open #main { pointer-events: none; }
 .dialog {
   background: var(--surface); border-radius: 12px; padding: 24px;
@@ -165,7 +165,15 @@ body {
 .dlg-btn { padding: 8px 20px; border-radius: 6px; border: none; font-size: 14px; cursor: pointer; }
 .dlg-btn.primary { background: var(--primary); color: #fff; }
 .dlg-btn.secondary { background: rgba(255,255,255,.1); color: var(--text); }
-.settings-section { margin-bottom: 16px; }
+#settings-panel input, #settings-panel select {
+  width: 100%; background: var(--bg); border: 1px solid rgba(255,255,255,.1);
+  border-radius: 6px; color: var(--text); padding: 8px 10px; font-size: 13px;
+  margin-bottom: 8px; outline: none;
+}
+#settings-panel input:focus { border-color: var(--primary); }
+#settings-panel select option { background: var(--surface); color: var(--text); }
+#settings-panel label { font-size: 11px; color: var(--text2); display: block; margin-bottom: 3px; }
+.settings-section { margin-bottom: 14px; }
 .settings-section p { font-size: 12px; color: var(--text2); margin-bottom: 8px; }
 
 /* Emoji picker */
@@ -237,7 +245,9 @@ body {
         <h1>chatxz</h1>
         <div id="identity-box" onclick="copyIdentity()" title="Click to copy">Loading...</div>
       </div>
-      <button id="settings-btn" onclick="showSettings()" title="Settings">⚙</button>
+      <div style="display:flex;gap:2px">
+        <button id="settings-btn" onclick="toggleSettings()" title="Settings" style="background:none;border:1px solid rgba(255,255,255,.1);color:var(--text2);width:32px;height:32px;border-radius:6px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;flex-shrink:0">⚙</button>
+      </div>
     </div>
     <div id="contacts-section">
       <h3>Contacts</h3>
@@ -264,6 +274,49 @@ body {
         <div id="peer-count" style="margin-top:2px">Peers: 0</div>
         <div id="temp-display" style="margin-top:2px">🌡 --°C</div>
         <div id="queue-count" style="display:none;margin-top:2px"></div>
+      </div>
+    </div>
+    <div id="settings-panel" style="display:none;flex-direction:column;flex:1;overflow-y:auto;padding:12px;font-size:13px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h3 style="font-size:14px;color:var(--text)">Settings</h3>
+        <button onclick="toggleSettings()" style="background:none;border:none;color:var(--text2);font-size:18px;cursor:pointer;line-height:1" title="Close">&times;</button>
+      </div>
+      <div class="settings-section">
+        <label>Display Name</label>
+        <input id="settings-name" placeholder="Your name...">
+      </div>
+      <div class="settings-section">
+        <label>Chat History Retention</label>
+        <select id="settings-retention">
+          <option value="1d">1 day</option>
+          <option value="1w">1 week</option>
+          <option value="1m">1 month</option>
+          <option value="6m">6 months</option>
+          <option value="12m">12 months</option>
+          <option value="never">Never delete</option>
+        </select>
+        <button class="dlg-btn secondary" style="margin-top:6px;width:100%" onclick="clearHistory()">Clear History Now</button>
+      </div>
+      <div class="settings-section">
+        <label>Save Received Files To</label>
+        <div style="display:flex;gap:4px">
+          <input id="settings-files-dir" style="flex:1;font-size:11px;color:var(--text2)">
+          <button class="dlg-btn secondary" onclick="document.getElementById('folder-picker').click()" style="padding:6px 10px">📂</button>
+        </div>
+        <input type="file" id="folder-picker" style="display:none" webkitdirectory onchange="pickReceivedDir(this)">
+      </div>
+      <div class="settings-section" style="border-top:1px solid rgba(255,255,255,.1);padding-top:10px;margin-top:4px">
+        <label>Your Identity</label>
+        <input id="settings-hash" readonly style="font-size:10px;color:var(--text2);margin-bottom:6px">
+        <button class="dlg-btn secondary" style="width:100%" onclick="regenerateIdentity()">🔄 Regenerate Identity</button>
+      </div>
+      <div class="settings-section" style="border-top:1px solid rgba(255,255,255,.1);padding-top:10px">
+        <label>Server</label>
+        <button class="dlg-btn secondary" style="width:100%;color:var(--primary)" onclick="restartServer()">🔄 Restart Server</button>
+      </div>
+      <div style="margin-top:auto;padding-top:12px;display:flex;gap:6px">
+        <button class="dlg-btn secondary" style="flex:1" onclick="toggleSettings()">Cancel</button>
+        <button class="dlg-btn primary" style="flex:1" onclick="saveSettings()">Save</button>
       </div>
     </div>
   </div>
@@ -335,52 +388,6 @@ body {
     <div class="dlg-btn-row">
       <button class="dlg-btn secondary" onclick="closeConnectDialog()">Cancel</button>
       <button class="dlg-btn primary" onclick="doConnect()">Connect</button>
-    </div>
-  </div>
-</div>
-
-<!-- Settings dialog -->
-<div id="settings-dialog" onclick="if(event.target===this)closeSettings()">
-  <div class="dialog" style="position:relative;padding-top:40px">
-    <button onclick="closeSettings()" style="position:absolute;top:8px;right:12px;background:none;border:none;color:var(--text2);font-size:22px;cursor:pointer;line-height:1;z-index:10" title="Close">&times;</button>
-    <h2>Settings</h2>
-    <div class="settings-section">
-      <label>Display Name (shown in announces)</label>
-      <input id="settings-name" placeholder="Your name...">
-    </div>
-    <div class="settings-section">
-      <label>Chat History Retention</label>
-      <select id="settings-retention">
-        <option value="1d">1 day</option>
-        <option value="1w">1 week</option>
-        <option value="1m">1 month</option>
-        <option value="6m">6 months</option>
-        <option value="12m">12 months</option>
-        <option value="never">Never delete</option>
-      </select>
-      <button class="dlg-btn secondary" style="margin-top:6px;width:100%" onclick="clearHistory()">Clear History Now</button>
-    </div>
-    <div class="settings-section">
-      <label>Save Received Files To</label>
-      <div style="display:flex;gap:4px">
-        <input id="settings-files-dir" style="flex:1;font-size:11px;color:var(--text2)">
-        <button class="dlg-btn secondary" onclick="document.getElementById('folder-picker').click()" title="Browse">📂</button>
-      </div>
-      <input type="file" id="folder-picker" style="display:none" webkitdirectory onchange="pickReceivedDir(this)">
-    </div>
-    <div class="settings-section" style="border-top:1px solid rgba(255,255,255,.1);padding-top:12px">
-      <p>Your identity hash:</p>
-      <input id="settings-hash" readonly style="font-size:11px;color:var(--text2);margin-bottom:6px">
-      <button class="dlg-btn secondary" style="width:100%" onclick="regenerateIdentity()">🔄 Regenerate Identity</button>
-      <div style="font-size:11px;color:var(--text2);margin-top:4px">Old identity is backed up. Reconnect all peers after changing.</div>
-    </div>
-    <div class="settings-section" style="border-top:1px solid rgba(255,255,255,.1);padding-top:12px">
-      <label>Server</label>
-      <button class="dlg-btn secondary" style="width:100%;color:var(--danger)" onclick="restartServer()">🔄 Restart Server</button>
-    </div>
-    <div class="dlg-btn-row" style="margin-top:12px">
-      <button class="dlg-btn secondary" onclick="closeSettings()">Cancel</button>
-      <button class="dlg-btn primary" onclick="saveSettings()">Save</button>
     </div>
   </div>
 </div>
@@ -717,22 +724,27 @@ function announceSelf() {
   toast('Announcing on LAN...');
 }
 
-function showSettings() {
-  fetch('/api/settings')
-    .then(r => r.json())
-    .then(s => {
-      document.getElementById('settings-name').value = s.name || '';
-      document.getElementById('settings-retention').value = s.history_retention || 'never';
-      document.getElementById('settings-hash').value = myHash;
-      document.getElementById('settings-files-dir').value = s.received_dir || '';
-      document.getElementById('settings-dialog').classList.add('open');
-      document.body.classList.add('dialog-open');
-    });
-}
+let settingsShown = false;
 
-function closeSettings() {
-  document.getElementById('settings-dialog').classList.remove('open');
-  document.body.classList.remove('dialog-open');
+function toggleSettings() {
+  settingsShown = !settingsShown;
+  const contacts = document.getElementById('contacts-section');
+  const panel = document.getElementById('settings-panel');
+  if (settingsShown) {
+    contacts.style.display = 'none';
+    panel.style.display = 'flex';
+    fetch('/api/settings')
+      .then(r => r.json())
+      .then(s => {
+        document.getElementById('settings-name').value = s.name || '';
+        document.getElementById('settings-retention').value = s.history_retention || 'never';
+        document.getElementById('settings-hash').value = myHash;
+        document.getElementById('settings-files-dir').value = s.received_dir || '';
+      });
+  } else {
+    contacts.style.display = 'flex';
+    panel.style.display = 'none';
+  }
 }
 
 function saveSettings() {
@@ -746,7 +758,7 @@ function saveSettings() {
   }).then(r => r.json()).then(d => {
     if (d.status === 'ok') {
       toast('Settings saved');
-      closeSettings();
+      toggleSettings();
     } else {
       toast('Failed to save settings');
     }
