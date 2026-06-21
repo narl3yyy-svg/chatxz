@@ -580,6 +580,23 @@ body.modal-open #save-contact-dialog * { pointer-events: auto; user-select: auto
 }
 .folder-option-btn:hover { background: var(--surface-hover); border-color: var(--border-strong); }
 .folder-option-btn .path { display: block; font-size: 10px; color: var(--text3); margin-top: 4px; word-break: break-all; }
+.network-status {
+  margin-top: 10px; font-size: 11px; color: var(--text2); line-height: 1.5;
+}
+.net-row {
+  display: flex; justify-content: space-between; gap: 8px;
+  padding: 6px 0; border-bottom: 1px solid var(--border);
+}
+.net-row:last-child { border-bottom: none; }
+.net-label { color: var(--text3); flex-shrink: 0; }
+.net-value { color: var(--text); text-align: right; word-break: break-all; }
+.net-iface {
+  padding: 8px 10px; margin-top: 6px; border-radius: var(--radius-md);
+  background: rgba(0,0,0,0.2); border: 1px solid var(--border);
+}
+.net-ok { color: var(--success); }
+.net-bad { color: var(--danger); }
+.net-warn { color: var(--warning); }
 #save-contact-dialog .dialog { pointer-events: auto; }
 #save-contact-dialog input, #save-contact-dialog button { pointer-events: auto; }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -828,6 +845,11 @@ body.sidebar-open #sidebar-backdrop { display: block; }
             <p class="field-hint" id="settings-received-hint">Browse picks a native folder path. Click Save to apply.</p>
             <input type="file" id="dir-picker-fallback" style="display:none" webkitdirectory onchange="pickReceivedDirFallback(this)">
           </div>
+        </div>
+        <div class="settings-card">
+          <h4>📡 Network</h4>
+          <button class="btn-block" onclick="refreshNetworkStatus()">Refresh status</button>
+          <div id="network-status-panel" class="network-status">Open settings or tap Refresh to load network status.</div>
         </div>
         <div class="settings-card danger">
           <h4>⚠ Advanced</h4>
@@ -1355,7 +1377,7 @@ function renderDiscovered(peers) {
     div.innerHTML = `<div class="contact-avatar contact-avatar-lan">${escapeHtml(name).charAt(0).toUpperCase()}</div>
       <div class="contact-info">
         <div class="contact-name">${escapeHtml(name)}</div>
-        <div class="contact-hash">${truncateHash(p.hash)}</div>
+        <div class="contact-hash">${truncateHash(p.hash)}${p.ip ? ' · ' + escapeHtml(p.ip) : ''}</div>
       </div>
       <span class="contact-badge lan">LAN</span>`;
     div.onclick = () => connectTo(p.hash);
@@ -1460,7 +1482,9 @@ function announceSelf() {
       const d = await r.json();
       if (r.ok && d.status === 'ok') {
         const hint = d.broadcast ? ` via ${d.broadcast}` : '';
-        toast('Announcing on LAN' + hint + ' (beacon :8743)');
+        const hits = d.http_probe_hits ? `, ${d.http_probe_hits} HTTP replies` : '';
+        toast('Announcing on LAN' + hint + hits);
+        refreshNetworkStatus();
         return;
       }
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1486,6 +1510,61 @@ window.onChatxzFolderPickError = function(message) {
 let settingsShown = false;
 let connectShown = false;
 
+function netClass(ok) {
+  return ok ? 'net-ok' : 'net-bad';
+}
+
+function refreshNetworkStatus() {
+  const panel = document.getElementById('network-status-panel');
+  if (!panel) return;
+  panel.textContent = 'Loading...';
+  fetch('/api/network-status')
+    .then(r => r.json())
+    .then(d => {
+      let html = '';
+      const row = (label, value, ok) =>
+        `<div class="net-row"><span class="net-label">${label}</span><span class="net-value ${ok === undefined ? '' : netClass(ok)}">${escapeHtml(String(value ?? '—'))}</span></div>`;
+      html += row('Platform', d.platform);
+      html += row('HTTP bind', d.http_bind);
+      html += row('LAN IP', d.lan_ip || 'none', !!d.lan_ip);
+      html += row('Broadcast', d.broadcast || 'none', !!d.broadcast);
+      html += row('RNS ready', d.rns_ready ? 'yes' : 'no', d.rns_ready);
+      if (d.rns_error) html += row('RNS error', d.rns_error, false);
+      html += row('Link active', d.link_active ? 'yes' : 'no', d.link_active);
+      html += row('Discovered peers', d.discovered_count ?? 0, (d.discovered_count || 0) > 0);
+      html += row('WS clients', d.ws_clients ?? 0);
+      if (d.beacon) {
+        html += row('Beacon sent', d.beacon.packets_sent ?? 0);
+        html += row('Beacon received', d.beacon.packets_received ?? 0, (d.beacon.packets_received || 0) > 0);
+        html += row('Subnet probes', d.beacon.last_subnet_probes ?? 0);
+      }
+      if (Array.isArray(d.interfaces) && d.interfaces.length) {
+        html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Interfaces</div>';
+        d.interfaces.forEach(iface => {
+          html += `<div class="net-iface"><strong>${escapeHtml(iface.name || 'iface')}</strong> — ${escapeHtml(iface.ip || '?')}`;
+          if (iface.broadcast) html += `<div style="font-size:10px;color:var(--text3);margin-top:4px">bcast ${escapeHtml(iface.broadcast)}</div>`;
+          html += '</div>';
+        });
+      }
+      if (Array.isArray(d.rns_interfaces) && d.rns_interfaces.length) {
+        html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">RNS interfaces</div>';
+        d.rns_interfaces.forEach(iface => {
+          html += row(iface.type + (iface.name ? ` (${iface.name})` : ''), iface.online ? 'online' : 'offline', iface.online);
+        });
+      }
+      if (Array.isArray(d.discovered_peers) && d.discovered_peers.length) {
+        html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Discovered</div>';
+        d.discovered_peers.forEach(p => {
+          const label = (p.name || p.hash || '').slice(0, 16);
+          const ip = p.ip ? ` @ ${p.ip}` : '';
+          html += row(label, (p.via || 'peer') + ip, true);
+        });
+      }
+      panel.innerHTML = html;
+    })
+    .catch(() => { panel.textContent = 'Failed to load network status.'; });
+}
+
 function toggleSettings() {
   settingsShown = !settingsShown;
   if (connectShown) { connectShown = false; document.getElementById('connect-panel').classList.remove('open'); }
@@ -1495,6 +1574,7 @@ function toggleSettings() {
   if (settingsShown) {
     panel.classList.add('open');
     btn?.classList.add('active');
+    refreshNetworkStatus();
     fetch('/api/settings')
       .then(r => r.json())
       .then(s => {

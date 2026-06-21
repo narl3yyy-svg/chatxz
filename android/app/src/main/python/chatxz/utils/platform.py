@@ -118,6 +118,43 @@ def lan_ip():
     return None
 
 
+def list_network_interfaces():
+    """Active IPv4 interfaces with broadcast addresses."""
+    entries = []
+    seen = set()
+
+    if is_android():
+        for host, bcast in _java_lan_addresses():
+            entry = {
+                "name": "wifi",
+                "ip": host,
+                "broadcast": bcast,
+                "subnet_broadcast": None,
+                "up": True,
+            }
+            if host and host not in seen:
+                seen.add(host)
+                parts = host.split(".")
+                if len(parts) == 4:
+                    entry["subnet_broadcast"] = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+                entries.append(entry)
+        if entries:
+            return entries
+
+    ip = lan_ip()
+    if ip:
+        parts = ip.split(".")
+        subnet = f"{parts[0]}.{parts[1]}.{parts[2]}.255" if len(parts) == 4 else None
+        entries.append({
+            "name": "default",
+            "ip": ip,
+            "broadcast": subnet,
+            "subnet_broadcast": subnet,
+            "up": True,
+        })
+    return entries
+
+
 def lan_broadcast():
     """Subnet broadcast address for RNS UDP announces (Android needs directed broadcast)."""
     if is_android():

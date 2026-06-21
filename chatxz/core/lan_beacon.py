@@ -1,4 +1,4 @@
-"""Simple UDP LAN beacon for peer discovery (supplements RNS announces)."""
+"""UDP LAN beacon for peer discovery (supplements RNS announces)."""
 
 import json
 import socket
@@ -6,11 +6,11 @@ import threading
 import time
 
 from chatxz.core.discovery import APP_NAME
-from chatxz.utils.platform import lan_broadcast, lan_ip
+from chatxz.utils.platform import is_android, lan_broadcast, lan_ip, list_network_interfaces
 
 BEACON_PORT = 8743
 MAGIC = b"CHATXZ1"
-BEACON_INTERVAL = 30
+
 
 
 class LanBeacon:
@@ -21,25 +21,36 @@ class LanBeacon:
         self.ip = ip
         self.port = port
         self.running = False
-        self._sock = None
+        self._rx_sock = None
+        self._tx_sock = None
         self._listen_thread = None
         self._periodic_thread = None
         self.last_send_targets = []
+        self.last_subnet_probes = 0
         self.packets_sent = 0
         self.packets_received = 0
+        self._interval = 15 if is_android() else 30
 
     def start(self):
         if self.running:
             return
         self.running = True
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self._rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
+        self._rx_sock.bind(("0.0.0.0", BEACON_PORT))
+        self._rx_sock.settimeout(1.0)
+
+        self._tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._tx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        try:
+            self._tx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         except OSError:
             pass
-        self._sock.bind(("0.0.0.0", BEACON_PORT))
-        self._sock.settimeout(1.0)
+
         self._listen_thread = threading.Thread(target=self._listen, name="chatxz-beacon-rx", daemon=True)
         self._listen_thread.start()
         self._periodic_thread = threading.Thread(target=self._periodic, name="chatxz-beacon-tx", daemon=True)
@@ -48,14 +59,22 @@ class LanBeacon:
 
     def stop(self):
         self.running = False
-        if self._sock:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
+        for sock in (self._rx_sock, self._tx_sock):
+            if sock:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        self._rx_sock = None
+        self._tx_sock = None
+
+    def _refresh_ip(self):
+        current = lan_ip()
+        if current:
+            self.ip = current
 
     def _payload(self):
+        self._refresh_ip()
         return json.dumps({
             "app": APP_NAME,
             "v": 1,
@@ -67,10 +86,14 @@ class LanBeacon:
 
     def _broadcast_targets(self):
         targets = []
+        for iface in list_network_interfaces():
+            for candidate in (iface.get("broadcast"), iface.get("subnet_broadcast")):
+                if candidate and candidate not in targets:
+                    targets.append(candidate)
         for candidate in (lan_broadcast(), "255.255.255.255"):
             if candidate and candidate not in targets:
                 targets.append(candidate)
-        ip = lan_ip() or self.ip
+        ip = self.ip or lan_ip()
         if ip:
             parts = ip.split(".")
             if len(parts) == 4:
@@ -80,27 +103,51 @@ class LanBeacon:
         self.last_send_targets = targets
         return targets
 
-    def send(self, count=3):
-        if not self._sock or not self.running:
+    def _subnet_unicast_targets(self):
+        ip = self.ip or lan_ip()
+        if not ip:
+            return []
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return []
+        base = f"{parts[0]}.{parts[1]}.{parts[2]}"
+        my_host = parts[3]
+        return [f"{base}.{i}" for i in range(1, 255) if str(i) != my_host]
+
+    def send(self, count=3, subnet_probe=False):
+        if not self._tx_sock or not self.running:
             return 0
         packet = MAGIC + self._payload()
         sent = 0
         for _ in range(count):
             for addr in self._broadcast_targets():
                 try:
-                    self._sock.sendto(packet, (addr, BEACON_PORT))
+                    self._tx_sock.sendto(packet, (addr, BEACON_PORT))
                     sent += 1
                 except OSError as exc:
-                    print(f"[beacon] send to {addr}:{BEACON_PORT} failed: {exc}")
+                    print(f"[beacon] broadcast to {addr}:{BEACON_PORT} failed: {exc}")
+
+        if subnet_probe:
+            probed = 0
+            for host in self._subnet_unicast_targets():
+                try:
+                    self._tx_sock.sendto(packet, (host, BEACON_PORT))
+                    sent += 1
+                    probed += 1
+                except OSError:
+                    pass
+            self.last_subnet_probes = probed
+            print(f"[beacon] Subnet probe sent to {probed} host(s)")
+
         self.packets_sent += sent
         if sent:
-            print(f"[beacon] Sent {sent} packet(s) to {self.last_send_targets}")
+            print(f"[beacon] Sent {sent} packet(s); broadcast targets={self.last_send_targets}")
         return sent
 
     def _listen(self):
-        while self.running and self._sock:
+        while self.running and self._rx_sock:
             try:
-                data, addr = self._sock.recvfrom(4096)
+                data, addr = self._rx_sock.recvfrom(4096)
             except socket.timeout:
                 continue
             except OSError:
@@ -117,10 +164,22 @@ class LanBeacon:
             self.discovery._on_beacon(payload, self.identity_hash)
 
     def _periodic(self):
-        time.sleep(3)
+        time.sleep(4)
         while self.running:
-            self.send(count=1)
-            for _ in range(BEACON_INTERVAL):
+            self.send(count=1, subnet_probe=is_android())
+            for _ in range(self._interval):
                 if not self.running:
                     return
                 time.sleep(1)
+
+    def status(self):
+        return {
+            "port": BEACON_PORT,
+            "running": self.running,
+            "lan_ip": self.ip or lan_ip(),
+            "broadcast_targets": self.last_send_targets,
+            "last_subnet_probes": self.last_subnet_probes,
+            "packets_sent": self.packets_sent,
+            "packets_received": self.packets_received,
+            "interval_sec": self._interval,
+        }

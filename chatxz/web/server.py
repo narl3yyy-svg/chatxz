@@ -1,6 +1,7 @@
 import os, json, time, base64, mimetypes, asyncio, socket, zipfile, shutil, subprocess, tempfile, signal, re, sys
 from pathlib import Path
 
+import aiohttp
 from aiohttp import web
 import RNS
 
@@ -16,6 +17,7 @@ from chatxz.utils.platform import (
     lan_broadcast,
     android_storage_dirs,
     patch_embedded_signals,
+    list_network_interfaces,
 )
 from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 
@@ -456,7 +458,7 @@ class ChatWebServer:
             port=self.port,
         )
         self.lan_beacon.start()
-        self.lan_beacon.send(count=2)
+        self.lan_beacon.send(count=2, subnet_probe=is_android())
 
         return my_hash
 
@@ -609,6 +611,90 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
+    def _beacon_payload(self):
+        return {
+            "app": "chatxz",
+            "v": 1,
+            "hash": self.identity_mgr.get_hex_hash() if self.identity_mgr else "",
+            "name": self.load_settings().get("name", ""),
+            "ip": detect_lan_ip() or "",
+            "port": self.port,
+        }
+
+    async def _fanout_beacon_http(self):
+        ip = detect_lan_ip()
+        if not ip:
+            return 0
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return 0
+        base = f"{parts[0]}.{parts[1]}.{parts[2]}"
+        payload = self._beacon_payload()
+        timeout = aiohttp.ClientTimeout(total=0.75)
+        hits = 0
+
+        async def post_one(session, host):
+            nonlocal hits
+            if host == ip:
+                return
+            try:
+                url = f"http://{host}:{self.port}/api/beacon-ingest"
+                async with session.post(url, json=payload) as resp:
+                    if resp.status == 200:
+                        hits += 1
+            except Exception:
+                pass
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            hosts = [f"{base}.{i}" for i in range(1, 255)]
+            await asyncio.gather(*[post_one(session, h) for h in hosts], return_exceptions=True)
+        print(f"[beacon] HTTP subnet scan reached {hits} peer(s)")
+        return hits
+
+    async def handle_beacon_ingest(self, request):
+        try:
+            data = await request.json()
+            if self.discovery:
+                remote = request.remote or ""
+                if remote and not data.get("ip"):
+                    data["ip"] = remote
+                my_hash = self.identity_mgr.get_hex_hash() if self.identity_mgr else ""
+                self.discovery._on_beacon(data, my_hash)
+            return web.json_response({"status": "ok"})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def handle_network_status(self, request):
+        rns_interfaces = []
+        try:
+            for iface in getattr(RNS.Transport, "interfaces", []) or []:
+                rns_interfaces.append({
+                    "type": type(iface).__name__,
+                    "online": bool(getattr(iface, "online", False)),
+                    "name": str(getattr(iface, "name", "") or getattr(iface, "interface_name", "")),
+                })
+        except Exception:
+            pass
+        peers = self.discovery.get_peers() if self.discovery else []
+        link_active = bool(self.messaging and self.messaging.active_link)
+        return web.json_response({
+            "platform": "android" if is_android() else "desktop",
+            "http_bind": f"{self.host}:{self.port}",
+            "lan_ip": detect_lan_ip(),
+            "broadcast": lan_broadcast(),
+            "interfaces": list_network_interfaces(),
+            "rns_ready": bool(self.messaging and self.messaging.destination),
+            "rns_error": self.rns_init_error,
+            "rns_interfaces": rns_interfaces,
+            "beacon": self.lan_beacon.status() if self.lan_beacon else None,
+            "discovered_peers": peers,
+            "discovered_count": len(peers),
+            "ws_clients": len(self.websockets),
+            "link_active": link_active,
+            "active_peer": self.active_peer,
+            "queue_size": self.messaging.queue_size() if self.messaging else 0,
+        })
+
     async def handle_announce(self, request):
         ok, err = await self._wait_for_rns()
         if not ok:
@@ -620,12 +706,14 @@ class ChatWebServer:
                     await asyncio.sleep(0.4)
             beacon_sent = 0
             if self.lan_beacon:
-                beacon_sent = await asyncio.to_thread(self.lan_beacon.send, 3)
+                beacon_sent = await asyncio.to_thread(self.lan_beacon.send, 3, True)
+            http_hits = await self._fanout_beacon_http()
             return web.json_response({
                 "status": "ok",
                 "broadcast": lan_broadcast(),
                 "beacon_port": BEACON_PORT,
                 "beacon_sent": beacon_sent,
+                "http_probe_hits": http_hits,
                 "lan_ip": detect_lan_ip(),
             })
         except Exception as e:
@@ -1265,7 +1353,8 @@ class ChatWebServer:
                     if i < 2:
                         await asyncio.sleep(0.4)
                 if self.lan_beacon:
-                    await asyncio.to_thread(self.lan_beacon.send, 3)
+                    await asyncio.to_thread(self.lan_beacon.send, 3, True)
+                await self._fanout_beacon_http()
             elif err:
                 await ws.send_str(json.dumps({"type": "info", "data": "Announce failed: " + err}))
         elif msg_type == "read_receipt":
@@ -1292,6 +1381,8 @@ class ChatWebServer:
         app.router.add_delete("/api/contacts/{hash}", self.handle_delete_contact)
         app.router.add_post("/api/connect", self.handle_connect)
         app.router.add_post("/api/announce", self.handle_announce)
+        app.router.add_post("/api/beacon-ingest", self.handle_beacon_ingest)
+        app.router.add_get("/api/network-status", self.handle_network_status)
         app.router.add_post("/api/disconnect", self.handle_disconnect)
         app.router.add_post("/api/file", self.handle_file_upload)
         app.router.add_post("/api/folder", self.handle_folder_upload)

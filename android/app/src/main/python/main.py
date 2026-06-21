@@ -14,7 +14,10 @@ try:
 except Exception:
     pass
 
-HOST, PORT = "127.0.0.1", 8742
+# Bind on all interfaces so LAN peers can reach beacon-ingest and file transfer.
+BIND_HOST, PORT = "0.0.0.0", 8742
+# WebView always loads the local loopback URL.
+WEB_HOST = "127.0.0.1"
 _server_error = []
 
 
@@ -50,7 +53,7 @@ def start_server():
         try:
             from chatxz.web.server import ChatWebServer
             server = ChatWebServer(
-                host=HOST, port=PORT, verbose=False, force=False, embedded=True,
+                host=BIND_HOST, port=PORT, verbose=False, force=False, embedded=True,
             )
             server.run_embedded()
         except Exception:
@@ -59,7 +62,7 @@ def start_server():
     thread = threading.Thread(target=_run, name="chatxz-server", daemon=True)
     thread.start()
 
-    if not _wait_for_port(HOST, PORT):
+    if not _wait_for_port(WEB_HOST, PORT):
         if _server_error:
             err = _server_error[0]
             # Keep the most useful tail of long tracebacks for the UI dialog.
@@ -68,4 +71,4 @@ def start_server():
             return "None", err
         return "None", "Server timeout — port 8742 did not open in 90s"
 
-    return HOST, str(PORT)
+    return WEB_HOST, str(PORT)

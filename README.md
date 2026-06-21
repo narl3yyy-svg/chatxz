@@ -194,7 +194,7 @@ The APK bundles Python 3.13, RNS, cryptography, aiohttp, and the full chatxz web
 
 On phone-sized screens the chat area fills the display by default. Tap **☰** in the header to open the sidebar (contacts, connect, settings). The sidebar stays open while you use it and only closes when you connect to a peer, tap outside, or press the Android back button.
 
-**LAN discovery:** chatxz uses two mechanisms on the same Wi‑Fi — Reticulum UDP (port **4242**) plus a simple LAN beacon (port **8743**). All platforms broadcast to your subnet address (e.g. `192.168.1.255`). Peers also beacon automatically every 30 seconds; tap **Announce** for an immediate burst.
+**LAN discovery:** chatxz uses Reticulum UDP (**4242**), a LAN beacon (**8743**), and an HTTP subnet scan on **Announce** (each device probes `192.168.x.1–254`). Android binds the server on `0.0.0.0` so other devices can reach it. Check **Settings → Network** for interface and beacon counters.
 
 If devices never appear under **Discovered**:
 - Confirm all devices are on the **same Wi‑Fi subnet** (not guest/isolated VLAN)
