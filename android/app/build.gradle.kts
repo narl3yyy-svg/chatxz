@@ -51,11 +51,6 @@ chaquopy {
             install("aiohttp")
         }
     }
-    sourceSets {
-        getByName("main") {
-            srcDir("../../")
-        }
-    }
 }
 
 dependencies {

@@ -1,7 +1,7 @@
 """
 chatxz Android entry point - starts the web server and returns the URL.
 """
-import sys, os, threading, time
+import threading, time
 
 def start_server():
     host = "127.0.0.1"
