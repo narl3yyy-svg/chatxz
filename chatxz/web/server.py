@@ -25,7 +25,7 @@ SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 
 DEFAULT_RNS_CONFIG = """[reticulum]
 enable_transport = Yes
-share_instance = Yes
+share_instance = No
 
 [logging]
 loglevel = 3
@@ -55,6 +55,20 @@ def detect_lan_ip():
         return ip
     except:
         return None
+
+def cleanup_rns_stale():
+    import glob as _glob
+    for p in _glob.glob("/tmp/rns/*/socket"):
+        try:
+            os.unlink(p)
+            print(f"[cleanup] Removed stale RNS socket: {p}")
+        except:
+            pass
+    for p in _glob.glob("/tmp/rns/*"):
+        try:
+            os.rmdir(p)
+        except:
+            pass
 
 class ChatWebServer:
     def __init__(self, host="127.0.0.1", port=8742, verbose=False):
@@ -169,13 +183,30 @@ class ChatWebServer:
                 with open(rns_config_path, "w") as f:
                     f.write(existing)
                 print(f"[config] Updated {rns_config_path}")
+            elif "share_instance = Yes" in existing:
+                existing = existing.replace("share_instance = Yes", "share_instance = No")
+                with open(rns_config_path, "w") as f:
+                    f.write(existing)
+                print(f"[config] Disabled share_instance")
         else:
             with open(rns_config_path, "w") as f:
                 f.write(DEFAULT_RNS_CONFIG)
             print(f"[config] Created RNS config at {rns_config_path}")
 
+        cleanup_rns_stale()
+
         loglevel = RNS.LOG_DEBUG if self.verbose else RNS.LOG_NOTICE
-        RNS.Reticulum(self.config_dir, loglevel=loglevel)
+        try:
+            RNS.Reticulum(self.config_dir, loglevel=loglevel)
+        except OSError as e:
+            print(f"[RNS] Bind error: {e}")
+            print("[RNS] Cleaning up and retrying...")
+            import subprocess
+            subprocess.run(["pkill", "-f", "Reticulum"], capture_output=True)
+            import time
+            time.sleep(2)
+            cleanup_rns_stale()
+            RNS.Reticulum(self.config_dir, loglevel=loglevel)
         self.identity = self.identity_mgr.load_or_create()
         settings = self.load_settings()
         my_ip = detect_lan_ip()
