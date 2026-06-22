@@ -246,6 +246,11 @@ class MessagingBackend:
 
     def _notify_link_established(self, link, peer_hash=None):
         peer = normalize_hash(peer_hash or self._peer_destination_hash(link))
+        if link is _HTTP_LINK:
+            self.lan_transport = "http"
+        else:
+            self.lan_transport = "rns"
+            self.http_peer = None
         self.active_link = link
         self.active_peer_hash = peer
         if self.on_link_established:
@@ -295,9 +300,16 @@ class MessagingBackend:
             pass
 
     def _link_callback(self, link):
-        print(f"[messaging] Incoming link established: {link.link_id.hex()[:12]}")
         remote_hash = self._get_remote_hash(link)
         peer_hash = self._peer_destination_hash(link)
+        if self._session_occupied(peer_hash):
+            print(f"[messaging] Rejecting incoming link from {peer_hash[:16]}... (busy with {self.active_peer_hash[:16]}...)")
+            try:
+                link.teardown()
+            except Exception:
+                pass
+            return
+        print(f"[messaging] Incoming link established: {link.link_id.hex()[:12]}")
         self._setup_link(link)
         self._notify_link_established(link, peer_hash)
         self.drain_queue(link, remote_hash)
@@ -595,6 +607,43 @@ class MessagingBackend:
                 return iface
         return None
 
+    def _session_occupied(self, peer_hash):
+        if not self.active_link or not self.active_peer_hash:
+            return False
+        return normalize_hash(peer_hash) != normalize_hash(self.active_peer_hash)
+
+    def _set_udp_forward_ip(self, peer_ip):
+        iface = self._udp_interface()
+        if not iface or not peer_ip:
+            return None, None
+        targets = [iface]
+        parent = getattr(iface, "parent_interface", None)
+        if parent is not None:
+            targets.append(parent)
+        saved = []
+        for target in targets:
+            if hasattr(target, "forward_ip"):
+                saved.append((target, target.forward_ip))
+                target.forward_ip = peer_ip
+        return iface, saved
+
+    def _restore_udp_forward_ip(self, saved):
+        if not saved:
+            return
+        for target, old_ip in saved:
+            if old_ip is not None and hasattr(target, "forward_ip"):
+                target.forward_ip = old_ip
+
+    def _directed_path_attempt(self, dest_hash, peer_ip, timeout=10):
+        saved = None
+        try:
+            _, saved = self._set_udp_forward_ip(peer_ip)
+            self._announce()
+            self._request_path(dest_hash)
+            return self._wait_for_path(dest_hash, timeout=timeout)
+        finally:
+            self._restore_udp_forward_ip(saved)
+
     def _bootstrap_via_http(self, dest_hash, ip, port):
         url = f"http://{ip}:{port}/api/rns-info?announce=1"
         try:
@@ -651,12 +700,19 @@ class MessagingBackend:
         if self._wait_for_path(dest_hash, timeout=18):
             print(f"[connect] RNS path ready")
             return True
-        if peer:
+        if peer and peer.get("ip"):
+            print(f"[connect] Trying directed UDP to {peer['ip']}...")
+            for attempt in range(3):
+                if self._directed_path_attempt(dest_hash, peer["ip"], timeout=8):
+                    print(f"[connect] RNS path ready (directed UDP to {peer['ip']})")
+                    return True
+                self._bootstrap_via_http(dest_hash, peer["ip"], peer["port"])
+                time.sleep(0.5)
             print(f"[connect] Retrying remote announce + path...")
             self._bootstrap_via_http(dest_hash, peer["ip"], peer["port"])
             self._announce()
-            if self._wait_for_path(dest_hash, timeout=12):
-                print(f"[connect] RNS path ready after retry")
+            if self._directed_path_attempt(dest_hash, peer["ip"], timeout=12):
+                print(f"[connect] RNS path ready after directed retry")
                 return True
         print(f"[connect] No RNS UDP path — will try HTTP LAN fallback if peer IP is known")
         return False
@@ -673,6 +729,14 @@ class MessagingBackend:
         self.http_peer = None
 
     def accept_http_peer(self, ip, port, peer_hash, token, name=""):
+        clean = normalize_hash(peer_hash)
+        if self.active_peer_hash and clean == normalize_hash(self.active_peer_hash):
+            if self.http_peer:
+                self.http_peer["token"] = token
+            return
+        if self._session_occupied(peer_hash):
+            print(f"[connect] Ignoring HTTP LAN from {ip} (busy with {self.active_peer_hash[:16]}...)")
+            return
         self.lan_transport = "http"
         self.http_peer = {
             "ip": ip,
@@ -789,11 +853,6 @@ class MessagingBackend:
         self.active_link = _HTTP_LINK
         self._notify_link_established(_HTTP_LINK, peer_hash)
         print(f"[connect] HTTP LAN link established with {peer['ip']}:{peer['port']}")
-        if self.on_message:
-            self.on_message(
-                ChatMessage("system", f"Connected via HTTP LAN (UDP 4242 blocked on WiFi)"),
-                peer_hash,
-            )
         self.drain_queue(_HTTP_LINK, peer_hash)
         return True
 
@@ -814,6 +873,8 @@ class MessagingBackend:
 
         print(f"[connect] Connecting to {RNS.hexrep(dest_hash)[:20]}...")
         peer = self._lookup_peer_ip(clean)
+        if self.active_link and self.active_peer_hash and normalize_hash(clean) != normalize_hash(self.active_peer_hash):
+            self._teardown_active_link()
 
         try:
             if peer:

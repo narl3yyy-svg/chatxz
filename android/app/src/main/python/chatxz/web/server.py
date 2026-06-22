@@ -24,7 +24,7 @@ from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 CONFIG_DIR = get_config_dir()
 DATA_DIR = get_data_dir()
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
-APP_VERSION = "0.3.14"
+APP_VERSION = "0.3.15"
 LAN_SESSION_TTL = 600
 
 def build_desktop_rns_config(broadcast_ip="255.255.255.255"):
@@ -291,7 +291,7 @@ class ChatWebServer:
                     filtered.append(m)
                 continue
             sender = self._clean_hash(m.get("sender"))
-            if sender in (peer, my_hash, "system"):
+            if sender == peer:
                 filtered.append(m)
         return filtered[-limit:]
 
@@ -468,7 +468,10 @@ class ChatWebServer:
         return my_hash
 
     def _on_message(self, chat_msg, sender_hash):
-        peer = self._clean_hash(sender_hash) if sender_hash and sender_hash != "system" else self._clean_hash(self.active_peer)
+        if sender_hash and sender_hash != "system":
+            peer = self._clean_hash(sender_hash)
+        else:
+            peer = self._clean_hash(self.active_peer)
         entry = {
             "type": chat_msg.msg_type,
             "content": chat_msg.content,
@@ -850,12 +853,8 @@ class ChatWebServer:
                 return web.json_response({"error": str(e)}, status=400)
 
     async def handle_disconnect(self, request):
-        if self.messaging and self.messaging.active_link:
-            try:
-                self.messaging.active_link.teardown()
-            except:
-                pass
-            self.messaging.active_link = None
+        if self.messaging:
+            self.messaging._teardown_active_link()
         self.active_peer = None
         return web.json_response({"status": "ok"})
 

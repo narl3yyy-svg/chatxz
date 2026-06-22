@@ -929,7 +929,7 @@ body.sidebar-open #sidebar-backdrop { display: block; }
           <div class="composer-tools">
             <button class="input-btn" id="emoji-btn" onclick="toggleEmoji()" title="Emoji">😊</button>
             <button class="input-btn" id="voice-btn" onclick="toggleVoice()" title="Voice note">🎤</button>
-            <button class="input-btn" id="file-btn" onclick="document.getElementById('file-input').click()" title="Attach file">📎</button>
+            <button class="input-btn" id="file-btn" onclick="pickFiles()" title="Attach file">📎</button>
             <input type="file" id="file-input" style="display:none" multiple onchange="uploadFiles(this.files);this.value=''">
             <button class="input-btn" id="folder-btn" onclick="document.getElementById('folder-input').click()" title="Attach folder">📁</button>
             <input type="file" id="folder-input" style="display:none" webkitdirectory multiple onchange="uploadFolder(this.files);this.value=''">
@@ -1755,9 +1755,31 @@ function receiptIcon(status) {
   return '';
 }
 
+function peerKey(hash) {
+  return (hash || '').replace(/:/g, '').toLowerCase();
+}
+
+function messageBelongsToPeer(data) {
+  if (!connected) return true;
+  const active = peerKey(connected);
+  const mp = peerKey(data.peer);
+  if (mp) return mp === active;
+  const sender = peerKey(data.sender);
+  if (sender === 'system') return false;
+  if (sender === peerKey(myHash)) return false;
+  return sender === active;
+}
+
+function pickFiles() {
+  const input = document.getElementById('file-input');
+  if (!input) return;
+  input.click();
+}
+
 function addMessage(data) {
   const msgs = document.getElementById('messages');
   if (msgs.style.display === 'none') return;
+  if (!messageBelongsToPeer(data)) return;
 
   if (data.msg_id) {
     const existing = document.querySelector(`.msg[data-msgid="${data.msg_id}"]`);
@@ -1850,6 +1872,11 @@ function toggleVoice() {
 function startVoice() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     toast('Voice recording not supported');
+    return;
+  }
+  if (window.chatzxAndroid && !window.chatzxAndroid.hasAudioPermission()) {
+    window.chatzxAndroid.requestAudioPermission();
+    toast('Allow microphone access, then tap 🎤 again');
     return;
   }
   navigator.mediaDevices.getUserMedia({audio: true})

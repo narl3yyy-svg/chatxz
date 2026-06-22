@@ -11,6 +11,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.DocumentsContract;
+import android.webkit.ValueCallback;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebSettings;
@@ -36,9 +37,13 @@ import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
     private static final int PERM_REQUEST = 1001;
-    private static final int REQ_FOLDER = 1002;
+    private static final int REQ_AUDIO = 1002;
+    private static final int REQ_FOLDER = 1003;
+    private static final int REQ_FILE = 1004;
 
     private WebView webView;
+    private ValueCallback<Uri[]> filePathCallback;
+    private PermissionRequest pendingWebPermissionRequest;
     private WifiManager.MulticastLock multicastLock;
     private String serverUrl = "http://127.0.0.1:8742";
     private boolean serverStarted = false;
@@ -110,9 +115,56 @@ public class MainActivity extends AppCompatActivity {
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onPermissionRequest(PermissionRequest request) {
-                request.grant(request.getResources());
+                boolean needsAudio = false;
+                for (String resource : request.getResources()) {
+                    if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) {
+                        needsAudio = true;
+                        break;
+                    }
+                }
+                if (needsAudio && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO)
+                        != PackageManager.PERMISSION_GRANTED) {
+                    pendingWebPermissionRequest = request;
+                    ActivityCompat.requestPermissions(
+                            MainActivity.this,
+                            new String[]{Manifest.permission.RECORD_AUDIO},
+                            REQ_AUDIO
+                    );
+                    return;
+                }
+                runOnUiThread(() -> request.grant(request.getResources()));
+            }
+
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
+                                             FileChooserParams params) {
+                if (filePathCallback != null) {
+                    filePathCallback.onReceiveValue(null);
+                }
+                filePathCallback = callback;
+                Intent intent = params.createIntent();
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                try {
+                    startActivityForResult(Intent.createChooser(intent, "Attach file"), REQ_FILE);
+                } catch (Exception e) {
+                    filePathCallback = null;
+                    Toast.makeText(MainActivity.this, "Could not open file picker", Toast.LENGTH_SHORT).show();
+                    return false;
+                }
+                return true;
             }
         });
+    }
+
+    public void requestAudioPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return;
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
     }
 
     private void showLoading(String message) {
@@ -171,6 +223,23 @@ public class MainActivity extends AppCompatActivity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == PERM_REQUEST) {
             startPythonServer();
+            return;
+        }
+        if (requestCode == REQ_AUDIO) {
+            boolean granted = grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            PermissionRequest pending = pendingWebPermissionRequest;
+            pendingWebPermissionRequest = null;
+            if (pending != null) {
+                if (granted) {
+                    pending.grant(pending.getResources());
+                } else {
+                    pending.deny();
+                    Toast.makeText(this, "Microphone permission denied", Toast.LENGTH_SHORT).show();
+                }
+            } else if (!granted) {
+                Toast.makeText(this, "Microphone permission denied", Toast.LENGTH_SHORT).show();
+            }
         }
     }
 
@@ -274,6 +343,26 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_FILE) {
+            if (filePathCallback == null) {
+                return;
+            }
+            Uri[] results = null;
+            if (resultCode == RESULT_OK && data != null) {
+                if (data.getClipData() != null) {
+                    int count = data.getClipData().getItemCount();
+                    results = new Uri[count];
+                    for (int i = 0; i < count; i++) {
+                        results[i] = data.getClipData().getItemAt(i).getUri();
+                    }
+                } else if (data.getData() != null) {
+                    results = new Uri[]{data.getData()};
+                }
+            }
+            filePathCallback.onReceiveValue(results);
+            filePathCallback = null;
+            return;
+        }
         if (requestCode != REQ_FOLDER) {
             return;
         }
