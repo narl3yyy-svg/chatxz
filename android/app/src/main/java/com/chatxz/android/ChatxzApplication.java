@@ -1,4 +1,4 @@
-package com.chatzx.android;
+package com.chatxz.android;
 
 import android.app.Application;
 

@@ -14,6 +14,7 @@ APP_NAME = "chatxz"
 LINK_CONNECT_TIMEOUT_S = 10
 LINK_CONNECT_POLL_S = 0.1
 IDENTITY_WAIT_TIMEOUT_S = 18
+REVERSE_CONNECT_WAIT_S = 15
 
 MESSAGE_TYPE_TEXT = "text"
 MESSAGE_TYPE_FILE = "file"
@@ -240,6 +241,7 @@ class MessagingBackend:
             "messages"
         )
         self.destination.set_proof_strategy(RNS.Destination.PROVE_ALL)
+        self.destination.accepts_links(True)
         self.destination.set_link_established_callback(self._link_callback)
 
         if self.auto_announce:
@@ -277,23 +279,42 @@ class MessagingBackend:
                 return
         print(f"[messaging] Announced on LAN (name={self.display_name or 'none'})")
 
-    def _poke_peer_announce(self, peer_ip, peer_port=8742):
+    def _request_peer_connect(self, peer_ip, peer_port, my_hash, caller_ip=None, caller_port=8742):
+        """Ask peer to open outbound RNS link (fixes Android inbound UDP link requests)."""
         if not peer_ip:
             return False
         port = int(peer_port or 8742)
-        url = f"http://{peer_ip}:{port}/api/announce"
+        payload = {
+            "hash": normalize_hash(my_hash or self.my_dest_hash or ""),
+            "ip": caller_ip or "",
+            "port": int(caller_port or 8742),
+        }
+        url = f"http://{peer_ip}:{port}/api/request_connect"
         try:
             req = urlrequest.Request(
                 url,
-                data=b"{}",
+                data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urlrequest.urlopen(req, timeout=2.5) as resp:
+            with urlrequest.urlopen(req, timeout=3.0) as resp:
                 return 200 <= resp.status < 300
         except Exception as exc:
-            print(f"[connect] Peer wake ({peer_ip}) failed: {exc}")
+            print(f"[connect] Reverse-connect request to {peer_ip} failed: {exc}")
             return False
+
+    def _wait_for_reverse_link(self, dest_hex, alt_hex=None, timeout_s=REVERSE_CONNECT_WAIT_S):
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if self._interrupted():
+                return False
+            if self.active_link and self.active_peer_hash:
+                if self.hashes_equivalent(dest_hex, self.active_peer_hash):
+                    return True
+                if alt_hex and self.hashes_equivalent(alt_hex, self.active_peer_hash):
+                    return True
+            time.sleep(LINK_CONNECT_POLL_S)
+        return False
 
     def _announce_loop(self):
         while self.running:
@@ -347,11 +368,11 @@ class MessagingBackend:
                     return dest
         return normalize_hash(peer_info.get("hash"))
 
-    def _wait_for_identity(self, hash_hex, peer_ip=None, peer_port=None, peer_lookup=None):
+    def _wait_for_identity(self, hash_hex, peer_ip=None, peer_port=None, peer_lookup=None,
+                          caller_ip=None, caller_port=8742):
         clean = normalize_hash(hash_hex)
         deadline = time.time() + IDENTITY_WAIT_TIMEOUT_S
         last_log = 0
-        last_poke = 0
         while time.time() < deadline:
             ident = self._identity_for_hash(clean)
             if ident:
@@ -380,12 +401,7 @@ class MessagingBackend:
                 remaining = int(deadline - now)
                 print(f"[connect] Waiting for peer identity ({remaining}s left)...")
                 last_log = now
-            if peer_ip and now - last_poke >= 3:
-                if self._poke_peer_announce(peer_ip, peer_port):
-                    print(f"[connect] Woke peer at {peer_ip} for RNS announce")
-                request_path_for_hash(clean)
-                last_poke = now
-            self._announce(peer_ip=peer_ip, unicast_subnet=True)
+            request_path_for_hash(clean)
             time.sleep(0.5)
 
         return None, clean
@@ -566,6 +582,14 @@ class MessagingBackend:
                         queue = self._pending_files.setdefault(link.link_id, [])
                         queue.append(chat_msg)
                     print(f"[messaging] Waiting for resource data for {chat_msg.file_name}...")
+                    self._emit_progress(
+                        chat_msg.file_name or "file",
+                        0,
+                        total_size=chat_msg.file_size or 0,
+                        direction="receive",
+                        transfer_id=chat_msg.msg_id,
+                        status="active",
+                    )
                 elif self.on_message:
                     self.on_message(chat_msg, remote_hash)
 
@@ -648,12 +672,28 @@ class MessagingBackend:
                     remote_hash = self.dest_hash_for(self._peer_for_link(link))
                     if self.on_message:
                         self.on_message(chat_msg, remote_hash)
+                    self._emit_progress(
+                        chat_msg.file_name or "file",
+                        100,
+                        total_size=chat_msg.file_size or 0,
+                        direction="receive",
+                        transfer_id=chat_msg.msg_id,
+                        status="complete",
+                    )
                     self._send_receipt(link, chat_msg.msg_id, "received")
                 else:
                     print(f"[messaging] Resource transfer failed (status={resource.status})")
                     with self._pending_lock:
                         queue = self._pending_files.get(link.link_id, [])
                         chat_msg = queue.pop(0) if queue else None
+                    if chat_msg:
+                        self._emit_progress(
+                            chat_msg.file_name or "file",
+                            0,
+                            direction="receive",
+                            transfer_id=chat_msg.msg_id,
+                            status="failed",
+                        )
                     if chat_msg and self.on_message:
                         self.on_message(
                             ChatMessage("system", f"File transfer failed: {chat_msg.file_name}"),
@@ -745,7 +785,8 @@ class MessagingBackend:
     def _interrupted(self):
         return self.shutdown_requested or not self.running
 
-    def connect_to(self, destination_hash_hex, peer_ip=None, peer_port=None, peer_lookup=None):
+    def connect_to(self, destination_hash_hex, peer_ip=None, peer_port=None, peer_lookup=None,
+                   caller_ip=None, caller_port=8742):
         with self._connect_lock:
             if self._interrupted():
                 return False
@@ -771,6 +812,8 @@ class MessagingBackend:
                     peer_ip=peer_ip,
                     peer_port=peer_port,
                     peer_lookup=peer_lookup,
+                    caller_ip=caller_ip,
+                    caller_port=caller_port,
                 )
             if known_identity is None:
                 print(f"[connect] No known identity for {clean[:16]}...")
@@ -797,7 +840,12 @@ class MessagingBackend:
             dest_hex = normalize_hash(RNS.hexrep(destination.hash))
             self.register_peer_mapping(dest_hex, ident_hex)
 
-            self._announce(peer_ip=peer_ip, unicast_subnet=True)
+            my_hash = normalize_hash(self.my_dest_hash or dest_hex)
+            if peer_ip:
+                self._request_peer_connect(
+                    peer_ip, peer_port, my_hash,
+                    caller_ip=caller_ip, caller_port=caller_port,
+                )
             request_path_for_hash(dest_hex)
             print(f"[connect] Connecting to {dest_hex[:16]}... (timeout {LINK_CONNECT_TIMEOUT_S}s)")
 
@@ -850,6 +898,16 @@ class MessagingBackend:
                         pass
                     if link.link_id in self.links:
                         del self.links[link.link_id]
+
+            if peer_ip:
+                print("[connect] Outbound link timed out — waiting for reverse connect...")
+                self._request_peer_connect(
+                    peer_ip, peer_port, my_hash,
+                    caller_ip=caller_ip, caller_port=caller_port,
+                )
+                if self._wait_for_reverse_link(dest_hex, alt_hex=clean):
+                    print("[connect] Reverse connect established")
+                    return True
 
             print("[connect] Peer not reachable")
             return False

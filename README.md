@@ -56,7 +56,7 @@ The web interface handles day-to-day use: per-peer chats, send messages, transfe
 ## Quick Start (Linux)
 
 ```bash
-git clone https://github.com/narl3yyy-svg/chatzx.git
+git clone https://github.com/narl3yyy-svg/chatxz.git
 cd chatxz
 bash scripts/install-arch.sh   # or scripts/install-debian.sh
 ./run.sh web --share --verbose
@@ -161,7 +161,7 @@ All peer-to-peer files (images, folders, voice, large zips) use **RNS Resources*
 
 ## Android APK
 
-Download from [Releases](https://github.com/narl3yyy-svg/chatzx/releases). Push a `v*` tag to trigger the GitHub Actions APK build.
+Download from [Releases](https://github.com/narl3yyy-svg/chatxz/releases). Push a `v*` tag to trigger the GitHub Actions APK build.
 
 ```bash
 bash scripts/sync-android.sh
@@ -184,6 +184,15 @@ chatxz --daemon
 ```
 
 ## Changelog (recent)
+
+### v0.3.31
+- **Rename:** GitHub repo and all references `chatzx` → `chatxz`
+- **Manual-only** RNS announce and beacon (no periodic/auto announce on any platform)
+- **Android↔desktop connect:** reverse-connect via `POST /api/request_connect` when outbound RNS link fails
+- **RNS interface presets:** add/delete UDP, TCP, and Serial interfaces in Settings → Network
+- **Folder zip progress:** live zipping status with file count in the transfer dock
+- **Incoming files:** receive status list in the bottom dock for all active downloads
+- **Version** shown next to the chatxz title in the sidebar header
 
 ### v0.3.30
 - Android↔desktop connect: beacon carries identity pubkey (no RNS announce required to learn peer)

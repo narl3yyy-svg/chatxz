@@ -351,8 +351,42 @@ body::before {
   flex: 1;
   min-width: 0;
   display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+}
+#transfer-active-row {
+  display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
+}
+#incoming-transfers {
+  display: none;
+  width: 100%;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--text2);
+}
+#incoming-transfers.active { display: flex; }
+.incoming-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+}
+.incoming-item span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.incoming-item span:last-child {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
 }
 #debug-bar { display: contents; }
 .status-pill {
@@ -763,7 +797,7 @@ body.sidebar-open #sidebar-backdrop { display: block; }
     <div id="sidebar-header">
       <div class="brand-mark">cx</div>
       <div class="brand-text">
-        <h1>chatxz</h1>
+        <h1>chatxz <span id="header-version" style="font-size:12px;color:var(--text3);font-weight:500"></span></h1>
         <div class="brand-sub">Encrypted mesh messaging</div>
         <div id="identity-box" onclick="copyIdentity()" title="Click to copy identity">Loading...</div>
       </div>
@@ -836,6 +870,16 @@ body.sidebar-open #sidebar-backdrop { display: block; }
             Auto-reset beacon counters weekly
           </label>
           <div id="network-status-panel" class="network-status">Tap Refresh to load network status.</div>
+          <div style="margin-top:12px">
+            <h4 style="margin:0 0 8px;font-size:12px;color:var(--text2)">RNS interface presets</h4>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+              <button class="btn-block" style="flex:1;min-width:90px" onclick="addRnsInterface('udp_lan')">+ UDP</button>
+              <button class="btn-block" style="flex:1;min-width:90px" onclick="addRnsInterface('tcp_client')">+ TCP</button>
+              <button class="btn-block" style="flex:1;min-width:90px" onclick="addRnsInterface('serial')">+ Serial</button>
+            </div>
+            <div id="rns-interfaces-list" style="font-size:11px;color:var(--text2)">Loading...</div>
+            <div style="margin-top:6px;font-size:10px;color:var(--text3)">Add/delete presets, then restart chatxz to apply.</div>
+          </div>
         </div>
         <div class="settings-card">
           <h4>👤 Profile</h4>
@@ -971,12 +1015,15 @@ body.sidebar-open #sidebar-backdrop { display: block; }
       <span id="queue-count" style="display:none"></span>
     </div>
     <div id="transfer-dock">
-      <div id="progress-bar">
-        <div class="progress-track"><div class="progress-fill"></div></div>
-        <span id="progress-label">Transferring...</span>
+      <div id="incoming-transfers"></div>
+      <div id="transfer-active-row">
+        <div id="progress-bar">
+          <div class="progress-track"><div class="progress-fill"></div></div>
+          <span id="progress-label">Transferring...</span>
+        </div>
+        <span id="transfer-speed"></span>
+        <button id="transfer-cancel-btn" onclick="cancelTransfer()">Cancel</button>
       </div>
-      <span id="transfer-speed"></span>
-      <button id="transfer-cancel-btn" onclick="cancelTransfer()">Cancel</button>
     </div>
   </footer>
 </div>
@@ -1029,6 +1076,7 @@ let audioChunks = [];
 let ctxHash = null;
 let peersPollTimer = null;
 let activeTransfer = null;
+let incomingTransfers = {};
 let allContacts = [];
 let sidebarOpen = true;
 
@@ -1209,6 +1257,8 @@ function fetchIdentity() {
       if (d.app_version) {
         const ver = document.getElementById('settings-version');
         if (ver) ver.textContent = 'v' + d.app_version;
+        const hv = document.getElementById('header-version');
+        if (hv) hv.textContent = 'v' + d.app_version;
       }
       if (d.platform === 'android') {
         const hint = document.getElementById('settings-received-hint');
@@ -1310,12 +1360,46 @@ function sendReadReceipt(msgId) {
   }
 }
 
+function renderIncomingTransfers() {
+  const el = document.getElementById('incoming-transfers');
+  if (!el) return;
+  const items = Object.values(incomingTransfers);
+  if (!items.length) {
+    el.classList.remove('active');
+    el.innerHTML = '';
+    return;
+  }
+  el.classList.add('active');
+  el.innerHTML = items.map(t => {
+    const pct = t.progress || 0;
+    let status = t.status || 'active';
+    if (status === 'active') status = pct > 0 ? pct + '%' : 'waiting…';
+    return `<div class="incoming-item"><span>↓ ${escapeHtml(t.file_name || 'file')}</span><span>${escapeHtml(String(status))}</span></div>`;
+  }).join('');
+}
+
+function updateIncomingTransfers(data) {
+  if (!data || data.direction !== 'receive') return;
+  const key = data.transfer_id || data.file_name || ('recv-' + Date.now());
+  if (data.status === 'complete' || data.status === 'failed' || data.status === 'cancelled') {
+    delete incomingTransfers[key];
+  } else {
+    incomingTransfers[key] = {...incomingTransfers[key], ...data, _key: key};
+  }
+  renderIncomingTransfers();
+}
+
 function showProgress(data) {
+  updateIncomingTransfers(data);
   var bar = document.getElementById('progress-bar');
   var label = document.getElementById('progress-label');
   var speedEl = document.getElementById('transfer-speed');
   var cancelBtn = document.getElementById('transfer-cancel-btn');
   if (!bar) return;
+
+  if (data.direction === 'receive' && data.status === 'active' && !(data.progress > 0)) {
+    return;
+  }
 
   if (data.status === 'cancelled' || data.status === 'failed') {
     progressLastUpdate = 0;
@@ -1344,7 +1428,9 @@ function showProgress(data) {
   var pct = data.progress || 0;
   bar.querySelector('.progress-fill').style.width = Math.max(pct, 1) + '%';
   var dir = data.direction === 'receive' ? '↓' : '↑';
-  var text = dir + ' ' + (data.file_name || 'file') + ' — ' + pct + '%';
+  var stage = data.stage === 'zipping' ? 'Zipping' : (data.direction === 'receive' ? 'Receiving' : 'Sending');
+  var text = stage + ' ' + (data.file_name || 'file') + ' — ' + pct + '%';
+  if (data.stage === 'zipping' && data.total) text += ' (' + (data.current || 0) + '/' + data.total + ' files)';
   if (data.size) text += ' (' + formatSize(data.size) + ')';
   label.textContent = text;
   if (speedEl) {
@@ -1677,9 +1763,59 @@ function netClass(ok) {
   return ok ? 'net-ok' : 'net-bad';
 }
 
+function loadRnsInterfaces() {
+  const list = document.getElementById('rns-interfaces-list');
+  if (!list) return;
+  fetch('/api/rns-interfaces')
+    .then(r => r.json())
+    .then(d => {
+      const items = d.interfaces || [];
+      if (!items.length) {
+        list.innerHTML = '<div style="color:var(--text3)">No interfaces configured.</div>';
+        return;
+      }
+      list.innerHTML = items.map(iface => {
+        const label = escapeHtml(iface.name || iface.type || iface.preset || 'iface');
+        const meta = escapeHtml((iface.type || '') + (iface.enabled === false ? ' · disabled' : ''));
+        return `<div class="net-row" style="margin-bottom:6px"><span class="net-label">${label}<div style="font-size:10px;color:var(--text3)">${meta}</div></span><button class="btn-block danger" style="width:auto;padding:4px 8px;font-size:11px" onclick="deleteRnsInterface('${iface.id}')">Delete</button></div>`;
+      }).join('');
+    })
+    .catch(() => { list.textContent = 'Failed to load interfaces.'; });
+}
+
+function addRnsInterface(preset) {
+  fetch('/api/rns-interfaces/add', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({preset})
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') {
+      toast(d.message || 'Interface added');
+      loadRnsInterfaces();
+      refreshNetworkStatus();
+    } else toast('Add failed: ' + (d.error || ''));
+  }).catch(() => toast('Add failed'));
+}
+
+function deleteRnsInterface(id) {
+  if (!confirm('Delete this interface preset?')) return;
+  fetch('/api/rns-interfaces/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id})
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') {
+      toast(d.message || 'Interface removed');
+      loadRnsInterfaces();
+      refreshNetworkStatus();
+    } else toast('Delete failed: ' + (d.error || ''));
+  }).catch(() => toast('Delete failed'));
+}
+
 function openNetworkSettings() {
   if (!settingsShown) toggleSettings();
   refreshNetworkStatus();
+  loadRnsInterfaces();
   setTimeout(() => {
     document.getElementById('network-settings-card')?.scrollIntoView({behavior: 'smooth', block: 'start'});
   }, 80);
@@ -1743,7 +1879,14 @@ function refreshNetworkStatus() {
       }
       html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);line-height:1.45">Beacon/subnet counters are <strong>session totals</strong> — each Announce sends ~259 packets (253 subnet probes + broadcasts). Use <strong>Reset network</strong> to zero counters and clear discovered peers without affecting your identity.</div>';
       html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45"><strong>Link active</strong> = encrypted RNS session open. <strong>Inactive</strong> = no session — connect to a peer or wait for incoming. Connect waits for RNS announce, then times out in ~10s if the peer is offline.</div>';
+      html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45">Announce and beacon are <strong>manual only</strong> — use the Announce button. Connect uses reverse-connect for Android when outbound link fails.</div>';
       html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45">Beacon UDP 8743 = LAN discovery. RNS UDP 4242 = encrypted chat. HTTP 8742 = this web UI only.</div>';
+      if (Array.isArray(d.configured_interfaces) && d.configured_interfaces.length) {
+        html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Configured presets</div>';
+        d.configured_interfaces.forEach(iface => {
+          html += row(iface.name || iface.type, (iface.enabled ? 'enabled' : 'disabled') + ' · ' + (iface.preset || iface.type), iface.enabled);
+        });
+      }
       if (Array.isArray(d.interfaces) && d.interfaces.length) {
         html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Interfaces</div>';
         d.interfaces.forEach(iface => {
@@ -1781,6 +1924,7 @@ function toggleSettings() {
     panel.classList.add('open');
     btn?.classList.add('active');
     refreshNetworkStatus();
+    loadRnsInterfaces();
     fetch('/api/settings')
       .then(r => r.json())
       .then(s => {
@@ -1996,8 +2140,8 @@ function pickFiles() {
 }
 
 function pickSendFolder() {
-  if (window.chatzxAndroid?.pickSendFolder) {
-    window.chatzxAndroid.pickSendFolder();
+  if (window.chatxzAndroid?.pickSendFolder) {
+    window.chatxzAndroid.pickSendFolder();
     return;
   }
   document.getElementById('folder-input').click();
@@ -2115,8 +2259,8 @@ function startVoice() {
     toast('Voice recording not supported');
     return;
   }
-  if (window.chatzxAndroid && !window.chatzxAndroid.hasAudioPermission()) {
-    window.chatzxAndroid.requestAudioPermission();
+  if (window.chatxzAndroid && !window.chatxzAndroid.hasAudioPermission()) {
+    window.chatxzAndroid.requestAudioPermission();
     toast('Allow microphone access, then tap 🎤 again');
     return;
   }
@@ -2182,7 +2326,7 @@ function uploadFolder(files) {
     const path = file.webkitRelativePath || file.name;
     formData.append('file', file, path);
   });
-  toast(`Zipping ${total} file(s)...`);
+  showProgress({stage: 'zipping', file_name: folderName + '.zip', progress: 0, direction: 'send', status: 'active', current: 0, total: total});
   fetch('/api/folder?name=' + encodeURIComponent(folderName), {method: 'POST', body: formData})
     .then(r => r.json())
     .then(d => {
@@ -2238,8 +2382,8 @@ async function selectReceivedDir(path) {
 }
 
 async function pickReceivedDir() {
-  if (window.chatzxAndroid?.pickFolder) {
-    window.chatzxAndroid.pickFolder();
+  if (window.chatxzAndroid?.pickFolder) {
+    window.chatxzAndroid.pickFolder();
     return;
   }
 

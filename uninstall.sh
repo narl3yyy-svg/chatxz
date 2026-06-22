@@ -32,7 +32,7 @@ fi
 # Check for leftover binaries
 echo "[3/3] Checking for leftover files..."
 LEFTOVER=0
-for bin in chatzx chatzx-web; do
+for bin in chatxz chatxz-web; do
     if command -v "$bin" &>/dev/null; then
         echo "  WARNING: $bin still found at $(command -v $bin)"
         LEFTOVER=1

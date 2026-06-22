@@ -10,6 +10,13 @@ from chatxz.core.messaging import MessagingBackend
 from chatxz.core.voice import VoiceRecorder, VoicePlayer
 from chatxz.core.discovery import PeerDiscovery
 from chatxz.core.lan_beacon import LanBeacon, BEACON_PORT
+from chatxz.core.rns_interfaces import (
+    INTERFACE_PRESETS,
+    add_interface,
+    delete_interface,
+    normalize_interface_list,
+    render_rns_config,
+)
 from chatxz.utils.helpers import get_config_dir, get_data_dir, format_speed, media_type_for_filename
 from chatxz.utils.platform import (
     is_android,
@@ -111,7 +118,7 @@ def _proc_cmdline(pid):
         return ""
 
 
-def _is_chatzx_process(pid):
+def _is_chatxz_process(pid):
     cmd = _proc_cmdline(pid)
     return "chatxz" in cmd and "grok" not in cmd.lower()
 
@@ -146,7 +153,7 @@ def _is_port_in_use(port, sock_type=socket.SOCK_DGRAM, host="0.0.0.0"):
         return True
 
 
-def stop_stale_chatzx_servers(exclude_pid=None):
+def stop_stale_chatxz_servers(exclude_pid=None):
     """Stop other chatxz server/cli processes holding RNS ports."""
     if is_android():
         return 0
@@ -154,7 +161,7 @@ def stop_stale_chatzx_servers(exclude_pid=None):
     targets = set()
     for port in (4242, 8742):
         for pid in _port_holder_pids(port, udp=(port == 4242)):
-            if pid != exclude_pid and _is_chatzx_process(pid):
+            if pid != exclude_pid and _is_chatxz_process(pid):
                 targets.add(pid)
     try:
         result = subprocess.run(
@@ -205,10 +212,10 @@ def ensure_rns_ports_free(force=False):
         return True
 
     holders = _port_holder_pids(4242, udp=True)
-    chatxz_holders = [p for p in holders if _is_chatzx_process(p)]
+    chatxz_holders = [p for p in holders if _is_chatxz_process(p)]
 
     if chatxz_holders or force:
-        stop_stale_chatzx_servers()
+        stop_stale_chatxz_servers()
         time.sleep(0.5)
         if not _is_port_in_use(4242):
             return True
@@ -499,11 +506,13 @@ class ChatWebServer:
                 s.setdefault("received_dir", os.path.join(self.config_dir, "received"))
                 s.setdefault("network_stats_auto_reset", True)
                 s.setdefault("network_stats_reset_at", 0)
+                s.setdefault("rns_interfaces", normalize_interface_list(None))
                 return s
         except:
             return {"name": "", "history_retention": "never",
                     "received_dir": os.path.join(self.config_dir, "received"),
-                    "network_stats_auto_reset": True, "network_stats_reset_at": 0}
+                    "network_stats_auto_reset": True, "network_stats_reset_at": 0,
+                    "rns_interfaces": normalize_interface_list(None)}
 
     def save_settings(self, settings):
         with open(SETTINGS_FILE, "w") as f:
@@ -545,62 +554,26 @@ class ChatWebServer:
                 if now - m.get("timestamp", 0) < seconds
             ]
 
+    def _write_rns_config(self, settings=None):
+        settings = settings or self.load_settings()
+        rns_config_path = os.path.join(self.config_dir, "config")
+        os.makedirs(self.config_dir, exist_ok=True)
+        bcast = lan_broadcast()
+        interfaces = normalize_interface_list(settings.get("rns_interfaces"))
+        for iface in interfaces:
+            if iface.get("type") == "UDPInterface" and bcast:
+                iface["forward_ip"] = bcast
+        config_text = render_rns_config(interfaces, broadcast_ip=bcast, android=is_android())
+        with open(rns_config_path, "w") as f:
+            f.write(config_text)
+        print(f"[config] Wrote RNS config at {rns_config_path} (broadcast={bcast})")
+        return rns_config_path
+
     def start_rns(self):
         if self.embedded or is_android():
             patch_embedded_signals()
-        rns_config_path = os.path.join(self.config_dir, "config")
-        os.makedirs(self.config_dir, exist_ok=True)
-        if is_android():
-            bcast = lan_broadcast()
-            with open(rns_config_path, "w") as f:
-                f.write(build_android_rns_config(bcast))
-            print(f"[config] Applied Android RNS config at {rns_config_path} (broadcast={bcast})")
-        elif os.path.exists(rns_config_path):
-            with open(rns_config_path) as f:
-                existing = f.read()
-            modified = False
-            if "enable_transport = False" in existing:
-                existing = existing.replace("enable_transport = False", "enable_transport = Yes")
-                modified = True
-            if "AutoInterface" not in existing:
-                existing += "\n\n  [[Default Interface]]\n"
-                existing += "    type = AutoInterface\n"
-                existing += "    enabled = Yes\n"
-                modified = True
-            if "UDPInterface" not in existing:
-                existing += "\n  [[UDP Interface]]\n"
-                existing += "    type = UDPInterface\n"
-                existing += "    enabled = Yes\n"
-                existing += "    listen_ip = 0.0.0.0\n"
-                existing += "    listen_port = 4242\n"
-                existing += "    forward_ip = 255.255.255.255\n"
-                existing += "    forward_port = 4242\n"
-                existing += "    ifac_size = 16\n"
-                modified = True
-            elif "enabled = Yes" not in existing:
-                existing = existing.replace(
-                    "type = UDPInterface",
-                    "type = UDPInterface\n    enabled = Yes"
-                )
-                modified = True
-            if "share_instance = Yes" in existing:
-                existing = existing.replace("share_instance = Yes", "share_instance = No")
-                modified = True
-            bcast = lan_broadcast()
-            patched = _patch_rns_forward_ip(existing, bcast)
-            if patched != existing:
-                existing = patched
-                modified = True
-            if modified:
-                with open(rns_config_path, "w") as f:
-                    f.write(existing)
-                print(f"[config] Updated {rns_config_path} (broadcast={bcast})")
-        else:
-            bcast = lan_broadcast()
-            template = build_android_rns_config(bcast) if is_android() else build_desktop_rns_config(bcast)
-            with open(rns_config_path, "w") as f:
-                f.write(template)
-            print(f"[config] Created RNS config at {rns_config_path}")
+        settings = self.load_settings()
+        self._write_rns_config(settings)
 
         if not ensure_rns_ports_free(force=self.force):
             msg = "UDP port 4242 is already in use"
@@ -621,7 +594,7 @@ class ChatWebServer:
             if is_android():
                 raise RuntimeError(f"RNS failed to start: {e}") from e
             print("[RNS] Retrying after stopping stale instances...")
-            stop_stale_chatzx_servers()
+            stop_stale_chatxz_servers()
             time.sleep(1)
             if not ensure_rns_ports_free(force=True):
                 if self.embedded:
@@ -644,7 +617,7 @@ class ChatWebServer:
             on_progress=self._on_transfer_progress,
             on_link_established=self._on_link_established,
             display_name=settings.get("name", ""),
-            auto_announce=is_android(),
+            auto_announce=False,
             receive_dir=received_dir,
             peer_resolver=self._resolve_incoming_peer,
         )
@@ -669,15 +642,13 @@ class ChatWebServer:
             display_name=settings.get("name", ""),
             ip=my_ip,
             port=self.port,
-            periodic=is_android(),
+            periodic=False,
             identity_hash=self.identity_mgr.get_hex_hash(),
             identity_pubkey=identity_pubkey,
-            on_periodic=self.messaging.announce if is_android() else None,
+            on_periodic=None,
         )
         self.lan_beacon.start()
-        if is_android():
-            self.messaging.announce()
-            print("[android] RNS auto-announce enabled (required for incoming connects)")
+        print("[network] Manual announce only — use Announce button or peer connect wake")
 
         return my_hash
 
@@ -916,12 +887,15 @@ class ChatWebServer:
             peer_ip = (data.get("ip") or "").strip() or None
             peer_port = data.get("port") or 8742
             resolved_hash = self._resolve_connect_target(peer_hash, peer_ip)
+            caller_ip = detect_lan_ip() or (self.host if self.host not in ("127.0.0.1", "0.0.0.0") else "")
             ok = await self._run_blocking(
                 self.messaging.connect_to,
                 resolved_hash,
                 peer_ip,
                 peer_port,
                 self._discovery_peer_for_connect,
+                caller_ip,
+                self.port,
             )
             if self._shutting_down or ok is None:
                 return web.json_response({"error": "server shutting down"}, status=503)
@@ -934,6 +908,98 @@ class ChatWebServer:
             return web.json_response({"error": "connection failed"}, status=400)
         except asyncio.CancelledError:
             return web.json_response({"error": "server shutting down"}, status=503)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def _reverse_connect_task(self, peer_hash, peer_ip, peer_port, caller_ip, caller_port):
+        """Background outbound link for /api/request_connect (must return HTTP quickly)."""
+        try:
+            result = await self._run_blocking(
+                self.messaging.connect_to,
+                peer_hash,
+                peer_ip,
+                peer_port,
+                self._discovery_peer_for_connect,
+                caller_ip,
+                caller_port,
+            )
+            if self._shutting_down or result is None:
+                return
+            if result:
+                clean = self._peer_dest_hash(self.messaging.active_peer_hash or peer_hash)
+                self.active_peer = clean
+                await self._broadcast({"type": "connect_ok", "data": {"hash": clean}})
+                print(f"[connect] Reverse-connect established with {clean[:16]}...")
+            else:
+                await self._broadcast({"type": "connect_fail", "error": "reverse connect failed"})
+        except Exception as e:
+            print(f"[connect] Reverse-connect task error: {e}")
+            try:
+                await self._broadcast({"type": "connect_fail", "error": str(e)})
+            except Exception:
+                pass
+
+    async def handle_request_connect(self, request):
+        """Peer asks us to open an outbound RNS link (reverse connect for Android)."""
+        ok, err = await self._wait_for_rns()
+        if not ok:
+            return web.json_response({"error": err or "not ready"}, status=400)
+        try:
+            data = await request.json()
+            peer_hash = (data.get("hash") or "").strip()
+            if not peer_hash:
+                return web.json_response({"error": "hash required"}, status=400)
+            peer_ip = (data.get("ip") or "").strip() or None
+            peer_port = data.get("port") or 8742
+            caller_ip = detect_lan_ip() or (self.host if self.host not in ("127.0.0.1", "0.0.0.0") else "")
+            resolved = self._resolve_connect_target(peer_hash, peer_ip)
+            print(f"[connect] Reverse-connect request from {peer_ip or 'unknown'} for {resolved[:16]}...")
+            asyncio.create_task(
+                self._reverse_connect_task(resolved, peer_ip, peer_port, caller_ip, self.port)
+            )
+            return web.json_response({"status": "ok", "connecting": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def handle_rns_interfaces_get(self, request):
+        settings = self.load_settings()
+        return web.json_response({
+            "interfaces": normalize_interface_list(settings.get("rns_interfaces")),
+            "presets": {k: v["label"] for k, v in INTERFACE_PRESETS.items()},
+            "restart_required": True,
+        })
+
+    async def handle_rns_interfaces_add(self, request):
+        try:
+            data = await request.json()
+            preset = (data.get("preset") or "udp_lan").strip()
+            settings = self.load_settings()
+            settings["rns_interfaces"] = add_interface(settings.get("rns_interfaces"), preset)
+            self.save_settings(settings)
+            self._write_rns_config(settings)
+            return web.json_response({
+                "status": "ok",
+                "interfaces": settings["rns_interfaces"],
+                "message": "Interface added. Restart chatxz to apply.",
+            })
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def handle_rns_interfaces_delete(self, request):
+        try:
+            data = await request.json()
+            iface_id = (data.get("id") or "").strip()
+            if not iface_id:
+                return web.json_response({"error": "id required"}, status=400)
+            settings = self.load_settings()
+            settings["rns_interfaces"] = delete_interface(settings.get("rns_interfaces"), iface_id)
+            self.save_settings(settings)
+            self._write_rns_config(settings)
+            return web.json_response({
+                "status": "ok",
+                "interfaces": settings["rns_interfaces"],
+                "message": "Interface removed. Restart chatxz to apply.",
+            })
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
@@ -1021,6 +1087,7 @@ class ChatWebServer:
             "rns_ready": bool(self.messaging and self.messaging.destination),
             "rns_error": self.rns_init_error,
             "rns_interfaces": rns_interfaces,
+            "configured_interfaces": normalize_interface_list(self.load_settings().get("rns_interfaces")),
             "beacon": self.lan_beacon.status() if self.lan_beacon else None,
             "discovered_peers": peers,
             "discovered_count": len(peers),
@@ -1295,7 +1362,7 @@ class ChatWebServer:
         try:
             folder_name = request.query.get("name", f"folder_{int(time.time())}")
             reader = await request.multipart()
-            tmpdir = tempfile.mkdtemp(prefix="chatzx_folder_")
+            tmpdir = tempfile.mkdtemp(prefix="chatxz_folder_")
             total_size = 0
             file_count = 0
             while True:
@@ -1320,12 +1387,34 @@ class ChatWebServer:
             sent_dir = os.path.join(self.config_dir, "sent")
             os.makedirs(sent_dir, exist_ok=True)
             zip_path = os.path.join(sent_dir, zip_name)
+            zip_entries = []
+            for root, dirs, files in os.walk(tmpdir):
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    zip_entries.append((fpath, os.path.relpath(fpath, tmpdir)))
+            total_entries = len(zip_entries)
+            await self._broadcast({"type": "progress", "data": {
+                "stage": "zipping",
+                "file_name": zip_name,
+                "progress": 0,
+                "direction": "send",
+                "status": "active",
+                "current": 0,
+                "total": total_entries,
+            }})
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for root, dirs, files in os.walk(tmpdir):
-                    for fname in files:
-                        fpath = os.path.join(root, fname)
-                        arcname = os.path.relpath(fpath, tmpdir)
-                        zf.write(fpath, arcname)
+                for idx, (fpath, arcname) in enumerate(zip_entries):
+                    zf.write(fpath, arcname)
+                    pct = int(((idx + 1) / max(total_entries, 1)) * 100)
+                    await self._broadcast({"type": "progress", "data": {
+                        "stage": "zipping",
+                        "file_name": zip_name,
+                        "progress": pct,
+                        "direction": "send",
+                        "status": "active",
+                        "current": idx + 1,
+                        "total": total_entries,
+                    }})
             shutil.rmtree(tmpdir, ignore_errors=True)
             zsize = os.path.getsize(zip_path)
             print(f"[folder] Created {zip_name} ({zsize} bytes, {file_count} files)")
@@ -1662,12 +1751,15 @@ class ChatWebServer:
                 peer_ip = (data.get("ip") or "").strip() or None
                 peer_port = data.get("port") or 8742
                 resolved_hash = self._resolve_connect_target(peer_hash, peer_ip)
+                caller_ip = detect_lan_ip() or (self.host if self.host not in ("127.0.0.1", "0.0.0.0") else "")
                 ok = await self._run_blocking(
                     self.messaging.connect_to,
                     resolved_hash,
                     peer_ip,
                     peer_port,
                     self._discovery_peer_for_connect,
+                    caller_ip,
+                    self.port,
                 )
                 if self._shutting_down or ok is None:
                     await ws.send_str(json.dumps({"type": "connect_fail", "error": "server shutting down"}))
@@ -1712,6 +1804,10 @@ class ChatWebServer:
         app.router.add_post("/api/contacts", self.handle_add_contact)
         app.router.add_delete("/api/contacts/{hash}", self.handle_delete_contact)
         app.router.add_post("/api/connect", self.handle_connect)
+        app.router.add_post("/api/request_connect", self.handle_request_connect)
+        app.router.add_get("/api/rns-interfaces", self.handle_rns_interfaces_get)
+        app.router.add_post("/api/rns-interfaces/add", self.handle_rns_interfaces_add)
+        app.router.add_post("/api/rns-interfaces/delete", self.handle_rns_interfaces_delete)
         app.router.add_post("/api/announce", self.handle_announce)
         app.router.add_get("/api/network-status", self.handle_network_status)
         app.router.add_post("/api/network/reset", self.handle_network_reset)
