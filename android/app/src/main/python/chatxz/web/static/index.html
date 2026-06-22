@@ -1266,15 +1266,15 @@ function pollLinkStatus() {
       if (d.link_active && d.active_peer) {
         if (!linkPeer || !peersMatch(linkPeer, d.active_peer)) {
           setLinkPeer(d.active_peer);
+          registerPeerAliases(d.active_peer, d.session_peer, viewingPeer);
           if (!viewingPeer) openChat(d.active_peer, false);
         }
         updatePeerHeader();
         setLinkStatus('connected', 'Active');
-      } else {
-        if (linkPeer) {
-          linkPeer = null;
-          updatePeerHeader();
-        }
+      } else if (linkPeer && (d.session_peer || d.active_peer)) {
+        setLinkStatus('disconnected', 'Reconnecting…');
+        updatePeerHeader();
+      } else if (!linkPeer) {
         setLinkStatus('disconnected', 'Inactive');
       }
     })
@@ -1366,6 +1366,7 @@ function fetchIdentity() {
       }
       if (d.connected) {
         setLinkPeer(d.connected);
+        registerPeerAliases(d.connected, viewingPeer);
         if (!viewingPeer) openChat(d.connected, false);
         else updatePeerHeader();
       } else {
@@ -1420,19 +1421,17 @@ function handleWSMessage(msg) {
   } else if (msg.type === 'link_established') {
     if (msg.data?.hash) {
       const h = msg.data.hash;
-      registerPeerAliases(h, ...(msg.data.aliases || []));
+      registerPeerAliases(h, viewingPeer, ...(msg.data.aliases || []));
       setLinkPeer(h);
       if (!viewingPeer || peersMatch(viewingPeer, h)) {
         if (!viewingPeer) openChat(h, false);
-        else {
-          updatePeerHeader();
-          loadHistoryForPeer(viewingPeer);
-        }
+        else loadHistoryForPeer(viewingPeer);
       }
+      updatePeerHeader();
       toast(msg.data.path_switch ? 'Switched to faster link' : 'Peer connected');
     }
   } else if (msg.type === 'link_closed') {
-    linkPeer = null;
+    setLinkStatus('disconnected', 'Reconnecting…');
     updatePeerHeader();
   } else if (msg.type === 'connect_ok') {
     if (connectInFlight) {
@@ -1829,8 +1828,10 @@ function connectTo(hash, ip, port) {
     body: JSON.stringify(body)
   }).then(r => r.json()).then(d => {
     if (d.status === 'ok') {
-      setLinkPeer(d.hash || hash);
-      openChat(d.hash || hash, false);
+      const connected = d.hash || hash;
+      registerPeerAliases(connected, hash, viewingPeer);
+      setLinkPeer(connected);
+      openChat(connected, false);
       toast('Connected!');
     } else {
       toast('Connection failed: ' + (d.error || 'unknown'));
@@ -2381,7 +2382,11 @@ function sendMessage() {
   const input = document.getElementById('msg-input');
   const text = input.value.trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-  if (!linkPeer || !viewingPeer || !peersMatch(linkPeer, viewingPeer)) {
+  if (!viewingPeer) {
+    toast('Select a chat first');
+    return;
+  }
+  if (!linkPeer || !peersMatch(linkPeer, viewingPeer)) {
     toast('Connect to this peer first');
     return;
   }

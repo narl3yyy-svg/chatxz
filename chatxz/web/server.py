@@ -22,6 +22,7 @@ from chatxz.core.rns_interfaces import (
     configured_serial_port,
     delete_interface,
     ensure_runtime_serial,
+    remove_serial_interfaces,
     list_serial_ports,
     normalize_interface_list,
     render_rns_config,
@@ -1270,25 +1271,13 @@ class ChatWebServer:
 
     def _disable_rns_serial_interfaces(self):
         try:
-            for iface in getattr(RNS.Transport, "interfaces", []) or []:
-                if type(iface).__name__ != "SerialInterface":
-                    continue
-                for attr, value in (("enabled", False), ("online", False)):
-                    if hasattr(iface, attr):
-                        try:
-                            setattr(iface, attr, value)
-                        except Exception:
-                            pass
-                for method in ("stop", "detach", "disable"):
-                    fn = getattr(iface, method, None)
-                    if callable(fn):
-                        try:
-                            fn()
-                        except Exception:
-                            pass
-                print("[serial] Disabled runtime SerialInterface after port unplug")
+            settings = self.load_settings()
+            port, _ = configured_serial_port(settings.get("rns_interfaces"))
+            n = remove_serial_interfaces(port or None)
+            if n:
+                print(f"[serial] Removed {n} SerialInterface(s) after port unplug")
         except Exception as e:
-            print(f"[serial] Could not disable runtime serial interface: {e}")
+            print(f"[serial] Could not remove runtime serial interface: {e}")
 
     async def _serial_watchdog_loop(self):
         serial_detach_sent = False

@@ -20,6 +20,7 @@ from chatxz.core.lan_rns import (
     wait_for_peer_path,
 )
 from chatxz.utils.platform import is_android
+from chatxz.core.rns_interfaces import prune_dead_serial_interfaces
 
 APP_NAME = "chatxz"
 LINK_CONNECT_TIMEOUT_S = 10
@@ -292,6 +293,7 @@ class MessagingBackend:
         return None
 
     def _prepare_failover_path(self, peer, prefer_family=None):
+        prune_dead_serial_interfaces()
         scrub_peer_path(peer)
         detached = detach_unhealthy_interfaces()
         if detached:
@@ -300,7 +302,8 @@ class MessagingBackend:
         self._announce()
         request_paths_for_hash(peer, family=prefer_family)
         if prefer_family:
-            path_iface = wait_for_peer_path(peer, family=prefer_family, timeout_s=10.0)
+            wait_s = 16.0 if prefer_family in ("lan", "udp") else 10.0
+            path_iface = wait_for_peer_path(peer, family=prefer_family, timeout_s=wait_s)
             if path_iface:
                 print(f"[connect] Path ready on {type(path_iface).__name__} ({prefer_family})")
                 return True
@@ -580,6 +583,7 @@ class MessagingBackend:
     def _announce(self, peer_ip=None, unicast_subnet=None):
         if not self.destination:
             return
+        prune_dead_serial_interfaces()
         announce_data = json.dumps({
             "app": APP_NAME,
             "name": self.display_name or ""

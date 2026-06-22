@@ -377,6 +377,90 @@ def configured_serial_port(settings_interfaces=None):
     return "", SERIAL_DEFAULT_BAUD
 
 
+def _stop_serial_reconnect(iface):
+    iface.online = False
+    try:
+        iface.reconnect_port = lambda: None
+    except Exception:
+        pass
+    serial = getattr(iface, "serial", None)
+    if serial is not None:
+        try:
+            serial.close()
+        except Exception:
+            pass
+        try:
+            iface.serial = None
+        except Exception:
+            pass
+
+
+def _finalize_rns_interface(iface, ifac_size=16):
+    """Apply the same post-init fields Reticulum sets when loading config."""
+    import RNS
+    from RNS.Interfaces.Interface import Interface
+
+    iface.mode = Interface.MODE_FULL
+    iface.OUT = True
+    iface.IN = True
+    iface.ifac_size = ifac_size
+    iface.announce_cap = RNS.Reticulum.ANNOUNCE_CAP / 100.0
+    iface.announce_rate_target = None
+    iface.announce_rate_grace = None
+    iface.announce_rate_penalty = None
+    if hasattr(iface, "optimise_mtu"):
+        iface.optimise_mtu()
+    if hasattr(iface, "final_init"):
+        iface.final_init()
+
+
+def remove_serial_interfaces(port=None):
+    """Remove SerialInterface(s) from the running transport (stops reconnect spam)."""
+    try:
+        import RNS
+    except Exception:
+        return 0
+    removed = 0
+    for iface in list(getattr(RNS.Transport, "interfaces", []) or []):
+        if type(iface).__name__ != "SerialInterface":
+            continue
+        if port and getattr(iface, "port", None) != port:
+            continue
+        _stop_serial_reconnect(iface)
+        try:
+            RNS.Transport.remove_interface(iface)
+            removed += 1
+            print(f"[serial] Removed RNS SerialInterface {getattr(iface, 'name', iface)}")
+        except Exception as exc:
+            print(f"[serial] Could not remove SerialInterface: {exc}")
+    return removed
+
+
+def prune_dead_serial_interfaces():
+    """Drop broken or offline serial interfaces so announces/paths use LAN only."""
+    try:
+        import RNS
+    except Exception:
+        return 0
+    removed = 0
+    for iface in list(getattr(RNS.Transport, "interfaces", []) or []):
+        if type(iface).__name__ != "SerialInterface":
+            continue
+        port = getattr(iface, "port", None)
+        broken = not hasattr(iface, "mode")
+        unplugged = bool(port) and not serial_port_accessible(port)
+        if broken or unplugged:
+            _stop_serial_reconnect(iface)
+            try:
+                RNS.Transport.remove_interface(iface)
+                removed += 1
+            except Exception:
+                pass
+    if removed:
+        print(f"[serial] Pruned {removed} dead SerialInterface(s)")
+    return removed
+
+
 def hot_add_serial_interface(port, speed=SERIAL_DEFAULT_BAUD, ifac_size=16):
     """Attach SerialInterface to a running RNS instance when USB is plugged in later."""
     port = (port or "").strip()
@@ -392,14 +476,12 @@ def hot_add_serial_interface(port, speed=SERIAL_DEFAULT_BAUD, ifac_size=16):
     for iface in getattr(RNS.Transport, "interfaces", []) or []:
         if type(iface).__name__ != "SerialInterface":
             continue
-        if getattr(iface, "port", None) == port:
-            if getattr(iface, "online", False):
-                return iface
-            try:
-                RNS.Transport.remove_interface(iface)
-            except Exception:
-                pass
-            break
+        if getattr(iface, "port", None) != port:
+            continue
+        if getattr(iface, "online", False) and hasattr(iface, "mode"):
+            return iface
+        remove_serial_interfaces(port)
+        break
 
     name = f"Serial {port}"
     try:
@@ -409,10 +491,7 @@ def hot_add_serial_interface(port, speed=SERIAL_DEFAULT_BAUD, ifac_size=16):
             "speed": int(speed),
             "ifac_size": ifac_size,
         })
-        iface.OUT = True
-        iface.IN = True
-        if hasattr(iface, "optimise_mtu"):
-            iface.optimise_mtu()
+        _finalize_rns_interface(iface, ifac_size=ifac_size)
         RNS.Transport.add_interface(iface)
         print(f"[serial] Hot-added RNS SerialInterface on {port}")
         return iface
@@ -434,8 +513,13 @@ def ensure_runtime_serial(settings_interfaces=None):
                 break
     except Exception:
         existing = None
-    if existing and getattr(existing, "online", False):
-        return existing
+    if existing:
+        if getattr(existing, "online", False) and hasattr(existing, "mode"):
+            return existing
+        if not serial_port_accessible(port):
+            remove_serial_interfaces(port)
+            return None
+        remove_serial_interfaces(port)
     if serial_port_accessible(port):
         return hot_add_serial_interface(port, speed=speed)
     return None
