@@ -185,6 +185,11 @@ chatxz --daemon
 
 ## Changelog (recent)
 
+### v0.3.27
+- Remove duplicate Clear history button from chat header (keep peer actions menu only)
+- Connect waits up to 18s for peer RNS announce; 10s link timeout for slow devices (Android)
+- Pass peer LAN IP when connecting from discovered list to use current beacon hash
+
 ### v0.3.26
 - Clear chat history is per-peer (chat header + peer actions), removed from Settings
 - Android: RNS auto-announce every 15s (beacon alone cannot establish encrypted links)

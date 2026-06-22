@@ -24,7 +24,7 @@ from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 CONFIG_DIR = get_config_dir()
 DATA_DIR = get_data_dir()
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
-APP_VERSION = "0.3.26"
+APP_VERSION = "0.3.27"
 NETWORK_STATS_AUTO_RESET_SEC = 7 * 86400
 
 def build_desktop_rns_config(broadcast_ip="255.255.255.255"):
@@ -870,6 +870,34 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
+    def _discovery_peer_for_connect(self, peer_ip, hash_hex):
+        from chatxz.core.discovery import normalize_hash
+        if not self.discovery:
+            return None
+        clean = normalize_hash(hash_hex)
+        by_ip = None
+        for p in self.discovery.get_peers():
+            if peer_ip and p.get("ip") == peer_ip:
+                by_ip = p
+            if clean and normalize_hash(p.get("hash")) == clean:
+                if p.get("via") == "rns":
+                    return p
+        return by_ip
+
+    def _resolve_connect_target(self, peer_hash, peer_ip=None):
+        from chatxz.core.discovery import normalize_hash
+        resolved = self._resolve_peer_hash(peer_hash)
+        if not self.discovery:
+            return resolved
+        if peer_ip:
+            for p in self.discovery.get_peers():
+                if p.get("ip") == peer_ip:
+                    ph = self._resolve_peer_hash(p.get("hash"))
+                    if p.get("via") == "rns":
+                        return ph
+                    return ph or resolved
+        return resolved
+
     async def handle_connect(self, request):
         if self._shutting_down:
             return web.json_response({"error": "server shutting down"}, status=503)
@@ -878,8 +906,14 @@ class ChatWebServer:
             peer_hash = data.get("hash", "").strip()
             if not peer_hash:
                 return web.json_response({"error": "hash required"}, status=400)
-            resolved_hash = self._resolve_peer_hash(peer_hash)
-            ok = await self._run_blocking(self.messaging.connect_to, resolved_hash)
+            peer_ip = (data.get("ip") or "").strip() or None
+            resolved_hash = self._resolve_connect_target(peer_hash, peer_ip)
+            ok = await self._run_blocking(
+                self.messaging.connect_to,
+                resolved_hash,
+                peer_ip,
+                self._discovery_peer_for_connect,
+            )
             if self._shutting_down or ok is None:
                 return web.json_response({"error": "server shutting down"}, status=503)
             if ok:
@@ -895,14 +929,19 @@ class ChatWebServer:
             return web.json_response({"error": str(e)}, status=400)
 
     def _beacon_payload(self):
-        return {
+        dest = self._clean_hash(self.destination_hash or "")
+        ident = self._clean_hash(self.identity_mgr.get_hex_hash() if self.identity_mgr else "")
+        payload = {
             "app": "chatxz",
             "v": 1,
-            "hash": (self.destination_hash or self.identity_mgr.get_hex_hash() if self.identity_mgr else ""),
+            "hash": dest or ident,
             "name": self.load_settings().get("name", ""),
             "ip": detect_lan_ip() or "",
             "port": self.port,
         }
+        if ident and ident != payload["hash"]:
+            payload["identity_hash"] = ident
+        return payload
 
     def _reset_network_state(self, update_settings=True):
         if self.messaging:
@@ -1603,8 +1642,14 @@ class ChatWebServer:
         elif msg_type == "connect":
             peer_hash = data.get("hash", "")
             if peer_hash and self.messaging:
-                resolved_hash = self._resolve_peer_hash(peer_hash)
-                ok = await self._run_blocking(self.messaging.connect_to, resolved_hash)
+                peer_ip = (data.get("ip") or "").strip() or None
+                resolved_hash = self._resolve_connect_target(peer_hash, peer_ip)
+                ok = await self._run_blocking(
+                    self.messaging.connect_to,
+                    resolved_hash,
+                    peer_ip,
+                    self._discovery_peer_for_connect,
+                )
                 if self._shutting_down or ok is None:
                     await ws.send_str(json.dumps({"type": "connect_fail", "error": "server shutting down"}))
                 elif ok:

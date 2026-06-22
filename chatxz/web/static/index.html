@@ -917,7 +917,6 @@ body.sidebar-open #sidebar-backdrop { display: block; }
         </div>
       </div>
       <div class="header-actions">
-        <button id="clear-peer-history-btn" style="display:none" onclick="clearPeerHistory(viewingPeer)" title="Clear this chat">Clear history</button>
         <button id="disconnect-btn" style="display:none" onclick="disconnect()">Disconnect</button>
       </div>
     </div>
@@ -1160,7 +1159,6 @@ function showWelcome() {
   document.getElementById('messages').style.display = 'none';
   document.getElementById('input-area').style.display = 'none';
   document.getElementById('disconnect-btn').style.display = 'none';
-  document.getElementById('clear-peer-history-btn').style.display = 'none';
   setLinkStatus('disconnected', 'Inactive');
   renderContacts(allContacts);
 }
@@ -1174,7 +1172,6 @@ function updatePeerHeader() {
     ? 'Encrypted · Connected'
     : 'Viewing history · not connected';
   document.getElementById('disconnect-btn').style.display = linked ? 'block' : 'none';
-  document.getElementById('clear-peer-history-btn').style.display = viewingPeer ? 'block' : 'none';
   setLinkStatus(linked ? 'connected' : 'disconnected', linked ? 'Active' : 'Inactive');
   document.getElementById('input-area').style.display = linked ? 'block' : 'none';
 }
@@ -1497,7 +1494,7 @@ function renderDiscovered(peers) {
         <div class="contact-hash">${truncateHash(p.hash)}${p.ip ? ' · ' + escapeHtml(p.ip) : ''}</div>
       </div>
       <span class="contact-badge lan">LAN</span>`;
-    div.onclick = () => openChat(p.hash, true);
+    div.onclick = () => openChat(p.hash, true, {ip: p.ip, port: p.port});
     div.oncontextmenu = (e) => {
       e.preventDefault();
       showActionPanel(e, p.hash);
@@ -1522,8 +1519,16 @@ function toggleActionPanel() {
   document.getElementById('action-panel').classList.toggle('open', actionShown);
 }
 
+function peerMetaForHash(hash) {
+  const key = peerKey(hash);
+  return (window._discoveredPeers || []).find(p => peerKey(p.hash) === key);
+}
+
 function actionConnect() {
-  if (ctxHash) connectTo(ctxHash);
+  if (ctxHash) {
+    const p = peerMetaForHash(ctxHash);
+    connectTo(ctxHash, p?.ip, p?.port);
+  }
   toggleActionPanel();
 }
 
@@ -1613,7 +1618,7 @@ function connectTo(hash, ip, port) {
     return;
   }
   connectInFlight = true;
-  toast('Connecting (4s timeout)...');
+  toast('Connecting...');
   const body = {hash};
   if (ip) body.ip = ip;
   if (port) body.port = port;
@@ -1862,7 +1867,7 @@ function setLinkPeer(hash) {
   renderDiscovered(window._discoveredPeers || []);
 }
 
-function openChat(hash, tryConnect) {
+function openChat(hash, tryConnect, meta) {
   viewingPeer = (hash || '').replace(/:/g, '');
   try { localStorage.setItem(LS_VIEWING_PEER, viewingPeer); } catch (_) {}
   document.getElementById('placeholder').style.display = 'none';
@@ -1873,7 +1878,8 @@ function openChat(hash, tryConnect) {
   renderContacts(allContacts);
   renderDiscovered(window._discoveredPeers || []);
   if (tryConnect && (!linkPeer || peerKey(linkPeer) !== peerKey(viewingPeer))) {
-    connectTo(hash);
+    const m = meta || peerMetaForHash(hash);
+    connectTo(hash, m?.ip, m?.port);
   } else if (!document.body.classList.contains('modal-open') && linkPeer && peerKey(linkPeer) === peerKey(viewingPeer)) {
     document.getElementById('msg-input').focus();
   }

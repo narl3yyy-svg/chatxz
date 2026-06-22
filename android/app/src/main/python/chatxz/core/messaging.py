@@ -4,8 +4,9 @@ from chatxz.core.discovery import normalize_hash, message_dest_hash_for_identity
 from chatxz.utils.platform import is_android
 
 APP_NAME = "chatxz"
-LINK_CONNECT_TIMEOUT_S = 4
+LINK_CONNECT_TIMEOUT_S = 10
 LINK_CONNECT_POLL_S = 0.1
+IDENTITY_WAIT_TIMEOUT_S = 18
 
 MESSAGE_TYPE_TEXT = "text"
 MESSAGE_TYPE_FILE = "file"
@@ -291,6 +292,58 @@ class MessagingBackend:
         if ident is None:
             ident = RNS.Identity.recall(raw, from_identity_hash=True)
         return ident
+
+    def _hash_from_peer_info(self, peer_info):
+        if not peer_info:
+            return ""
+        for key in ("hash", "identity_hash"):
+            candidate = normalize_hash(peer_info.get(key))
+            if not candidate or len(candidate) != 32:
+                continue
+            ident = self._identity_for_hash(candidate)
+            if ident:
+                dest = message_dest_hash_for_identity(ident)
+                if dest:
+                    self.register_peer_mapping(dest, normalize_hash(RNS.hexrep(ident.hash)))
+                    return dest
+        return normalize_hash(peer_info.get("hash"))
+
+    def _wait_for_identity(self, hash_hex, peer_ip=None, peer_lookup=None):
+        clean = normalize_hash(hash_hex)
+        deadline = time.time() + IDENTITY_WAIT_TIMEOUT_S
+        last_log = 0
+        while time.time() < deadline:
+            ident = self._identity_for_hash(clean)
+            if ident:
+                return ident, clean
+
+            if peer_lookup:
+                peer = peer_lookup(peer_ip, clean)
+                if peer:
+                    alt = self._hash_from_peer_info(peer)
+                    if alt and alt != clean:
+                        clean = alt
+                        ident = self._identity_for_hash(clean)
+                        if ident:
+                            print(f"[connect] Resolved peer via discovery: {clean[:16]}...")
+                            return ident, clean
+                    if peer.get("via") == "rns":
+                        alt = normalize_hash(peer.get("hash"))
+                        if alt:
+                            clean = alt
+                            ident = self._identity_for_hash(clean)
+                            if ident:
+                                return ident, clean
+
+            now = time.time()
+            if now - last_log >= 3:
+                remaining = int(deadline - now)
+                print(f"[connect] Waiting for RNS announce ({remaining}s left)...")
+                last_log = now
+            self._announce()
+            time.sleep(0.5)
+
+        return None, clean
 
     def _resolve_remote_peer(self, link, fallback=None):
         ident_hex = ""
@@ -647,7 +700,7 @@ class MessagingBackend:
     def _interrupted(self):
         return self.shutdown_requested or not self.running
 
-    def connect_to(self, destination_hash_hex):
+    def connect_to(self, destination_hash_hex, peer_ip=None, peer_lookup=None):
         with self._connect_lock:
             if self._interrupted():
                 return False
@@ -667,6 +720,10 @@ class MessagingBackend:
             ) else None
 
             known_identity = self._identity_for_hash(clean)
+            if known_identity is None:
+                known_identity, clean = self._wait_for_identity(
+                    clean, peer_ip=peer_ip, peer_lookup=peer_lookup
+                )
             if known_identity is None:
                 print(f"[connect] No known identity for {clean[:16]}...")
                 print("[connect] Peer must send an RNS announce (beacon alone is not enough).")
