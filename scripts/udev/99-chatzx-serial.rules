@@ -1,0 +1,6 @@
+# USB serial adapters (ttyUSB*, ttyACM*) — dialout read/write on Ubuntu/Debian.
+# Install once:
+#   sudo cp scripts/udev/99-chatzx-serial.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+KERNEL=="ttyUSB*", GROUP="dialout", MODE="0660"
+KERNEL=="ttyACM*", GROUP="dialout", MODE="0660"

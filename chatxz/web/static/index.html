@@ -1834,10 +1834,11 @@ function renderRnsInterfaceRow(iface, serialPorts, baudRates) {
   const isSerial = iface.preset === 'serial' || iface.type === 'SerialInterface';
   let metaBits = iface.type || '';
   if (isSerial) {
-    if (iface.serial_active) metaBits += ' · active';
-    else if (iface.port_status === 'permission_denied') metaBits += ' · permission denied';
-    else if (iface.port_status === 'missing') metaBits += ' · inactive (device not connected)';
-    else metaBits += ' · inactive (select a port)';
+    if (iface.serial_active) metaBits += ' · active (restart chatxz if RNS not up yet)';
+    else if (iface.port_status === 'permission_denied') metaBits += ' · no access — restart via ./run.sh web';
+    else if (iface.port_status === 'missing') metaBits += ' · waiting for device';
+    else if (iface.port) metaBits += ' · port saved';
+    else metaBits += ' · pick a port';
   } else if (iface.enabled === false) {
     metaBits += ' · disabled';
   }
@@ -2042,8 +2043,19 @@ function refreshNetworkStatus() {
       if (Array.isArray(d.configured_interfaces) && d.configured_interfaces.length) {
         html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Configured presets</div>';
         d.configured_interfaces.forEach(iface => {
-          html += row(iface.name || iface.type, (iface.enabled ? 'enabled' : 'disabled') + ' · ' + (iface.preset || iface.type), iface.enabled);
+          let status = iface.enabled ? 'enabled' : 'waiting';
+          if (iface.preset === 'serial' || iface.type === 'SerialInterface') {
+            if (iface.serial_active) status = 'active';
+            else if (iface.port_status === 'permission_denied') status = 'no access';
+            else if (iface.port) status = 'port ' + iface.port;
+            else status = 'no port';
+          }
+          const ok = iface.serial_active || (iface.enabled && iface.preset !== 'serial');
+          html += row(iface.name || iface.type, status + ' · ' + (iface.preset || iface.type), ok);
         });
+        if (d.serial_group_access === false) {
+          html += row('Serial groups', 'dialout not active — use ./run.sh web', false);
+        }
       }
       if (Array.isArray(d.interfaces) && d.interfaces.length) {
         html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Interfaces</div>';

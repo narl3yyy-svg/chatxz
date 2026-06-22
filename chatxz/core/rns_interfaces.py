@@ -118,19 +118,24 @@ def serial_port_available(port):
 
 
 def serial_runtime_active(iface):
-    """True only when user enabled serial and the port exists with read/write access."""
+    """True when a serial port is configured and this process can open it."""
     if iface.get("preset") != "serial" and iface.get("type") != "SerialInterface":
         return False
-    if not iface.get("enabled", False):
+    port = (iface.get("port") or "").strip()
+    if not port:
         return False
-    return serial_port_accessible(iface.get("port"))
+    return serial_port_accessible(port)
 
 
 def _sync_serial_enabled(iface):
+    """Keep enabled in sync with port selection and live accessibility."""
     if iface.get("preset") != "serial" and iface.get("type") != "SerialInterface":
         return iface
-    if serial_port_status(iface.get("port")) != "ok":
+    port = (iface.get("port") or "").strip()
+    if not port:
         iface["enabled"] = False
+    else:
+        iface["enabled"] = serial_port_status(port) == "ok"
     return iface
 
 

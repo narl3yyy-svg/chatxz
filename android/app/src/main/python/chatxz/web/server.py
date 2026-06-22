@@ -591,11 +591,32 @@ class ChatWebServer:
         print(f"[config] Wrote RNS config at {rns_config_path} (broadcast={bcast})")
         return rns_config_path
 
+    def _log_serial_diagnostics(self):
+        try:
+            import grp
+            names = sorted(grp.getgrgid(g).gr_name for g in os.getgroups())
+        except Exception:
+            names = []
+        print(f"[serial] process groups: {', '.join(names) or '(none)'}")
+        print(f"[serial] dialout/uucp access: {user_has_serial_group_access()}")
+        for p in list_serial_ports():
+            print(f"[serial] {p.get('device')}: {p.get('status')}")
+        for iface in normalize_interface_list(self.load_settings().get("rns_interfaces")):
+            if iface.get("preset") == "serial" or iface.get("type") == "SerialInterface":
+                port = iface.get("port") or "(none)"
+                active = serial_runtime_active(iface)
+                print(
+                    f"[serial] configured port={port} enabled={iface.get('enabled')} "
+                    f"active={active}"
+                )
+
     def start_rns(self):
         if self.embedded or is_android():
             patch_embedded_signals()
         settings = self.load_settings()
         self._write_rns_config(settings)
+        if not is_android():
+            self._log_serial_diagnostics()
 
         if not ensure_rns_ports_free(force=self.force):
             msg = "UDP port 4242 is already in use"
@@ -1147,7 +1168,10 @@ class ChatWebServer:
             "rns_ready": bool(self.messaging and self.messaging.destination),
             "rns_error": self.rns_init_error,
             "rns_interfaces": rns_interfaces,
-            "configured_interfaces": normalize_interface_list(self.load_settings().get("rns_interfaces")),
+            "configured_interfaces": self._interfaces_for_api(
+                self.load_settings().get("rns_interfaces")
+            ),
+            "serial_group_access": user_has_serial_group_access(),
             "beacon": self.lan_beacon.status() if self.lan_beacon else None,
             "discovered_peers": peers,
             "discovered_count": len(peers),

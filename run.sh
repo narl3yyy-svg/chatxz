@@ -26,7 +26,8 @@ case "${1:-}" in
         ;;
     web|server)
         install_deps
-        PYTHONPATH="$DIR" $PYTHON -m chatxz.web.server "${@:2}"
+        chmod +x "$DIR/scripts/launch-server.sh" 2>/dev/null || true
+        PYTHON="$PYTHON" "$DIR/scripts/launch-server.sh" "${@:2}"
         ;;
     cli)
         install_deps
