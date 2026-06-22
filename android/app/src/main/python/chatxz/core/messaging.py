@@ -70,7 +70,7 @@ class ChatMessage:
 
 class MessagingBackend:
     def __init__(self, identity, config_dir, on_message=None, on_file=None,
-                 on_progress=None, on_link_established=None,
+                 on_progress=None, on_link_established=None, on_link_closed=None,
                  display_name="", auto_announce=False,
                  receive_dir=None, peer_resolver=None):
         self.identity = identity
@@ -80,6 +80,7 @@ class MessagingBackend:
         self.on_file = on_file
         self.on_progress = on_progress
         self.on_link_established = on_link_established
+        self.on_link_closed = on_link_closed
         self.display_name = display_name
         self.auto_announce = auto_announce
         self.announce_interval = 15 if is_android() else 30
@@ -100,6 +101,7 @@ class MessagingBackend:
         self._receipt_callbacks = {}
         self._active_resources = {}
         self._cancel_events = {}
+        self._file_handles = {}
         self._cancelled_transfers = set()
         self._current_transfer_id = None
         self._progress_last = {}
@@ -523,10 +525,6 @@ class MessagingBackend:
         self._notify_link_established(link, peer_hash)
         self.drain_queue(link, peer_hash)
 
-        if self.on_message:
-            system_msg = ChatMessage("system", f"Link established with {peer_hash}")
-            self.on_message(system_msg, peer_hash)
-
     def _link_closed(self, link):
         def callback(link):
             if link.link_id in self.links:
@@ -537,10 +535,12 @@ class MessagingBackend:
                 self.active_peer_hash = None
             if self._send_link and self._send_link.link_id == link.link_id:
                 self._send_link = self.active_link
-            if self.on_message:
+            if self.on_link_closed:
                 remote_hash = self.dest_hash_for(self._peer_for_link(link))
-                system_msg = ChatMessage("system", f"Link closed with {remote_hash}")
-                self.on_message(system_msg, remote_hash)
+                try:
+                    self.on_link_closed(remote_hash)
+                except Exception as e:
+                    print(f"[messaging] on_link_closed error: {e}")
         return callback
 
     def _packet_callback(self, link):
@@ -730,17 +730,50 @@ class MessagingBackend:
             except Exception as e:
                 print(f"[progress] callback error: {e}")
 
-    def cancel_transfer(self, transfer_id=None):
-        cancelled = False
+    def _resolve_transfer_id(self, transfer_id=None, file_name=None):
         tid = transfer_id or self._current_transfer_id
+        if tid and tid in self._active_resources:
+            return tid
         if tid:
-            self._cancelled_transfers.add(tid)
-        if tid and tid in self._cancel_events:
-            self._cancel_events[tid].set()
+            return tid
+        if file_name:
+            for rid in list(self._active_resources.keys()):
+                msg = self._sent_messages.get(rid)
+                if msg and getattr(msg, "file_name", None) == file_name:
+                    return rid
+        return tid
+
+    def _cleanup_transfer(self, transfer_id):
+        self._active_resources.pop(transfer_id, None)
+        self._cancel_events.pop(transfer_id, None)
+        fh = self._file_handles.pop(transfer_id, None)
+        if fh:
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+    def cancel_transfer(self, transfer_id=None, file_name=None):
+        cancelled = False
+        tid = self._resolve_transfer_id(transfer_id, file_name)
+        if not tid:
+            return False
+        self._cancelled_transfers.add(tid)
+        cancel_ev = self._cancel_events.get(tid)
+        if cancel_ev:
+            cancel_ev.set()
             cancelled = True
-        targets = list(self._active_resources.items())
-        if tid:
-            targets = [(rid, res) for rid, res in targets if rid == tid]
+        targets = [(rid, res) for rid, res in self._active_resources.items() if rid == tid]
+        if not targets and file_name:
+            for rid, res in list(self._active_resources.items()):
+                msg = self._sent_messages.get(rid)
+                if msg and getattr(msg, "file_name", None) == file_name:
+                    targets.append((rid, res))
+                    tid = rid
+                    self._cancelled_transfers.add(tid)
+                    ev = self._cancel_events.get(tid)
+                    if ev:
+                        ev.set()
         for rid, resource in targets:
             try:
                 if hasattr(resource, "cancel"):
@@ -751,16 +784,17 @@ class MessagingBackend:
                 print(f"[transfer] Cancelled resource {rid}")
             except Exception as e:
                 print(f"[transfer] cancel resource {rid}: {e}")
-            self._active_resources.pop(rid, None)
-            self._cancel_events.pop(rid, None)
-        if not targets and tid:
-            cancelled = True
-        if cancelled:
-            fname = ""
-            for entry in reversed(self.message_queue):
-                if entry.get("msg_id") == tid:
-                    fname = entry.get("file_name", "")
-                    break
+            self._cleanup_transfer(rid)
+        if cancelled or tid in self._cancelled_transfers:
+            fname = file_name or ""
+            msg = self._sent_messages.get(tid)
+            if msg and getattr(msg, "file_name", None):
+                fname = msg.file_name
+            if not fname:
+                for entry in reversed(self.message_queue):
+                    if entry.get("msg_id") == tid:
+                        fname = entry.get("file_name", "")
+                        break
             self._emit_progress(fname, 0, status="cancelled", direction="send", transfer_id=tid)
         if self._current_transfer_id == tid:
             self._current_transfer_id = None
@@ -964,14 +998,14 @@ class MessagingBackend:
             os.unlink(tmp_path)
             return False
 
-    def send_file(self, file_path, msg_type=MESSAGE_TYPE_FILE, progress_callback=None):
+    def send_file(self, file_path, msg_type=MESSAGE_TYPE_FILE, progress_callback=None, transfer_id=None):
         link = self._outgoing_link()
         if not link or not os.path.exists(file_path):
             return False
         with self._file_send_lock:
             fname = os.path.basename(file_path)
             fsize = os.path.getsize(file_path)
-            chat_msg = ChatMessage(msg_type, str(time.time()), file_name=fname, file_size=fsize)
+            chat_msg = ChatMessage(msg_type, str(time.time()), file_name=fname, file_size=fsize, msg_id=transfer_id)
             transfer_id = chat_msg.msg_id
             self._current_transfer_id = transfer_id
             cancel_ev = threading.Event()
@@ -1001,6 +1035,7 @@ class MessagingBackend:
                         pass
 
                 f = open(file_path, "rb")
+                self._file_handles[transfer_id] = f
                 resource = RNS.Resource(f, link,
                              callback=self._resource_send_callback(fname, transfer_id, fsize),
                              progress_callback=wrapped_progress,
@@ -1013,14 +1048,12 @@ class MessagingBackend:
             except Exception as e:
                 print(f"[messaging] File send failed: {e}")
                 self._emit_progress(fname, 0, fsize, status="failed", direction="send", transfer_id=transfer_id)
-                self._cancel_events.pop(transfer_id, None)
-                self._active_resources.pop(transfer_id, None)
+                self._cleanup_transfer(transfer_id)
                 return False
 
     def _resource_send_callback(self, fname, transfer_id=None, fsize=0):
         def callback(resource):
-            self._active_resources.pop(transfer_id, None)
-            self._cancel_events.pop(transfer_id, None)
+            self._cleanup_transfer(transfer_id)
             if transfer_id in self._cancelled_transfers:
                 self._cancelled_transfers.discard(transfer_id)
                 print(f"[messaging] File transfer cancelled: {fname}")

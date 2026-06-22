@@ -973,7 +973,7 @@ body.sidebar-open #sidebar-backdrop { display: block; }
             <div id="serial-devices-panel" class="serial-devices-panel" style="display:none"></div>
             <div id="rns-interfaces-list" style="font-size:11px;color:var(--text2)">Loading...</div>
             <div id="serial-permission-hint" style="display:none;margin-top:6px;font-size:10px;color:var(--warn,#e8a838);line-height:1.45"></div>
-            <div style="margin-top:6px;font-size:10px;color:var(--text3)">Plug in USB serial, pick device + baud (default 57600), click Apply. Start with <code>./run.sh web --share</code> for dialout permissions. Restart chatxz after applying.</div>
+            <div id="serial-setup-hint" style="margin-top:6px;font-size:10px;color:var(--text3)">Plug in USB serial, pick device + baud (default 57600), click Apply. Restart chatxz after applying.</div>
           </div>
         </div>
         <div class="settings-card">
@@ -1171,9 +1171,11 @@ let audioChunks = [];
 let ctxHash = null;
 let peersPollTimer = null;
 let activeTransfer = null;
+let cancelledTransferIds = new Set();
 let incomingTransfers = {};
 let allContacts = [];
 let sidebarOpen = true;
+let appPlatform = 'desktop';
 
 const EMOJIS = ['😀','😃','😄','😁','😅','😂','🤣','😊','😇','🙂','😉','😌','😍','🥰','😘','😋','😛','😜','🤪','😝','🤗','🤭','🤫','🤔','🤐','🤨','😐','😑','😶','😏','😒','🙄','😬','🤥','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🥴','😵','🤯','🤠','🥳','🥺','😢','😭','😤','😠','😡','🤬','💀','💩','🤡','👻','👽','🤖','😺','😸','😹','😻','😼','😽','🙀','😿','😾','🙌','👏','👍','👎','👊','✊','🤛','🤜','🤞','✌️','🤟','🤘','👌','👈','👉','👆','👇','☝️','✋','🤚','🖐','🖖','👋','🤙','💪','🦾','🖕','✍️','🙏','💯','🔥','⭐','🌟','✨','💥','💫','💦','💨','❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💘','💝','💟','🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐔','🐧','🐦','🐤','🐣','🐥','🦆','🦅','🦉','🦇','🐺','🐗','🐴','🦄','🐝','🐛','🦋','🐌','🐞','🐜','🦟','🦗','🕷','🦂','🐢','🐍','🦎','🦖','🦕','🐙','🦑','🦐','🦀','🐡','🐠','🐟','🐬','🐳','🐋','🦈','🐊','🐅','🐆','🦓','🦍','🐘','🦛','🦏','🐪','🐫','🦒','🦘','🐃','🐂','🐄','🐎','🐖','🐏','🐑','🦙','🐐','🦌','🐕','🐩','🐈','🐓','🦃','🦚','🦜','🦢','🦩','🕊','🐇','🦝','🦡','🦨','🦦','🦥','🐁','🐀','🐿','🦔','🌵','🎄','🌲','🌳','🌴','🌱','🌿','☘️','🍀','🍃','🍂','🍁','🍄','🌾','💐','🌷','🌹','🥀','🌺','🌸','🌼','🌻','🌞','🌝','🌛','🌜','🌚','🌕','🌖','🌗','🌘','🌑','🌒','🌓','🌔','🌙','🌎','🌍','🌏','🪐','💫','⚡','☄️','🔥','🌪','🌈','☀️','🌤','⛅','🌥','☁️','🌦','🌧','⛈','🌩','🌨','❄️','☃️','⛄','🌬','💧','💦','☔','🌊','🍏','🍎','🍐','🍊','🍋','🍌','🍉','🍇','🍓','🫐','🍈','🍒','🍑','🥭','🍍','🥥','🥝','🍅','🍆','🥑','🥦','🥬','🥒','🌶','🌽','🥕','🧄','🧅','🥔','🍠','🥐','🍞','🥖','🥨','🧀','🥚','🍳','🥞','🧇','🥓','🥩','🍗','🍖','🌭','🍔','🍟','🍕','🥪','🥙','🌮','🌯','🥗','🥘','🍝','🍜','🍲',' curry','🍣','🍱','🥟','🍤','🍙','🍚','🍘','🍥','🥠','🥮','🍢','🍡','🍧','🍨','🍦','🥧','🧁','🍰','🎂','🍮','🍭','🍬','🍫','🍿','🍩','🍪','🌰','🥜','🍯','🥛','🍼','☕','🫖','🍵','🧃','🥤','🧋','🍶','🍺','🍻','🥂','🍷','🥃','🍸','🍹','🧉','🍾','🧊','🥄','🍴','🥢','🥡','🥣','🧂','⚽','🏀','🏈','⚾','🥎','🎾','🏐','🏉','🥏','🎱','🪀','🏓','🏸','🏒','🏑','🥍','🏏','🥅','⛳','🪁','🏹','🎣','🤿','🥊','🥋','🎽','⛸','🥌','sled','🎿','⛷','🏂','🪐','🏋️','🤼','🤸','⛹️','🤺','🏌️','🏇','🧘','🏄','🏊','🤽','🚣','🧗','🚵','🚴','🏆','🥇','🥈','🥉','🏅','🎖','🏵','🎗','🎫','🎟','🎪','🤹','🎭','🩰','🎨','🎬','🎤','🎧','🎼','🎹','🥁','🪘','🎷','🎺','🎸','🪕','🎻','🎲','♟','🎯','🎳','🎮','🎰','🧩','⌚','📱','📲','💻','⌨️','🖥','🖨','🖱','🖲','🕹','🗜','💽','💾','💿','📀','📼','📷','📸','📹','🎥','📽','🎞','📞','☎️','📟','📠','📺','📻','🎙','🎚','🎛','🧭','⏱','⏲','⏰','🕰','⌛','⏳','📡','🔋','🔌','💡','🔦','🕯','🪔','🧯','🛢','💸','💵','💴','💶','💷','🪙','💰','💳','💎','⚖️','🪜','🧰','🪛','🔧','🔨','⚒','🛠','⛏','🪚','🔩','⚙️','🪤','🧱','⛓','🧲','🔫','💣','🧨','🪓','🔪','🗡','⚔️','盾','🚬','⚰️','🪦','⚱️','🏺','🔮','📿','🧿','💈','⚗️','🔭','🔬','🕳','🩹','🩺','💊','💉','🩸','🧬','🦠','🧫','🧬','🔬','🔭','📡','💡','🔦','🕯','🪔','🧯','🛢','🔋','🔌','💻','⌨️','🖥','🖨','🖱','🖲','🕹','🗜','💽','💾','💿','📀','📼','📷','📸','📹','🎥','📽','🎞','📞','☎️','📟','📠','📺','📻','🎙','🎚','🎛','🧭','⌚','📱','📲','⏱','⏲','⏰','🕰','⌛','⏳','📊','📈','📉','📌','📍','📎','🖇','📏','📐','✂️','🗃','🗄','🗑','🔒','🔓','🔏','🔐','🔑','🗝','🔨','🪓','⛏','⚒','🛠','🗡','⚔️','🔫','弓','🛡','🔧','🔩','⚙️','🧰','🧲','🧪','🧫','🧬','🔬','🔭','📡','💉','💊','🩹','🩺','🩻','🚪','🛏','🛋','🪑','🚽','🚿','🛁','🪒','🧴','🧷','🧹','🧺','🧻','🪣','🧼','🪥','🧽','🧯','🛒','🚬','⚰️','🪦','⚱️','🗿','🪧','🪪','🏧','🚮','🚰','🚹','🚺','🚻','🚼','🚾','🛂','🛃','🛄','🛅','⚠️','🚸','⛔','🚫','🚳','🚭','🚯','🚱','🚷','📵','🔞','☢️','☣️','⬆️','↗️','➡️','↘️','⬇️','↙️','⬅️','↖️','↕️','↔️','↩️','↪️','⤴️','⤵️','🔃','🔄','🔙','🔚','🔛','🔜','🔝','🛐','⚛️','🕉','✡️','☸️','☯️','✝️','☦️','☪️','☮️','🕎','🔯','♈','♉','♊','♋','♌','♍','♎','♏','♐','♑','♒','♓','⛎','🔀','🔁','🔂','▶️','⏩','⏭','⏯','◀️','⏪','⏮','🔼','⏫','🔽','⏬','⏸','⏹','⏺','⏏','🎦','🔅','🔆','📶','📳','📴','♀️','♂️','⚧','✖️','➕','➖','➗','♾','‼️','⁉️','❓','❔','❕','❗','〰️','💱','💲','⚕️','♻️','⚜️','🔱','📛','🔰','⭕','✅','☑️','✔️','❌','❎','➰','➿','〽️','✳️','✴️','❇️','©️','®️','™️','#️⃣','*️⃣','0️⃣','1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟','🔞','🔠','🔡','🔢','🔣','🔤','🅰️','🆎','🅱️','🆑','🆒','🆓','ℹ️','🆔','Ⓜ️','🆕','🆖','🅾️','🆗','🅿️','🆘','🆙','🆚','🈁','🈂️','🈷️','🈶','🈯','🉐','🈹','🈚','🈲','🉑','🈸','🈴','🈳','㊗️','㊙️','🈺','🈵','🔴','🟠','🟡','🟢','🔵','🟣','🟤','⚫','⚪','🟥','🟧','🟨','🟩','🟦','🟪','🟫','⬛','⬜','◼️','◻️','◾','◽','▪️','▫️','🔶','🔷','🔸','🔹','🔺','🔻','💠','🔘','🔲','🔳','🏁','🚩','🎌','🏴','🏳️','🏴‍☠️'];
 
@@ -1355,6 +1357,8 @@ function fetchIdentity() {
         const hv = document.getElementById('header-version');
         if (hv) hv.textContent = 'v' + d.app_version;
       }
+      appPlatform = d.platform || (window.chatxzAndroid?.isAndroid?.() ? 'android' : 'desktop');
+      updatePlatformHints();
       if (d.platform === 'android') {
         const hint = document.getElementById('settings-received-hint');
         if (hint) hint.textContent = 'Tap Browse to open the Android folder picker, then Save to apply.';
@@ -1434,7 +1438,6 @@ function handleWSMessage(msg) {
     if (viewingPeer && peerKey(msg.data?.peer) === peerKey(viewingPeer)) {
       document.getElementById('messages').innerHTML = '';
     }
-    toast('Chat history cleared');
   } else if (msg.type === 'network_reset') {
     linkPeer = null;
     updatePeerHeader();
@@ -1486,6 +1489,9 @@ function updateIncomingTransfers(data) {
 
 function showProgress(data) {
   updateIncomingTransfers(data);
+  const tid = data.transfer_id;
+  if (tid && cancelledTransferIds.has(tid) && data.status === 'active') return;
+  if (data.status === 'cancelled' && tid) cancelledTransferIds.add(tid);
   var bar = document.getElementById('progress-bar');
   var label = document.getElementById('progress-label');
   var speedEl = document.getElementById('transfer-speed');
@@ -1556,14 +1562,18 @@ function hideProgress(msg) {
 
 function cancelTransfer() {
   if (!activeTransfer) return;
+  const tid = activeTransfer.transfer_id;
+  const fname = activeTransfer.file_name;
+  if (tid) cancelledTransferIds.add(tid);
+  hideProgress('Transfer cancelled');
   fetch('/api/transfer/cancel', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
-      transfer_id: activeTransfer.transfer_id,
-      file_name: activeTransfer.file_name,
+      transfer_id: tid,
+      file_name: fname,
     })
-  }).then(() => hideProgress('Transfer cancelled')).catch(() => toast('Cancel failed'));
+  }).catch(() => toast('Cancel failed'));
 }
 
 function startPeerPolling() {
@@ -1861,6 +1871,40 @@ function netClass(ok) {
 const SERIAL_BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 const SERIAL_DEFAULT_BAUD = 57600;
 
+function updatePlatformHints() {
+  const serialHint = document.getElementById('serial-setup-hint');
+  if (serialHint) {
+    serialHint.textContent = appPlatform === 'android'
+      ? 'Use a USB OTG cable, plug in your serial adapter, tap Refresh devices, grant USB access, pick baud (default 57600), click Apply, then restart the app.'
+      : 'Plug in USB serial, pick device + baud (default 57600), click Apply. Start with ./run.sh web --share for dialout permissions. Restart chatxz after applying.';
+  }
+}
+
+function requestUsbPermissionForIface(ifaceId) {
+  const port = document.querySelector(`select[data-serial-port="${ifaceId}"]`)?.value;
+  requestUsbPermission(port);
+}
+
+function requestUsbPermission(device) {
+  if (!device) return;
+  if (window.chatxzAndroid?.requestUsbPermission) {
+    window.chatxzAndroid.requestUsbPermission(device);
+    toast('USB permission requested');
+    setTimeout(refreshSerialPorts, 1200);
+    return;
+  }
+  fetch('/api/serial-ports/permission', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({device}),
+  }).then(r => r.json()).then(d => {
+    if (d.granted) toast('USB access granted');
+    else if (d.requested) toast('USB permission requested');
+    else if (d.error) toast('USB permission failed: ' + d.error);
+    setTimeout(refreshSerialPorts, 1200);
+  }).catch(() => toast('USB permission request failed'));
+}
+
 function serialStatusLabel(status) {
   if (status === 'ok') return { text: 'Ready', cls: 'ok' };
   if (status === 'permission_denied') return { text: 'No permission', cls: 'denied' };
@@ -1949,6 +1993,7 @@ function renderRnsInterfaceRow(iface, serialPorts, baudRates) {
     <div class="rns-iface-serial-actions">
       <button type="button" class="btn-block" onclick="saveSerialInterface('${id}')">Apply</button>
       <button type="button" class="rns-serial-refresh" onclick="refreshSerialPorts()">↻ Refresh devices</button>
+      <button type="button" class="rns-serial-refresh" onclick="requestUsbPermissionForIface('${id}')">Grant USB access</button>
     </div>`;
   }
   return `<div class="rns-iface-card">${body}</div>`;
@@ -1966,6 +2011,8 @@ function loadRnsInterfaces() {
     window._serialPorts = portData.ports || [];
     window._serialPortData = portData;
     window._serialPermissionHint = portData.permission_hint || '';
+    if (portData.platform) appPlatform = portData.platform;
+    updatePlatformHints();
     const baudRates = portData.baud_rates || SERIAL_BAUD_RATES;
     const hasSerial = items.some(i => i.preset === 'serial' || i.type === 'SerialInterface');
     if (hasSerial) renderSerialDevicesPanel(window._serialPorts, portData);
@@ -2034,11 +2081,12 @@ function saveSerialInterface(id) {
       loadRnsInterfaces();
       const saved = (d.interfaces || []).find(i => i.id === id);
       if (saved && saved.port_status === 'permission_denied') {
-        toast('Saved ' + port + ' — inactive until permissions OK (log out/in, restart chatxz)');
+        requestUsbPermission(port);
+        toast('Saved ' + port + ' — grant USB access, then restart');
       } else if (saved && saved.serial_active) {
-        toast('Serial enabled — restart chatxz to apply');
+        toast(appPlatform === 'android' ? 'Serial enabled — restart the app to apply' : 'Serial enabled — restart chatxz to apply');
       } else {
-        toast('Serial settings saved — restart chatxz to apply');
+        toast(appPlatform === 'android' ? 'Serial settings saved — restart the app to apply' : 'Serial settings saved — restart chatxz to apply');
       }
       refreshNetworkStatus();
     } else {
@@ -2162,7 +2210,10 @@ function refreshNetworkStatus() {
           const ok = iface.serial_active || (iface.enabled && iface.preset !== 'serial');
           html += row(iface.name || iface.type, status + ' · ' + (iface.preset || iface.type), ok);
         });
-        if (d.serial_group_access === false) {
+        if (d.platform === 'android') {
+          const ready = d.usb_serial_ready ?? 0;
+          html += row('USB serial ready', ready + ' device(s)', ready > 0);
+        } else if (d.serial_group_access === false) {
           html += row('Serial groups', 'dialout not active — use ./run.sh web', false);
         }
       }
@@ -2433,9 +2484,16 @@ window.onChatxzFolderSendError = function(msg) {
   toast('Folder send failed: ' + (msg || 'unknown'));
 };
 
+function isSessionSystemMessage(data) {
+  if (data.type !== 'system' && data.sender !== 'system') return false;
+  const c = data.content || '';
+  return c.startsWith('Link established with ') || c.includes('Link closed') || c.startsWith('Connected to ');
+}
+
 function addMessage(data) {
   const msgs = document.getElementById('messages');
   if (msgs.style.display === 'none' || !viewingPeer) return;
+  if (isSessionSystemMessage(data)) return;
   if (!messageBelongsToPeer(data)) return;
 
   if (data.msg_id) {
@@ -2722,11 +2780,22 @@ function regenerateIdentity() {
 }
 
 function restartServer() {
-  if (!confirm('Restart the server? The web interface will be unavailable for a few seconds.')) return;
-  fetch('/api/restart', {method: 'POST'}).then(() => {
-    toast('Server restarting...');
-    setTimeout(() => { location.reload(); }, 3000);
-  });
+  const msg = appPlatform === 'android'
+    ? 'Restart the app to apply network/serial settings?'
+    : 'Restart the server? The web interface will be unavailable for a few seconds.';
+  if (!confirm(msg)) return;
+  fetch('/api/restart', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.android && window.chatxzAndroid?.restartApp) {
+        toast('Restarting app...');
+        window.chatxzAndroid.restartApp();
+        return;
+      }
+      toast('Server restarting...');
+      setTimeout(() => { location.reload(); }, 3000);
+    })
+    .catch(() => toast('Restart failed'));
 }
 
 document.addEventListener('paste', e => {

@@ -4,7 +4,10 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbManager;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Build;
@@ -57,6 +60,7 @@ public class MainActivity extends AppCompatActivity {
     private ValueCallback<Uri[]> filePathCallback;
     private PermissionRequest pendingWebPermissionRequest;
     private WifiManager.MulticastLock multicastLock;
+    private UsbPermissionReceiver usbPermissionReceiver;
     private String serverUrl = "http://127.0.0.1:8742";
     private boolean serverStarted = false;
 
@@ -78,6 +82,8 @@ public class MainActivity extends AppCompatActivity {
         });
 
         acquireMulticastLock();
+        registerUsbPermissionReceiver();
+        handleAttachedUsbDevice(getIntent());
 
         webView = new WebView(this);
         setContentView(webView);
@@ -85,6 +91,41 @@ public class MainActivity extends AppCompatActivity {
 
         showLoading("Starting chatxz...");
         requestNeededPermissions();
+    }
+
+    private void registerUsbPermissionReceiver() {
+        if (usbPermissionReceiver != null) {
+            return;
+        }
+        usbPermissionReceiver = new UsbPermissionReceiver();
+        IntentFilter filter = new IntentFilter(UsbSerialHelper.ACTION_USB_PERMISSION);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(usbPermissionReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(usbPermissionReceiver, filter);
+        }
+    }
+
+    private void handleAttachedUsbDevice(Intent intent) {
+        if (intent == null) {
+            return;
+        }
+        UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+        if (device == null) {
+            return;
+        }
+        UsbSerialHelper.requestPermission(device.getDeviceName());
+    }
+
+    public void restartApp() {
+        recreate();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleAttachedUsbDevice(intent);
     }
 
     private void acquireMulticastLock() {
@@ -535,6 +576,12 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        if (usbPermissionReceiver != null) {
+            try {
+                unregisterReceiver(usbPermissionReceiver);
+            } catch (Exception ignored) {}
+            usbPermissionReceiver = null;
+        }
         if (multicastLock != null && multicastLock.isHeld()) {
             multicastLock.release();
         }

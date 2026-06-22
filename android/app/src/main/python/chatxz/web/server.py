@@ -1,4 +1,4 @@
-import os, json, time, base64, mimetypes, asyncio, socket, zipfile, shutil, subprocess, tempfile, signal, re, sys, threading
+import os, json, time, base64, mimetypes, asyncio, socket, zipfile, shutil, subprocess, tempfile, signal, re, sys, threading, uuid
 from urllib.parse import quote, unquote
 from pathlib import Path
 
@@ -14,6 +14,7 @@ from chatxz.core.rns_interfaces import (
     INTERFACE_PRESETS,
     SERIAL_BAUD_RATES,
     SERIAL_DEFAULT_BAUD,
+    ANDROID_SERIAL_PERMISSION_HINT,
     SERIAL_PERMISSION_HINT,
     serial_permission_hint_for_process,
     add_interface,
@@ -43,6 +44,7 @@ CONFIG_DIR = get_config_dir()
 DATA_DIR = get_data_dir()
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 NETWORK_STATS_AUTO_RESET_SEC = 7 * 86400
+SESSION_SYSTEM_LINK_CLOSED_TTL = 600
 
 def build_desktop_rns_config(broadcast_ip="255.255.255.255"):
     return f"""[reticulum]
@@ -466,6 +468,33 @@ class ChatWebServer:
                 enriched["file_url"] = url
         return enriched
 
+    def _is_session_system_message(self, entry):
+        if isinstance(entry, str):
+            content = entry
+        else:
+            if entry.get("type") != "system" and entry.get("sender") != "system":
+                return False
+            content = entry.get("content") or ""
+        return (
+            content.startswith("Link established with ")
+            or "Link closed" in content
+            or content.startswith("Connected to ")
+        )
+
+    def _prune_stale_session_system_messages(self):
+        now = time.time()
+        kept = []
+        for m in self.message_history:
+            if not self._is_session_system_message(m):
+                kept.append(m)
+                continue
+            content = m.get("content") or ""
+            if "Link closed" in content and now - m.get("timestamp", 0) < SESSION_SYSTEM_LINK_CLOSED_TTL:
+                kept.append(m)
+        if len(kept) != len(self.message_history):
+            self.message_history = kept
+            self._save_history()
+
     def _session_peer_at(self, timestamp):
         session_peer = None
         for m in self.message_history:
@@ -487,6 +516,8 @@ class ChatWebServer:
             return self.message_history[-limit:]
         filtered = []
         for m in self.message_history:
+            if self._is_session_system_message(m):
+                continue
             cp = self._peer_dest_hash(m.get("chat_peer") or m.get("peer"))
             if cp and cp == peer:
                 filtered.append(self._enrich_message(m))
@@ -612,12 +643,17 @@ class ChatWebServer:
                 )
 
     def start_rns(self):
+        if is_android():
+            try:
+                from chatxz.android_usb.bootstrap import bootstrap as bootstrap_android_usb
+                bootstrap_android_usb()
+            except Exception as e:
+                print(f"[serial] Android USB bootstrap failed: {e}")
         if self.embedded or is_android():
             patch_embedded_signals()
         settings = self.load_settings()
         self._write_rns_config(settings)
-        if not is_android():
-            self._log_serial_diagnostics()
+        self._log_serial_diagnostics()
 
         if not ensure_rns_ports_free(force=self.force):
             msg = "UDP port 4242 is already in use"
@@ -660,6 +696,7 @@ class ChatWebServer:
             on_message=self._on_message,
             on_progress=self._on_transfer_progress,
             on_link_established=self._on_link_established,
+            on_link_closed=self._on_link_closed,
             display_name=settings.get("name", ""),
             auto_announce=False,
             receive_dir=received_dir,
@@ -719,13 +756,8 @@ class ChatWebServer:
             "msg_id": chat_msg.msg_id,
             "status": "received" if sender_hash and sender_hash != "system" else "",
         }, outgoing=False)
-        if chat_msg.msg_type == "system" and "Link closed" in (chat_msg.content or ""):
-            self.active_peer = None
-            if self.websockets and self._loop:
-                asyncio.run_coroutine_threadsafe(
-                    self._broadcast({"type": "link_closed", "data": {}}),
-                    self._loop
-                )
+        if self._is_session_system_message(chat_msg.content or ""):
+            return
         self.message_history.append(entry)
         self._save_history()
         if self.debug:
@@ -757,6 +789,14 @@ class ChatWebServer:
                 self._loop
             )
 
+    def _on_link_closed(self, peer_hash):
+        self.active_peer = None
+        if self.websockets and self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast({"type": "link_closed", "data": {}}),
+                self._loop
+            )
+
     def _on_link_established(self, peer_hash, link):
         resolved = self._peer_dest_hash(peer_hash)
         if self._is_self_hash(resolved) and self.discovery:
@@ -764,15 +804,33 @@ class ChatWebServer:
             if fixed and not self._is_self_hash(fixed):
                 resolved = fixed
         self.active_peer = resolved
+        removed = self._clear_history_for_peer(resolved)
+        self._prune_stale_session_system_messages()
         print(f"[connect] Session active with {self.active_peer}")
         if self.websockets and self._loop:
             asyncio.run_coroutine_threadsafe(
                 self._broadcast({"type": "link_established", "data": {"hash": self.active_peer}}),
                 self._loop
             )
+            if removed:
+                asyncio.run_coroutine_threadsafe(
+                    self._broadcast({
+                        "type": "peer_history_cleared",
+                        "data": {"peer": resolved, "removed": removed},
+                    }),
+                    self._loop
+                )
 
     def _on_transfer_progress(self, data):
         status = data.get("status", "active")
+        transfer_id = data.get("transfer_id")
+        if (
+            status == "active"
+            and transfer_id
+            and self.messaging
+            and transfer_id in getattr(self.messaging, "_cancelled_transfers", set())
+        ):
+            return
         if status in ("complete", "cancelled", "failed"):
             self._progress_last.pop(data.get("transfer_id") or data.get("file_name"), None)
         else:
@@ -1050,21 +1108,43 @@ class ChatWebServer:
 
     async def handle_serial_ports_get(self, request):
         ports = await asyncio.to_thread(list_serial_ports)
-        has_groups = user_has_serial_group_access()
+        android = is_android()
+        has_groups = None if android else user_has_serial_group_access()
         denied = [p for p in ports if p.get("status") == "permission_denied"]
-        hint = SERIAL_PERMISSION_HINT
-        if denied:
-            hint = serial_permission_hint_for_process()
+        hint = serial_permission_hint_for_process() if denied else (
+            ANDROID_SERIAL_PERMISSION_HINT if android else SERIAL_PERMISSION_HINT
+        )
         return web.json_response({
             "ports": ports,
             "baud_rates": SERIAL_BAUD_RATES,
             "default_baud": SERIAL_DEFAULT_BAUD,
             "permission_hint": hint,
             "has_group_access": has_groups,
-            "process_needs_restart": bool(denied and has_groups),
+            "process_needs_restart": bool(denied and has_groups) if not android else False,
+            "platform": "android" if android else "desktop",
+            "can_request_usb_permission": android,
             "count": len(ports),
             "ready_count": sum(1 for p in ports if p.get("status") == "ok"),
         })
+
+    async def handle_serial_usb_permission(self, request):
+        if not is_android():
+            return web.json_response({"error": "USB permission API is Android-only"}, status=400)
+        try:
+            data = await request.json()
+            device = (data.get("device") or data.get("port") or "").strip()
+            if not device:
+                return web.json_response({"error": "device required"}, status=400)
+            from usb4a import usb
+            dev = usb.get_usb_device(device)
+            if not dev:
+                return web.json_response({"error": "device not found"}, status=404)
+            if usb.has_usb_permission(dev):
+                return web.json_response({"status": "ok", "granted": True})
+            usb.request_usb_permission(dev)
+            return web.json_response({"status": "ok", "granted": False, "requested": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
 
     async def handle_rns_interfaces_update(self, request):
         try:
@@ -1175,7 +1255,13 @@ class ChatWebServer:
             "configured_interfaces": self._interfaces_for_api(
                 self.load_settings().get("rns_interfaces")
             ),
-            "serial_group_access": user_has_serial_group_access(),
+            "serial_group_access": (
+                None if is_android() else user_has_serial_group_access()
+            ),
+            "usb_serial_ready": (
+                sum(1 for p in list_serial_ports() if p.get("status") == "ok")
+                if is_android() else None
+            ),
             "beacon": self.lan_beacon.status() if self.lan_beacon else None,
             "discovered_peers": peers,
             "discovered_count": len(peers),
@@ -1346,7 +1432,7 @@ class ChatWebServer:
 
     async def handle_restart(self, request):
         if is_android():
-            return web.json_response({"error": "Restart is not supported on Android"}, status=400)
+            return web.json_response({"status": "restarting", "android": True})
         import sys, os
         args = [sys.executable]
         if sys.argv and (sys.argv[0].endswith('.py') or os.sep in sys.argv[0]):
@@ -1420,6 +1506,7 @@ class ChatWebServer:
             my_hash = self._my_sender_hash()
             ts = time.time()
             chat_peer = self._peer_dest_hash(self.active_peer)
+            transfer_id = str(uuid.uuid4())[:12]
             entry = self._enrich_message({
                 "type": msg_type,
                 "content": save_path,
@@ -1429,7 +1516,7 @@ class ChatWebServer:
                 "timestamp": ts,
                 "file_name": fname,
                 "file_size": size,
-                "msg_id": str(int(ts * 1000))[-12:],
+                "msg_id": transfer_id,
                 "status": "sent",
             }, outgoing=True)
             self.message_history.append(entry)
@@ -1437,7 +1524,8 @@ class ChatWebServer:
             await self._broadcast({"type": "message", "data": entry})
 
             result = self.messaging.send_file(save_path, msg_type,
-                                         progress_callback=self._make_progress_callback(fname, size, entry["msg_id"]))
+                                         progress_callback=self._make_progress_callback(fname, size, transfer_id),
+                                         transfer_id=transfer_id)
             if result:
                 return web.json_response({"status": "ok", "name": fname, "size": size, "method": "resource"})
             return web.json_response({"error": "send failed"}, status=400)
@@ -1513,6 +1601,7 @@ class ChatWebServer:
             my_hash = self._my_sender_hash()
             ts = time.time()
             chat_peer = self._peer_dest_hash(self.active_peer)
+            transfer_id = str(uuid.uuid4())[:12]
             entry = self._enrich_message({
                 "type": "file",
                 "content": zip_path,
@@ -1522,14 +1611,15 @@ class ChatWebServer:
                 "timestamp": ts,
                 "file_name": zip_name,
                 "file_size": zsize,
-                "msg_id": str(int(ts * 1000))[-12:],
+                "msg_id": transfer_id,
                 "status": "sent",
             }, outgoing=True)
             self.message_history.append(entry)
             self._save_history()
             await self._broadcast({"type": "message", "data": entry})
             result = self.messaging.send_file(zip_path, "file",
-                                        progress_callback=self._make_progress_callback(zip_name, zsize, entry["msg_id"]))
+                                        progress_callback=self._make_progress_callback(zip_name, zsize, transfer_id),
+                                        transfer_id=transfer_id)
             if result:
                 return web.json_response({"status": "ok", "name": zip_name, "size": zsize})
             return web.json_response({"error": "send failed"}, status=400)
@@ -1567,11 +1657,14 @@ class ChatWebServer:
         except Exception:
             data = {}
         transfer_id = data.get("transfer_id")
-        cancelled = self.messaging.cancel_transfer(transfer_id)
+        file_name = data.get("file_name", "")
+        cancelled = self.messaging.cancel_transfer(transfer_id, file_name=file_name)
         await self._broadcast({"type": "progress", "data": {
             "status": "cancelled",
             "progress": 0,
-            "file_name": data.get("file_name", ""),
+            "file_name": file_name,
+            "transfer_id": transfer_id,
+            "direction": "send",
         }})
         return web.json_response({"status": "ok" if cancelled else "noop"})
 
@@ -1599,6 +1692,7 @@ class ChatWebServer:
             ts = time.time()
             chat_peer = self._peer_dest_hash(self.active_peer)
             voice_name = os.path.basename(voice_path)
+            transfer_id = str(uuid.uuid4())[:12]
             entry = self._enrich_message({
                 "type": "voice",
                 "content": voice_path,
@@ -1608,7 +1702,7 @@ class ChatWebServer:
                 "timestamp": ts,
                 "file_name": voice_name,
                 "file_size": len(audio_bytes),
-                "msg_id": str(int(ts * 1000))[-12:],
+                "msg_id": transfer_id,
                 "status": "sent",
             }, outgoing=True)
             self.message_history.append(entry)
@@ -1616,7 +1710,8 @@ class ChatWebServer:
             await self._broadcast({"type": "message", "data": entry})
 
             result = self.messaging.send_file(voice_path, "voice",
-                                               progress_callback=self._make_progress_callback(voice_name, len(audio_bytes), entry["msg_id"]))
+                                               progress_callback=self._make_progress_callback(voice_name, len(audio_bytes), transfer_id),
+                                               transfer_id=transfer_id)
             if result:
                 return web.json_response({"status": "ok"})
             return web.json_response({"error": "send failed"}, status=400)
@@ -1745,7 +1840,12 @@ class ChatWebServer:
         peer = request.query.get("peer", "")
         if peer:
             return web.json_response(self._history_for_peer(peer, limit))
-        return web.json_response([self._enrich_message(m) for m in self.message_history[-limit:]])
+        rows = [
+            self._enrich_message(m)
+            for m in self.message_history[-limit:]
+            if not self._is_session_system_message(m)
+        ]
+        return web.json_response(rows)
 
     async def handle_websocket(self, request):
         ws = web.WebSocketResponse()
@@ -1771,6 +1871,13 @@ class ChatWebServer:
             self.websockets.discard(ws)
             print(f"[ws] Client disconnected ({len(self.websockets)} total)")
         return ws
+
+    async def _history_maintenance_loop(self):
+        while True:
+            await asyncio.sleep(60)
+            if self._shutting_down:
+                return
+            self._prune_stale_session_system_messages()
 
     async def _discovery_broadcaster(self):
         print("[broadcaster] Started")
@@ -1879,11 +1986,13 @@ class ChatWebServer:
         self._maybe_auto_reset_network_stats()
         print(f"[startup] Event loop captured: {self._loop}")
         asyncio.create_task(self._discovery_broadcaster())
+        self._prune_stale_session_system_messages()
         retention = self.load_settings().get("history_retention", "never")
         if retention == "on_restart":
             self.message_history = []
             self._save_history()
             print("[history] Cleared on restart")
+        asyncio.create_task(self._history_maintenance_loop())
 
     def _register_routes(self, app):
         app.router.add_get("/", self.handle_index)
@@ -1898,6 +2007,7 @@ class ChatWebServer:
         app.router.add_post("/api/rns-interfaces/delete", self.handle_rns_interfaces_delete)
         app.router.add_post("/api/rns-interfaces/update", self.handle_rns_interfaces_update)
         app.router.add_get("/api/serial-ports", self.handle_serial_ports_get)
+        app.router.add_post("/api/serial-ports/permission", self.handle_serial_usb_permission)
         app.router.add_post("/api/announce", self.handle_announce)
         app.router.add_get("/api/network-status", self.handle_network_status)
         app.router.add_post("/api/network/reset", self.handle_network_reset)

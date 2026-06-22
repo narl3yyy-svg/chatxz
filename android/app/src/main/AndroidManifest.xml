@@ -7,6 +7,7 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <application
         android:name=".ChatxzApplication"
@@ -26,6 +27,19 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/usb_device_filter" />
         </activity>
+        <receiver
+            android:name=".UsbPermissionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.chatxz.android.USB_PERMISSION" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

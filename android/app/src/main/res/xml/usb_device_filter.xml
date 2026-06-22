@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Allow common USB serial adapters (FTDI, CP210x, CH34x, PL2303, CDC ACM). -->
+    <usb-device class="255" subclass="255" protocol="255" />
+    <usb-device vendor-id="1027" />
+    <usb-device vendor-id="4292" />
+    <usb-device vendor-id="6790" />
+    <usb-device vendor-id="1659" />
+</resources>

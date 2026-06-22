@@ -38,4 +38,14 @@ public class ChatxzBridge {
     public void requestAudioPermission() {
         activity.runOnUiThread(activity::requestAudioPermission);
     }
+
+    @JavascriptInterface
+    public void requestUsbPermission(String deviceName) {
+        activity.runOnUiThread(() -> UsbSerialHelper.requestPermission(deviceName));
+    }
+
+    @JavascriptInterface
+    public void restartApp() {
+        activity.runOnUiThread(activity::restartApp);
+    }
 }

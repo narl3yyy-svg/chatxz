@@ -7,6 +7,14 @@ import time
 import traceback
 
 os.environ.setdefault("CHATXZ_ANDROID", "1")
+os.environ.setdefault("ANDROID_ROOT", "/system")
+os.environ.setdefault("ANDROID_ARGUMENT", "")
+
+try:
+    from chatxz.android_usb.bootstrap import bootstrap as bootstrap_android_usb
+    bootstrap_android_usb()
+except Exception:
+    pass
 
 try:
     from chatxz.utils.platform import patch_embedded_signals

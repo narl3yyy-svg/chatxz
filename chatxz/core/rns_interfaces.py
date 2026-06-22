@@ -54,8 +54,19 @@ SERIAL_PERMISSION_HINT = (
     "(a new terminal is not enough). Stop chatxz, start it again, then refresh serial ports."
 )
 
+ANDROID_SERIAL_PERMISSION_HINT = (
+    "USB serial permission required. Plug in your USB adapter (OTG cable), tap Refresh devices, "
+    "then tap Grant USB access when prompted. Restart the app after applying serial settings."
+)
+
 
 def serial_permission_hint_for_process():
+    try:
+        from chatxz.utils.platform import is_android
+        if is_android():
+            return ANDROID_SERIAL_PERMISSION_HINT
+    except Exception:
+        pass
     if user_has_serial_group_access():
         return (
             "Port exists but this chatxz process still cannot open it. "
@@ -98,11 +109,33 @@ def user_has_serial_group_access():
     return False
 
 
+def _android_serial_port_status(port):
+    path = (port or "").strip()
+    if not path:
+        return "none"
+    try:
+        from usb4a import usb
+        device = usb.get_usb_device(path)
+        if not device:
+            return "missing"
+        if usb.has_usb_permission(device):
+            return "ok"
+        return "permission_denied"
+    except Exception:
+        return "missing"
+
+
 def serial_port_status(port):
     """Return none, missing, permission_denied, or ok."""
     path = (port or "").strip()
     if not path:
         return "none"
+    try:
+        from chatxz.utils.platform import is_android
+        if is_android():
+            return _android_serial_port_status(path)
+    except Exception:
+        pass
     if not os.path.exists(path):
         return "missing"
     if not os.access(path, os.R_OK | os.W_OK):
@@ -241,8 +274,43 @@ def _serial_port_entry(device, description="", hwid=""):
     }
 
 
+def list_android_usb_serial_ports():
+    """Return USB serial devices visible to the Android USB host API."""
+    try:
+        from usb4a import usb
+    except Exception as exc:
+        print(f"[serial] Android USB modules unavailable: {exc}")
+        return []
+    by_device = {}
+    try:
+        for device in usb.get_usb_device_list():
+            if device is None:
+                continue
+            name = str(device.getDeviceName())
+            vid = int(device.getVendorId())
+            pid = int(device.getProductId())
+            mfr = device.getManufacturerName()
+            prod = device.getProductName()
+            desc_parts = [p for p in (mfr, prod) if p]
+            description = " ".join(desc_parts).strip() or f"USB serial {vid:04x}:{pid:04x}"
+            by_device[name] = _serial_port_entry(
+                name,
+                description,
+                f"VID:PID={vid:04x}:{pid:04x}",
+            )
+    except Exception as exc:
+        print(f"[serial] Android USB enumeration failed: {exc}")
+    return [by_device[k] for k in sorted(by_device)]
+
+
 def list_serial_ports():
     """Return serial devices from pyserial and /dev/ttyUSB* /dev/ttyACM* globs."""
+    try:
+        from chatxz.utils.platform import is_android
+        if is_android():
+            return list_android_usb_serial_ports()
+    except Exception:
+        pass
     by_device = {}
     try:
         from serial.tools import list_ports
