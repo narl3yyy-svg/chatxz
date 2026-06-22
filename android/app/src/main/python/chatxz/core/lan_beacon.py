@@ -176,6 +176,12 @@ class LanBeacon:
                     return
                 time.sleep(1)
 
+    def reset_stats(self):
+        self.packets_sent = 0
+        self.packets_received = 0
+        self.last_subnet_probes = 0
+        self.last_send_targets = []
+
     def status(self):
         return {
             "port": BEACON_PORT,

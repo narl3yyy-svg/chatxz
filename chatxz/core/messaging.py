@@ -3,6 +3,8 @@ from chatxz.utils.helpers import format_speed
 from chatxz.core.discovery import normalize_hash
 
 APP_NAME = "chatxz"
+LINK_CONNECT_TIMEOUT_S = 4
+LINK_CONNECT_POLL_S = 0.1
 
 MESSAGE_TYPE_TEXT = "text"
 MESSAGE_TYPE_FILE = "file"
@@ -60,7 +62,7 @@ class MessagingBackend:
     def __init__(self, identity, config_dir, on_message=None, on_file=None,
                  on_progress=None, on_link_established=None,
                  display_name="", auto_announce=False,
-                 receive_dir=None):
+                 receive_dir=None, peer_resolver=None):
         self.identity = identity
         self.config_dir = config_dir
         self.receive_dir = receive_dir or os.path.join(config_dir, "received")
@@ -96,6 +98,7 @@ class MessagingBackend:
         self.identity_to_dest = {}
         self.dest_to_identity = {}
         self._send_link = None
+        self.peer_resolver = peer_resolver
 
     def register_peer_mapping(self, dest_hash, identity_hash=None):
         dest = normalize_hash(dest_hash)
@@ -248,49 +251,52 @@ class MessagingBackend:
         except Exception:
             return ""
 
-    def _get_remote_hash(self, link):
-        ident = link.get_remote_identity()
-        dest = self._dest_hash_from_identity(ident)
-        if dest:
-            return dest
-        if ident and hasattr(ident, 'hash') and ident.hash:
-            try:
-                pub = ident.get_public_key()
-                if pub:
-                    with RNS.Identity.known_destinations_lock:
-                        for dest_hash_bytes, entry in RNS.Identity.known_destinations.items():
-                            if len(entry) > 2 and entry[2] == pub:
-                                return normalize_hash(RNS.hexrep(dest_hash_bytes))
-            except Exception:
-                pass
-            return normalize_hash(RNS.hexrep(ident.hash))
-        try:
-            if hasattr(link, 'destination') and link.destination:
-                return normalize_hash(RNS.hexrep(link.destination.hash))
-        except Exception:
-            pass
-        return "unknown"
-
-    def _peer_destination_hash(self, link, fallback=None):
+    def _resolve_remote_peer(self, link, fallback=None):
+        ident_hex = ""
+        computed_dest = ""
         try:
             ident = link.get_remote_identity()
-            dest = self._dest_hash_from_identity(ident)
-            if dest:
-                return dest
-            if ident:
+            if ident and hasattr(ident, "hash") and ident.hash:
                 ident_hex = normalize_hash(RNS.hexrep(ident.hash))
-                pub = ident.get_public_key()
-                with RNS.Identity.known_destinations_lock:
-                    for dest_hash, entry in RNS.Identity.known_destinations.items():
-                        if entry[2] == pub:
-                            dest = normalize_hash(RNS.hexrep(dest_hash))
-                            self.register_peer_mapping(dest, ident_hex)
-                            return dest
+                computed_dest = self._dest_hash_from_identity(ident)
+                if not computed_dest:
+                    pub = ident.get_public_key()
+                    if pub:
+                        with RNS.Identity.known_destinations_lock:
+                            for dest_hash_bytes, entry in RNS.Identity.known_destinations.items():
+                                if len(entry) > 2 and entry[2] == pub:
+                                    computed_dest = normalize_hash(RNS.hexrep(dest_hash_bytes))
+                                    self.register_peer_mapping(computed_dest, ident_hex)
+                                    break
         except Exception:
             pass
+
+        if self.peer_resolver:
+            try:
+                resolved = self.peer_resolver(
+                    ident_hex=ident_hex,
+                    computed_dest=computed_dest,
+                    fallback=fallback,
+                    link=link,
+                )
+                if resolved:
+                    return self.dest_hash_for(resolved)
+            except Exception as e:
+                print(f"[messaging] peer_resolver error: {e}")
+
+        if computed_dest:
+            return self.dest_hash_for(computed_dest)
         if fallback:
             return self.dest_hash_for(fallback)
-        return self.dest_hash_for(self._get_remote_hash(link))
+        if ident_hex:
+            return self.dest_hash_for(ident_hex)
+        return "unknown"
+
+    def _get_remote_hash(self, link):
+        return self._resolve_remote_peer(link)
+
+    def _peer_destination_hash(self, link, fallback=None):
+        return self._resolve_remote_peer(link, fallback=fallback)
 
     def _notify_link_established(self, link, peer_hash=None):
         peer = self.dest_hash_for(peer_hash or self._peer_destination_hash(link))
@@ -636,63 +642,54 @@ class MessagingBackend:
                 return False
 
             self._announce()
-            print(f"[connect] Connecting to {RNS.hexrep(dest_hash)[:20]}...")
+            print(f"[connect] Connecting to {RNS.hexrep(dest_hash)[:20]}... (timeout {LINK_CONNECT_TIMEOUT_S}s)")
 
-            deadline = time.time() + 60
-            attempt = 0
-            while time.time() < deadline:
-                if self._interrupted():
-                    print("[connect] Aborted (shutdown)")
-                    return False
-                attempt += 1
-                print(f"[connect] Link attempt {attempt}...")
-                try:
-                    link = RNS.Link(destination)
-                    for _ in range(60):
-                        if self._interrupted():
-                            try:
-                                link.teardown()
-                            except:
-                                pass
-                            return False
-                        time.sleep(0.25)
+            link = None
+            try:
+                link = RNS.Link(destination)
+                deadline = time.time() + LINK_CONNECT_TIMEOUT_S
+                while time.time() < deadline:
+                    if self._interrupted():
+                        print("[connect] Aborted (shutdown)")
                         try:
-                            if link.status == RNS.Link.ACTIVE:
-                                if old_link and old_link.link_id != link.link_id:
-                                    try:
-                                        old_link.teardown()
-                                    except Exception:
-                                        pass
-                                self._setup_link(link)
-                                self._notify_link_established(link, clean)
-                                self._send_link = link
-                                print(f"[connect] Link established successfully")
-                                self.drain_queue(link, clean)
-                                return True
-                            if link.status == RNS.Link.CLOSED:
-                                break
-                        except:
+                            link.teardown()
+                        except Exception:
                             pass
-                        if self.active_link and self.active_link.link_id == link.link_id:
-                            print(f"[connect] Link established successfully")
-                            return True
+                        return False
+                    time.sleep(LINK_CONNECT_POLL_S)
                     try:
-                        link.teardown()
-                    except:
+                        if link.status == RNS.Link.ACTIVE:
+                            if old_link and old_link.link_id != link.link_id:
+                                try:
+                                    old_link.teardown()
+                                except Exception:
+                                    pass
+                            self._setup_link(link)
+                            self._notify_link_established(link, clean)
+                            self._send_link = link
+                            print("[connect] Link established")
+                            self.drain_queue(link, clean)
+                            return True
+                        if link.status == RNS.Link.CLOSED:
+                            break
+                    except Exception:
                         pass
-                except Exception as e:
-                    print(f"[connect] Link attempt {attempt} failed: {e}")
+                    if self.active_link and link and self.active_link.link_id == link.link_id:
+                        print("[connect] Link established")
+                        return True
+            except Exception as e:
+                print(f"[connect] Link failed: {e}")
+            finally:
+                if link:
+                    try:
+                        if link.status != RNS.Link.ACTIVE:
+                            link.teardown()
+                    except Exception:
+                        pass
+                    if link.link_id in self.links:
+                        del self.links[link.link_id]
 
-                if time.time() < deadline:
-                    remaining = int(deadline - time.time())
-                    wait = min(15, remaining)
-                    print(f"[connect] Retrying in {wait}s... ({remaining}s remaining)")
-                    for _ in range(wait * 4):
-                        if self._interrupted():
-                            return False
-                        time.sleep(0.25)
-
-            print(f"[connect] Link establishment timed out after {attempt} attempt(s)")
+            print("[connect] Peer not reachable")
             return False
 
     def send_message(self, text, receipt_callback=None):

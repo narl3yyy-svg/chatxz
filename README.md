@@ -39,6 +39,9 @@ The web interface handles day-to-day use: per-peer chats, send messages, transfe
 ### Network & Peers
 - **LAN discovery** — auto-discovers peers via RNS announces + UDP beacon (8743)
 - **Manual announce** — broadcast presence when you choose
+- **Fast connect** — outgoing links succeed or fail within ~4 seconds (no multi-minute retries)
+- **Reset network** — Settings → Network clears discovered peers, disconnects links, and zeros beacon counters (identity unchanged)
+- **Weekly auto-reset** — beacon/discovery counters optionally reset after 7 days (toggle in Settings)
 - **Contacts** — save peers with display names; click to open their chat
 - **Incoming connections** — when a peer connects to you, the UI updates automatically
 - **Connection status** — WebSocket and Reticulum link indicators in the bottom dock
@@ -113,8 +116,9 @@ Use these flags when diagnosing issues:
 
 1. Edit `~/.config/chatxz/config` and set `loglevel = 7` under `[logging]` for maximum RNS detail (extreme).
 2. Check `http://localhost:8742/api/network-status` — RNS interfaces, link state, discovered peers.
-3. Check `http://localhost:8742/api/debug` — beacon counters, active peer, message count.
-4. Browser devtools console shows WebSocket events (`[ws] Message type: ...`).
+3. Reset discovery/beacon counters: `POST http://localhost:8742/api/network/reset` or **Settings → Network → Reset network**.
+4. Check `http://localhost:8742/api/debug` — beacon counters, active peer, message count.
+5. Browser devtools console shows WebSocket events (`[ws] Message type: ...`).
 
 **Firewall (Linux desktop):** allow UDP **4242** (RNS chat) and **8743** (discovery beacon):
 
@@ -180,6 +184,12 @@ chatxz --daemon
 ```
 
 ## Changelog (recent)
+
+### v0.3.24
+- Fast connect: single ~4s attempt, no 60s retry loop
+- **Reset network** button + `POST /api/network/reset` — clears peers, disconnects link, zeros beacon counters
+- Optional weekly auto-reset of discovery/beacon stats (Settings → Network)
+- Incoming link peer hash resolved via discovery when RNS returns local identity
 
 ### v0.3.23
 - Fix peer destination hash (full_hash) so incoming links identify the correct peer

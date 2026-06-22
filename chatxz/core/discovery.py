@@ -37,6 +37,10 @@ class PeerDiscovery:
     def stop(self):
         self.running = False
 
+    def clear_peers(self):
+        self.peers.clear()
+        self._last_log.clear()
+
     def _store_peer(self, peer):
         hash_hex = normalize_hash(peer.get("hash"))
         if not hash_hex:

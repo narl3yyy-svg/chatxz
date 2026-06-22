@@ -826,7 +826,14 @@ body.sidebar-open #sidebar-backdrop { display: block; }
       <div class="settings-scroll">
         <div class="settings-card" id="network-settings-card">
           <h4>📡 Network</h4>
-          <button class="btn-block" onclick="refreshNetworkStatus()">Refresh status</button>
+          <div style="display:flex;gap:8px;margin-bottom:8px">
+            <button class="btn-block" style="flex:1" onclick="refreshNetworkStatus()">Refresh status</button>
+            <button class="btn-block danger" style="flex:1" onclick="resetNetwork()">Reset network</button>
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin-bottom:8px">
+            <input type="checkbox" id="settings-network-auto-reset" onchange="saveNetworkAutoReset()">
+            Auto-reset beacon counters weekly
+          </label>
           <div id="network-status-panel" class="network-status">Tap Refresh to load network status.</div>
         </div>
         <div class="settings-card">
@@ -1276,7 +1283,14 @@ function handleWSMessage(msg) {
       toast('Connected!');
     }
   } else if (msg.type === 'connect_fail') {
-    toast('Connection failed: ' + (msg.error || 'unknown'));
+    connectInFlight = false;
+    toast('Connection failed: ' + (msg.error || 'peer not reachable'));
+  } else if (msg.type === 'network_reset') {
+    linkPeer = null;
+    updatePeerHeader();
+    setLinkStatus('disconnected', 'Inactive');
+    renderDiscovered([]);
+    refreshNetworkStatus();
   } else if (msg.type === 'message_deleted') {
     const id = msg.data?.msg_id;
     if (id) document.querySelector(`.msg[data-msgid="${id}"]`)?.remove();
@@ -1565,7 +1579,7 @@ function connectTo(hash, ip, port) {
     return;
   }
   connectInFlight = true;
-  toast('Connecting...');
+  toast('Connecting (4s timeout)...');
   const body = {hash};
   if (ip) body.ip = ip;
   if (port) body.port = port;
@@ -1632,6 +1646,34 @@ function openNetworkSettings() {
   }, 80);
 }
 
+function resetNetwork() {
+  if (!confirm('Reset network status?\n\nClears discovered peers, disconnects any link, and zeros beacon counters. Your identity and contacts are kept.')) return;
+  fetch('/api/network/reset', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.status === 'ok') {
+        linkPeer = null;
+        updatePeerHeader();
+        setLinkStatus('disconnected', 'Inactive');
+        renderDiscovered([]);
+        refreshNetworkStatus();
+        toast('Network reset');
+      } else {
+        toast('Reset failed: ' + (d.error || 'unknown'));
+      }
+    })
+    .catch(() => toast('Reset failed'));
+}
+
+function saveNetworkAutoReset() {
+  const enabled = !!document.getElementById('settings-network-auto-reset')?.checked;
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({network_stats_auto_reset: enabled})
+  }).catch(() => {});
+}
+
 function refreshNetworkStatus() {
   const panel = document.getElementById('network-status-panel');
   if (!panel) return;
@@ -1656,11 +1698,12 @@ function refreshNetworkStatus() {
       html += row('WS clients', d.ws_clients ?? 0);
       if (d.beacon) {
         html += row('Beacon mode', (d.beacon.interval_sec ? 'auto' : 'manual only'), !d.beacon.interval_sec);
-        html += row('Beacon sent', d.beacon.packets_sent ?? 0);
-        html += row('Beacon received', d.beacon.packets_received ?? 0, (d.beacon.packets_received || 0) > 0);
-        html += row('Subnet probes', d.beacon.last_subnet_probes ?? 0);
+        html += row('Beacon sent (session)', d.beacon.packets_sent ?? 0);
+        html += row('Beacon received (session)', d.beacon.packets_received ?? 0, (d.beacon.packets_received || 0) > 0);
+        html += row('Subnet probes (last announce)', d.beacon.last_subnet_probes ?? 0);
       }
-      html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);line-height:1.45"><strong>Link active</strong> = an encrypted RNS session is open with a peer (you can send messages). <strong>Inactive</strong> in the bottom dock means no session — click a peer to connect, or wait for an incoming connection. Discovery (beacon/RNS announce) is separate from link status.</div>';
+      html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);line-height:1.45">Beacon/subnet counters are <strong>session totals</strong> — each Announce sends ~259 packets (253 subnet probes + broadcasts). Use <strong>Reset network</strong> to zero counters and clear discovered peers without affecting your identity.</div>';
+      html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45"><strong>Link active</strong> = encrypted RNS session open. <strong>Inactive</strong> = no session — connect to a peer or wait for incoming. Connect fails in ~4s if the peer is offline.</div>';
       html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45">Beacon UDP 8743 = LAN discovery. RNS UDP 4242 = encrypted chat. HTTP 8742 = this web UI only.</div>';
       if (Array.isArray(d.interfaces) && d.interfaces.length) {
         html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Interfaces</div>';
@@ -1705,6 +1748,8 @@ function toggleSettings() {
         document.getElementById('settings-name').value = s.name || '';
         document.getElementById('settings-retention').value = s.history_retention || 'never';
         document.getElementById('settings-received-dir').value = s.received_dir || '';
+        const autoReset = document.getElementById('settings-network-auto-reset');
+        if (autoReset) autoReset.checked = s.network_stats_auto_reset !== false;
         const sh = document.getElementById('settings-hash');
         if (sh) sh.value = myHash;
       });

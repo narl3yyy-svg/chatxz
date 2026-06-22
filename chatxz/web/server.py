@@ -24,7 +24,8 @@ from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 CONFIG_DIR = get_config_dir()
 DATA_DIR = get_data_dir()
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
-APP_VERSION = "0.3.23"
+APP_VERSION = "0.3.24"
+NETWORK_STATS_AUTO_RESET_SEC = 7 * 86400
 
 def build_desktop_rns_config(broadcast_ip="255.255.255.255"):
     return f"""[reticulum]
@@ -320,6 +321,34 @@ class ChatWebServer:
     def _my_sender_hash(self):
         return self._clean_hash(self.destination_hash or self.identity_mgr.get_hex_hash())
 
+    def _resolve_incoming_peer(self, ident_hex=None, computed_dest=None, fallback=None, link=None):
+        from chatxz.core.discovery import normalize_hash
+        my_ident = normalize_hash(self.identity_mgr.get_hex_hash() if self.identity_mgr else "")
+        my_dest = normalize_hash(self.destination_hash or "")
+
+        if computed_dest and computed_dest not in (my_dest, my_ident):
+            return computed_dest
+
+        clean_fallback = normalize_hash(fallback)
+        if clean_fallback and clean_fallback not in (my_dest, my_ident):
+            return clean_fallback
+
+        if ident_hex and ident_hex not in (my_dest, my_ident) and self.discovery:
+            for p in self.discovery.get_peers():
+                ph = normalize_hash(p.get("hash"))
+                ih = normalize_hash(p.get("identity_hash"))
+                if ident_hex == ih or ident_hex == ph:
+                    return ph or ident_hex
+
+        if self.discovery:
+            rns_peers = [p for p in self.discovery.get_peers() if p.get("via") == "rns"]
+            if len(rns_peers) == 1:
+                return normalize_hash(rns_peers[0].get("hash"))
+
+        if ident_hex and ident_hex != my_ident:
+            return computed_dest or ident_hex
+        return computed_dest or clean_fallback or ""
+
     def _resolve_peer_hash(self, peer_hash):
         clean = self._clean_hash(peer_hash).lower()
         if not clean:
@@ -412,10 +441,13 @@ class ChatWebServer:
                 s.setdefault("name", "")
                 s.setdefault("history_retention", "never")
                 s.setdefault("received_dir", os.path.join(self.config_dir, "received"))
+                s.setdefault("network_stats_auto_reset", True)
+                s.setdefault("network_stats_reset_at", 0)
                 return s
         except:
             return {"name": "", "history_retention": "never",
-                    "received_dir": os.path.join(self.config_dir, "received")}
+                    "received_dir": os.path.join(self.config_dir, "received"),
+                    "network_stats_auto_reset": True, "network_stats_reset_at": 0}
 
     def save_settings(self, settings):
         with open(SETTINGS_FILE, "w") as f:
@@ -558,6 +590,7 @@ class ChatWebServer:
             display_name=settings.get("name", ""),
             auto_announce=False,
             receive_dir=received_dir,
+            peer_resolver=self._resolve_incoming_peer,
         )
         self.voice_recorder = VoiceRecorder(self.config_dir)
         dest = self.messaging.start()
@@ -800,6 +833,41 @@ class ChatWebServer:
             "port": self.port,
         }
 
+    def _reset_network_state(self, update_settings=True):
+        if self.messaging:
+            self.messaging._teardown_active_link()
+        self.active_peer = None
+        if self.discovery:
+            self.discovery.clear_peers()
+        if self.lan_beacon:
+            self.lan_beacon.reset_stats()
+        if update_settings:
+            settings = self.load_settings()
+            settings["network_stats_reset_at"] = time.time()
+            self.save_settings(settings)
+
+    def _maybe_auto_reset_network_stats(self):
+        settings = self.load_settings()
+        if not settings.get("network_stats_auto_reset", True):
+            return
+        last = float(settings.get("network_stats_reset_at") or 0)
+        if last and (time.time() - last) < NETWORK_STATS_AUTO_RESET_SEC:
+            return
+        if self.lan_beacon:
+            self.lan_beacon.reset_stats()
+        if self.discovery:
+            self.discovery.clear_peers()
+        settings["network_stats_reset_at"] = time.time()
+        self.save_settings(settings)
+        print("[network] Auto-reset discovery/beacon counters (weekly)")
+
+    async def handle_network_reset(self, request):
+        self._reset_network_state(update_settings=True)
+        await self._broadcast({"type": "peers", "data": []})
+        await self._broadcast({"type": "link_closed", "data": {}})
+        await self._broadcast({"type": "network_reset", "data": {}})
+        return web.json_response({"status": "ok"})
+
     async def handle_network_status(self, request):
         rns_interfaces = []
         try:
@@ -972,6 +1040,8 @@ class ChatWebServer:
                 if err:
                     return web.json_response({"error": err}, status=400)
                 settings["received_dir"] = path
+            if "network_stats_auto_reset" in data:
+                settings["network_stats_auto_reset"] = bool(data["network_stats_auto_reset"])
             self.save_settings(settings)
             if self.messaging:
                 self.messaging.display_name = settings.get("name", "")
@@ -1464,6 +1534,7 @@ class ChatWebServer:
     async def _on_startup(self, app):
         self._loop = asyncio.get_running_loop()
         self._reset_connection_state()
+        self._maybe_auto_reset_network_stats()
         print(f"[startup] Event loop captured: {self._loop}")
         asyncio.create_task(self._discovery_broadcaster())
         retention = self.load_settings().get("history_retention", "never")
@@ -1481,6 +1552,7 @@ class ChatWebServer:
         app.router.add_post("/api/connect", self.handle_connect)
         app.router.add_post("/api/announce", self.handle_announce)
         app.router.add_get("/api/network-status", self.handle_network_status)
+        app.router.add_post("/api/network/reset", self.handle_network_reset)
         app.router.add_post("/api/disconnect", self.handle_disconnect)
         app.router.add_post("/api/file", self.handle_file_upload)
         app.router.add_post("/api/folder", self.handle_folder_upload)
@@ -1518,6 +1590,7 @@ class ChatWebServer:
         """Start Reticulum after the HTTP server is already listening."""
         try:
             my_hash = await asyncio.to_thread(self.start_rns)
+            self._maybe_auto_reset_network_stats()
             print(f"[embedded] RNS ready, identity: {my_hash}")
         except Exception:
             import traceback
