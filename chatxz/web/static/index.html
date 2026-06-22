@@ -919,7 +919,7 @@ body.sidebar-open #sidebar-backdrop { display: block; }
               <button class="btn-block" style="flex:1;min-width:90px" onclick="addRnsInterface('serial')">+ Serial</button>
             </div>
             <div id="rns-interfaces-list" style="font-size:11px;color:var(--text2)">Loading...</div>
-            <div style="margin-top:6px;font-size:10px;color:var(--text3)">Serial presets: pick port and baud below. Restart chatxz after changes.</div>
+            <div style="margin-top:6px;font-size:10px;color:var(--text3)">Serial stays inactive until a real port is selected and plugged in. Restart chatxz after changes.</div>
           </div>
         </div>
         <div class="settings-card">
@@ -1835,8 +1835,14 @@ function baudOptions(rates, selected) {
 function renderRnsInterfaceRow(iface, serialPorts, baudRates) {
   const id = escapeHtml(iface.id || '');
   const label = escapeHtml(iface.name || iface.type || iface.preset || 'iface');
-  const meta = escapeHtml((iface.type || '') + (iface.enabled === false ? ' · disabled' : ''));
   const isSerial = iface.preset === 'serial' || iface.type === 'SerialInterface';
+  let metaBits = iface.type || '';
+  if (isSerial) {
+    metaBits += iface.serial_active ? ' · active' : ' · inactive (device not connected)';
+  } else if (iface.enabled === false) {
+    metaBits += ' · disabled';
+  }
+  const meta = escapeHtml(metaBits);
   let body = `<div class="iface-head"><span class="net-label">${label}<div style="font-size:10px;color:var(--text3)">${meta}</div></span><button class="btn-block danger" style="width:auto;padding:4px 8px;font-size:11px" onclick="deleteRnsInterface('${id}')">Delete</button></div>`;
   if (isSerial) {
     body += `<div class="rns-iface-serial-fields">
@@ -1901,6 +1907,7 @@ function saveSerialInterface(id) {
     body: JSON.stringify({id, port, speed: parseInt(baudEl.value, 10)}),
   }).then(r => r.json()).then(d => {
     if (d.status === 'ok') {
+      loadRnsInterfaces();
       toast('Serial settings saved — restart chatxz to apply');
       refreshNetworkStatus();
     } else {

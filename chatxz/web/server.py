@@ -18,6 +18,8 @@ from chatxz.core.rns_interfaces import (
     list_serial_ports,
     normalize_interface_list,
     render_rns_config,
+    serial_port_available,
+    serial_runtime_active,
     update_interface,
 )
 from chatxz.utils.helpers import get_config_dir, get_data_dir, format_speed, media_type_for_filename
@@ -557,12 +559,24 @@ class ChatWebServer:
                 if now - m.get("timestamp", 0) < seconds
             ]
 
+    def _interfaces_for_api(self, interfaces):
+        rows = []
+        for iface in normalize_interface_list(interfaces):
+            row = dict(iface)
+            if iface.get("preset") == "serial" or iface.get("type") == "SerialInterface":
+                row["port_available"] = serial_port_available(iface.get("port"))
+                row["serial_active"] = serial_runtime_active(iface)
+            rows.append(row)
+        return rows
+
     def _write_rns_config(self, settings=None):
         settings = settings or self.load_settings()
         rns_config_path = os.path.join(self.config_dir, "config")
         os.makedirs(self.config_dir, exist_ok=True)
         bcast = lan_broadcast()
         interfaces = normalize_interface_list(settings.get("rns_interfaces"))
+        settings["rns_interfaces"] = interfaces
+        self.save_settings(settings)
         for iface in interfaces:
             if iface.get("type") == "UDPInterface" and bcast:
                 iface["forward_ip"] = bcast
@@ -966,8 +980,9 @@ class ChatWebServer:
 
     async def handle_rns_interfaces_get(self, request):
         settings = self.load_settings()
+        interfaces = normalize_interface_list(settings.get("rns_interfaces"))
         return web.json_response({
-            "interfaces": normalize_interface_list(settings.get("rns_interfaces")),
+            "interfaces": self._interfaces_for_api(interfaces),
             "presets": {k: v["label"] for k, v in INTERFACE_PRESETS.items()},
             "restart_required": True,
         })

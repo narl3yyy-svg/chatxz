@@ -1,6 +1,7 @@
 """RNS interface preset management for chatxz config generation."""
 
 import copy
+import os
 import uuid
 
 INTERFACE_PRESETS = {
@@ -30,8 +31,8 @@ INTERFACE_PRESETS = {
         "label": "Serial",
         "type": "SerialInterface",
         "defaults": {
-            "enabled": True,
-            "port": "/dev/ttyUSB0",
+            "enabled": False,
+            "port": "",
             "speed": 115200,
             "ifac_size": 16,
         },
@@ -61,6 +62,29 @@ def _new_id():
     return uuid.uuid4().hex[:8]
 
 
+def serial_port_available(port):
+    path = (port or "").strip()
+    return bool(path) and os.path.exists(path)
+
+
+def serial_runtime_active(iface):
+    """True only when user enabled serial and the port device node exists."""
+    if iface.get("preset") != "serial" and iface.get("type") != "SerialInterface":
+        return False
+    if not iface.get("enabled", False):
+        return False
+    return serial_port_available(iface.get("port"))
+
+
+def _sync_serial_enabled(iface):
+    if iface.get("preset") != "serial" and iface.get("type") != "SerialInterface":
+        return iface
+    port = (iface.get("port") or "").strip()
+    if not port or not serial_port_available(port):
+        iface["enabled"] = False
+    return iface
+
+
 def normalize_interface_list(items):
     if not items:
         return copy.deepcopy(DEFAULT_INTERFACE_LIST)
@@ -75,7 +99,7 @@ def normalize_interface_list(items):
         merged.setdefault("preset", preset)
         merged.setdefault("name", INTERFACE_PRESETS.get(preset, {}).get("label", merged.get("type", "Interface")))
         merged["type"] = INTERFACE_PRESETS.get(preset, {}).get("type", merged.get("type", "UDPInterface"))
-        out.append(merged)
+        out.append(_sync_serial_enabled(merged))
     return out or copy.deepcopy(DEFAULT_INTERFACE_LIST)
 
 
@@ -153,10 +177,15 @@ def update_interface(items, iface_id, updates):
         preset = updated.get("preset") or ""
         itype = updated.get("type", "")
         if preset == "serial" or itype == "SerialInterface":
-            if "port" in updates and updates["port"]:
-                updated["port"] = str(updates["port"]).strip()
+            if "port" in updates:
+                updated["port"] = str(updates["port"] or "").strip()
             if "speed" in updates and updates["speed"] is not None:
                 updated["speed"] = int(updates["speed"])
+            if "enabled" in updates:
+                updated["enabled"] = bool(updates["enabled"])
+            updated = _sync_serial_enabled(updated)
+            if updated.get("port") and serial_port_available(updated["port"]):
+                updated["enabled"] = True
         elif preset == "tcp_client" or itype == "TCPClientInterface":
             if "target_host" in updates and updates["target_host"]:
                 updated["target_host"] = str(updates["target_host"]).strip()
@@ -172,7 +201,7 @@ def update_interface(items, iface_id, updates):
     return out
 
 
-def render_rns_config(interfaces, broadcast_ip=None, android=False):
+def render_rns_config(interfaces, broadcast_ip=None, android=False, log=print):
     lines = [
         "[reticulum]",
         f"enable_transport = {'No' if android else 'Yes'}",
@@ -183,14 +212,20 @@ def render_rns_config(interfaces, broadcast_ip=None, android=False):
         "",
         "[interfaces]",
     ]
+    skipped_serial = []
     for iface in normalize_interface_list(interfaces):
-        if not iface.get("enabled", True):
+        itype = iface.get("type", "")
+        if itype == "SerialInterface":
+            if not serial_runtime_active(iface):
+                port = (iface.get("port") or "").strip() or "(none)"
+                skipped_serial.append((iface.get("name") or "Serial", port))
+                continue
+        elif not iface.get("enabled", True):
             continue
         name = iface.get("name") or iface.get("type", "Interface")
         lines.append(f"  [[{name}]]")
         lines.append(f"    type = {iface.get('type', 'UDPInterface')}")
         lines.append("    enabled = Yes")
-        itype = iface.get("type", "")
         if itype == "UDPInterface":
             listen_ip = iface.get("listen_ip", "0.0.0.0")
             forward_ip = iface.get("forward_ip") or broadcast_ip or "255.255.255.255"
@@ -218,4 +253,7 @@ def render_rns_config(interfaces, broadcast_ip=None, android=False):
             "    enabled = Yes",
             "",
         ])
+    for name, port in skipped_serial:
+        if log:
+            log(f"[config] Serial '{name}' skipped — port {port} not connected")
     return "\n".join(lines).rstrip() + "\n"
