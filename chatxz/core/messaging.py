@@ -112,6 +112,8 @@ class MessagingBackend:
         self._send_link = None
         self.peer_resolver = peer_resolver
         self._link_peer_hashes = {}
+        self._link_handoff = False
+        self._last_handoff = False
 
     def _is_self_hash(self, h):
         clean = normalize_hash(h)
@@ -169,7 +171,122 @@ class MessagingBackend:
     def hashes_equivalent(self, hash_a, hash_b):
         a = self.dest_hash_for(hash_a)
         b = self.dest_hash_for(hash_b)
-        return bool(a and b and a == b)
+        if a and b and a == b:
+            return True
+        if not a or not b:
+            return False
+        for key in (hash_a, hash_b):
+            clean = normalize_hash(key)
+            if clean in self.identity_to_dest:
+                other = self.dest_hash_for(hash_b if key == hash_a else hash_a)
+                if other and self.identity_to_dest.get(clean) == other:
+                    return True
+        return False
+
+    def peer_aliases_for(self, any_hash):
+        canonical = self.dest_hash_for(any_hash)
+        aliases = {canonical} if canonical else set()
+        ident = self.dest_to_identity.get(canonical)
+        if ident:
+            aliases.add(ident)
+        for ident_hex, dest in self.identity_to_dest.items():
+            if dest == canonical:
+                aliases.add(ident_hex)
+        return sorted(h for h in aliases if h and h != "unknown")
+
+    def _link_path_score(self, link):
+        if not link:
+            return 0
+        try:
+            iface = (
+                getattr(link, "interface", None)
+                or getattr(link, "attached_interface", None)
+                or getattr(link, "parent_interface", None)
+            )
+            iname = str(iface or "").lower()
+            if "serial" in iname or "tty" in iname:
+                return 10
+            if "auto" in iname or "udp" in iname or "enp" in iname or "wlan" in iname or "eth" in iname:
+                score = 100
+            else:
+                score = 50
+            rtt = getattr(link, "rtt", None)
+            if rtt is not None:
+                try:
+                    score = max(score, int(100 - min(float(rtt) * 8, 95)))
+                except Exception:
+                    pass
+            return score
+        except Exception:
+            return 50
+
+    def _resolve_incoming_link_peer(self, link, peer_hash):
+        peer_hash = self.dest_hash_for(peer_hash)
+        if peer_hash and peer_hash != "unknown" and not self._is_self_hash(peer_hash):
+            return peer_hash
+        if self.peer_resolver:
+            try:
+                ident_hex = ""
+                computed_dest = ""
+                ident = link.get_remote_identity()
+                if ident and hasattr(ident, "hash") and ident.hash:
+                    ident_hex = normalize_hash(RNS.hexrep(ident.hash))
+                    computed_dest = self._dest_hash_from_identity(ident)
+                fixed = self.peer_resolver(
+                    ident_hex=ident_hex,
+                    computed_dest=computed_dest,
+                    link=link,
+                )
+                if fixed and not self._is_self_hash(fixed):
+                    return self.dest_hash_for(fixed)
+            except Exception as e:
+                print(f"[messaging] incoming peer resolve fallback: {e}")
+        resolved = self._resolve_remote_peer(link)
+        if resolved and resolved != "unknown" and not self._is_self_hash(resolved):
+            return self.dest_hash_for(resolved)
+        if self.active_peer_hash and not self._is_self_hash(self.active_peer_hash):
+            if self._incoming_matches_active_session(link):
+                return self.dest_hash_for(self.active_peer_hash)
+        return peer_hash or "unknown"
+
+    def _incoming_matches_active_session(self, link):
+        if not self.active_peer_hash or not self.active_link:
+            return False
+        try:
+            ident = link.get_remote_identity()
+            if ident:
+                computed_dest = self._dest_hash_from_identity(ident)
+                if computed_dest and self.hashes_equivalent(computed_dest, self.active_peer_hash):
+                    return True
+                ident_hex = normalize_hash(RNS.hexrep(ident.hash))
+                if ident_hex and self.hashes_equivalent(ident_hex, self.active_peer_hash):
+                    return True
+        except Exception:
+            pass
+        return link.link_id != self.active_link.link_id
+
+    def _handoff_to_link(self, link, peer_hash):
+        peer_hash = self.dest_hash_for(peer_hash)
+        old = self.active_link
+        self._link_handoff = True
+        self._last_handoff = True
+        try:
+            print(
+                f"[messaging] Path switch to {peer_hash[:16]} "
+                f"(score {self._link_path_score(link)} vs {self._link_path_score(old)})"
+            )
+            self._setup_link(link)
+            self._cache_link_peer(link, peer_hash)
+            self._notify_link_established(link, peer_hash)
+            self._send_link = link
+            if old and old.link_id != link.link_id:
+                try:
+                    old.teardown()
+                except Exception:
+                    pass
+            self.drain_queue(link, peer_hash)
+        finally:
+            self._link_handoff = False
 
     def _outgoing_link(self):
         return self._send_link or self.active_link
@@ -497,30 +614,52 @@ class MessagingBackend:
             pass
 
     def _link_callback(self, link):
-        peer_hash = self._peer_destination_hash(link)
-        if self._is_self_hash(peer_hash) and self.peer_resolver:
-            try:
-                fixed = self.peer_resolver(ident_hex="", computed_dest="", link=link)
-                if fixed and not self._is_self_hash(fixed):
-                    peer_hash = self.dest_hash_for(fixed)
-            except Exception as e:
-                print(f"[messaging] incoming peer resolve fallback: {e}")
+        peer_hash = self._resolve_incoming_link_peer(link, self._peer_destination_hash(link))
         self._cache_link_peer(link, peer_hash)
-        if self.active_link and self.hashes_equivalent(peer_hash, self.active_peer_hash):
-            print(f"[messaging] Ignoring duplicate incoming link from {peer_hash[:16]}...")
-            try:
-                link.teardown()
-            except Exception:
-                pass
-            return
+
+        if self.active_link and self.active_peer_hash:
+            same_peer = (
+                self.hashes_equivalent(peer_hash, self.active_peer_hash)
+                or (peer_hash == "unknown" and self._incoming_matches_active_session(link))
+            )
+            if same_peer:
+                if peer_hash == "unknown":
+                    peer_hash = self.dest_hash_for(self.active_peer_hash)
+                    self._cache_link_peer(link, peer_hash)
+                if link.link_id == self.active_link.link_id:
+                    print(f"[messaging] Ignoring duplicate incoming link from {peer_hash[:16]}...")
+                    try:
+                        link.teardown()
+                    except Exception:
+                        pass
+                    return
+                if self._link_path_score(link) >= self._link_path_score(self.active_link):
+                    self._handoff_to_link(link, peer_hash)
+                else:
+                    print(f"[messaging] Keeping current link (better path than incoming {peer_hash[:16]}...)")
+                    try:
+                        link.teardown()
+                    except Exception:
+                        pass
+                return
+
         if self._session_occupied(peer_hash):
-            print(f"[messaging] Rejecting incoming link from {peer_hash[:16]}... (busy with {self.active_peer_hash[:16]}...)")
+            if peer_hash == "unknown" and self._incoming_matches_active_session(link):
+                peer_hash = self.dest_hash_for(self.active_peer_hash)
+                self._handoff_to_link(link, peer_hash)
+                return
+            print(
+                f"[messaging] Rejecting incoming link from {peer_hash[:16]}... "
+                f"(busy with {self.active_peer_hash[:16]}...)"
+            )
             try:
                 link.teardown()
             except Exception:
                 pass
             return
+
         print(f"[messaging] Incoming link established: {link.link_id.hex()[:12]}")
+        self._last_handoff = False
         self._setup_link(link)
         self._notify_link_established(link, peer_hash)
         self.drain_queue(link, peer_hash)
@@ -530,15 +669,24 @@ class MessagingBackend:
             if link.link_id in self.links:
                 del self.links[link.link_id]
             self._link_peer_hashes.pop(link.link_id, None)
-            if self.active_link and self.active_link.link_id == link.link_id:
-                self.active_link = None
-                self.active_peer_hash = None
+            closing_active = self.active_link and self.active_link.link_id == link.link_id
+            if closing_active:
+                if self._link_handoff:
+                    pass
+                else:
+                    self.active_link = None
+                    self.active_peer_hash = None
             if self._send_link and self._send_link.link_id == link.link_id:
                 self._send_link = self.active_link
-            if self.on_link_closed:
+            if self.on_link_closed and not self._link_handoff:
                 remote_hash = self.dest_hash_for(self._peer_for_link(link))
                 try:
-                    self.on_link_closed(remote_hash)
+                    self.on_link_closed(remote_hash, handoff=closing_active and bool(self.active_link))
+                except TypeError:
+                    try:
+                        self.on_link_closed(remote_hash)
+                    except Exception as e:
+                        print(f"[messaging] on_link_closed error: {e}")
                 except Exception as e:
                     print(f"[messaging] on_link_closed error: {e}")
         return callback
@@ -820,7 +968,7 @@ class MessagingBackend:
         return self.shutdown_requested or not self.running
 
     def connect_to(self, destination_hash_hex, peer_ip=None, peer_port=None, peer_lookup=None,
-                   caller_ip=None, caller_port=8742):
+                   caller_ip=None, caller_port=8742, replace=False):
         with self._connect_lock:
             if self._interrupted():
                 return False
@@ -830,14 +978,20 @@ class MessagingBackend:
                 print(f"[connect] Invalid hash length ({len(clean)} chars, expected 32)")
                 return False
 
+            old_link = None
             if self.active_link and self.active_peer_hash and self.hashes_equivalent(clean, self.active_peer_hash):
-                print(f"[connect] Already connected to {self.active_peer_hash[:16]}...")
-                return True
-
-            old_link = self.active_link if (
+                if not replace:
+                    print(f"[connect] Already connected to {self.active_peer_hash[:16]}...")
+                    return True
+                if self._link_path_score(self.active_link) >= 90 and not peer_ip:
+                    return True
+                old_link = self.active_link
+                print(f"[connect] Replacing link to {self.active_peer_hash[:16]} for better path...")
+            elif (
                 self.active_link and self.active_peer_hash
                 and not self.hashes_equivalent(clean, self.active_peer_hash)
-            ) else None
+            ):
+                old_link = self.active_link
 
             known_identity = self._identity_for_hash(clean)
             if known_identity is None:
@@ -899,10 +1053,14 @@ class MessagingBackend:
                     try:
                         if link.status == RNS.Link.ACTIVE:
                             if old_link and old_link.link_id != link.link_id:
+                                self._link_handoff = True
                                 try:
                                     old_link.teardown()
                                 except Exception:
                                     pass
+                                finally:
+                                    self._link_handoff = False
+                            self._last_handoff = bool(old_link)
                             self._setup_link(link)
                             self._cache_link_peer(link, dest_hex)
                             self._notify_link_established(link, dest_hex)

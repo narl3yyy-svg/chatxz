@@ -349,15 +349,42 @@ class ChatWebServer:
         my_dest = normalize_hash(self.destination_hash or "")
         return clean in (my_dest, my_ident)
 
+    def _peers_equivalent(self, hash_a, hash_b):
+        if self.messaging:
+            return self.messaging.hashes_equivalent(hash_a, hash_b)
+        from chatxz.core.discovery import normalize_hash
+        return normalize_hash(hash_a) == normalize_hash(hash_b)
+
+    def _peer_alias_list(self, peer_hash):
+        if self.messaging:
+            return self.messaging.peer_aliases_for(peer_hash)
+        clean = self._peer_dest_hash(peer_hash)
+        return [clean] if clean else []
+
+    def _session_chat_peer(self, sender_hash=None):
+        if self.messaging and self.messaging.active_peer_hash:
+            return self._peer_dest_hash(self.messaging.active_peer_hash)
+        if self.active_peer:
+            return self._peer_dest_hash(self.active_peer)
+        if sender_hash:
+            return self._peer_dest_hash(sender_hash)
+        return ""
+
     def _resolve_incoming_peer(self, ident_hex=None, computed_dest=None, fallback=None, link=None):
         from chatxz.core.discovery import normalize_hash
 
         if computed_dest and not self._is_self_hash(computed_dest):
-            return computed_dest
+            return self._peer_dest_hash(computed_dest)
 
         clean_fallback = normalize_hash(fallback)
         if clean_fallback and not self._is_self_hash(clean_fallback):
-            return clean_fallback
+            return self._peer_dest_hash(clean_fallback)
+
+        if self.active_peer and ident_hex and self._peers_equivalent(ident_hex, self.active_peer):
+            return self._peer_dest_hash(self.active_peer)
+
+        if self.active_peer and computed_dest and self._peers_equivalent(computed_dest, self.active_peer):
+            return self._peer_dest_hash(self.active_peer)
 
         if ident_hex and not self._is_self_hash(ident_hex) and self.discovery:
             for p in self.discovery.get_peers():
@@ -378,7 +405,9 @@ class ChatWebServer:
                 return candidates[0][1]
 
         if ident_hex and not self._is_self_hash(ident_hex):
-            return computed_dest or ident_hex
+            return self._peer_dest_hash(computed_dest or ident_hex)
+        if self.active_peer:
+            return self._peer_dest_hash(self.active_peer)
         return ""
 
     def _resolve_peer_hash(self, peer_hash):
@@ -519,17 +548,17 @@ class ChatWebServer:
             if self._is_session_system_message(m):
                 continue
             cp = self._peer_dest_hash(m.get("chat_peer") or m.get("peer"))
-            if cp and cp == peer:
+            if cp and self._peers_equivalent(cp, peer):
                 filtered.append(self._enrich_message(m))
                 continue
             sender = self._peer_dest_hash(m.get("sender"))
-            if sender == peer and m.get("sender") != "system":
+            if sender and self._peers_equivalent(sender, peer) and m.get("sender") != "system":
                 filtered.append(self._enrich_message(m))
                 continue
             if not m.get("outgoing") and m.get("sender") != "system":
                 if self._is_self_hash(cp) or self._is_self_hash(sender):
                     session_peer = self._session_peer_at(m.get("timestamp", 0))
-                    if session_peer and session_peer == peer:
+                    if session_peer and self._peers_equivalent(session_peer, peer):
                         repaired = dict(m)
                         repaired["chat_peer"] = peer
                         repaired["peer"] = peer
@@ -734,15 +763,19 @@ class ChatWebServer:
         return my_hash
 
     def _on_message(self, chat_msg, sender_hash):
+        session_peer = self._session_chat_peer(sender_hash)
         if sender_hash and sender_hash != "system":
             resolved = self._peer_dest_hash(sender_hash)
-            if self._is_self_hash(resolved) and self.active_peer and not self._is_self_hash(self.active_peer):
-                chat_peer = self._peer_dest_hash(self.active_peer)
+            if session_peer and (
+                self._is_self_hash(resolved)
+                or self._peers_equivalent(resolved, session_peer)
+            ):
+                chat_peer = session_peer
             else:
                 chat_peer = resolved
             sender = chat_peer
         else:
-            chat_peer = self._peer_dest_hash(self.active_peer)
+            chat_peer = session_peer or self._peer_dest_hash(self.active_peer)
             sender = "system"
         entry = self._enrich_message({
             "type": chat_msg.msg_type,
@@ -789,7 +822,9 @@ class ChatWebServer:
                 self._loop
             )
 
-    def _on_link_closed(self, peer_hash):
+    def _on_link_closed(self, peer_hash, handoff=False):
+        if handoff or (self.messaging and self.messaging.active_link):
+            return
         self.active_peer = None
         if self.websockets and self._loop:
             asyncio.run_coroutine_threadsafe(
@@ -804,22 +839,21 @@ class ChatWebServer:
             if fixed and not self._is_self_hash(fixed):
                 resolved = fixed
         self.active_peer = resolved
-        removed = self._clear_history_for_peer(resolved)
         self._prune_stale_session_system_messages()
-        print(f"[connect] Session active with {self.active_peer}")
+        path_switch = bool(getattr(self.messaging, "_last_handoff", False))
+        print(f"[connect] Session active with {self.active_peer}" + (" (path switch)" if path_switch else ""))
         if self.websockets and self._loop:
             asyncio.run_coroutine_threadsafe(
-                self._broadcast({"type": "link_established", "data": {"hash": self.active_peer}}),
+                self._broadcast({
+                    "type": "link_established",
+                    "data": {
+                        "hash": self.active_peer,
+                        "aliases": self._peer_alias_list(self.active_peer),
+                        "path_switch": path_switch,
+                    },
+                }),
                 self._loop
             )
-            if removed:
-                asyncio.run_coroutine_threadsafe(
-                    self._broadcast({
-                        "type": "peer_history_cleared",
-                        "data": {"peer": resolved, "removed": removed},
-                    }),
-                    self._loop
-                )
 
     def _on_transfer_progress(self, data):
         status = data.get("status", "active")
@@ -1226,6 +1260,88 @@ class ChatWebServer:
         await self._broadcast({"type": "network_reset", "data": {}})
         return web.json_response({"status": "ok"})
 
+    def _disable_rns_serial_interfaces(self):
+        try:
+            for iface in getattr(RNS.Transport, "interfaces", []) or []:
+                if type(iface).__name__ != "SerialInterface":
+                    continue
+                for attr, value in (("enabled", False), ("online", False)):
+                    if hasattr(iface, attr):
+                        try:
+                            setattr(iface, attr, value)
+                        except Exception:
+                            pass
+                for method in ("stop", "detach", "disable"):
+                    fn = getattr(iface, method, None)
+                    if callable(fn):
+                        try:
+                            fn()
+                        except Exception:
+                            pass
+                print("[serial] Disabled runtime SerialInterface after port unplug")
+        except Exception as e:
+            print(f"[serial] Could not disable runtime serial interface: {e}")
+
+    async def _serial_watchdog_loop(self):
+        while True:
+            await asyncio.sleep(10)
+            if self._shutting_down:
+                return
+            settings = self.load_settings()
+            interfaces = normalize_interface_list(settings.get("rns_interfaces"))
+            changed = False
+            for iface in interfaces:
+                if iface.get("type") != "SerialInterface":
+                    continue
+                port = (iface.get("port") or "").strip()
+                if not port or not iface.get("enabled"):
+                    continue
+                if serial_port_status(port) != "missing":
+                    continue
+                iface["enabled"] = False
+                changed = True
+                print(f"[serial] Port {port} unplugged — disabling serial in settings")
+            if changed:
+                settings["rns_interfaces"] = interfaces
+                self.save_settings(settings)
+                self._disable_rns_serial_interfaces()
+
+    async def _path_preference_loop(self):
+        while True:
+            await asyncio.sleep(6)
+            if self._shutting_down or not self.messaging or not self.messaging.active_link:
+                continue
+            peer = self.active_peer or self.messaging.active_peer_hash
+            if not peer:
+                continue
+            if self.messaging._link_path_score(self.messaging.active_link) >= 90:
+                continue
+            peer_ip = None
+            peer_port = 8742
+            for p in (self.discovery.get_peers() if self.discovery else []):
+                if not self._peers_equivalent(p.get("hash"), peer):
+                    continue
+                if p.get("via") == "rns" and p.get("ip"):
+                    peer_ip = p.get("ip")
+                    peer_port = p.get("port") or 8742
+                    break
+            if not peer_ip:
+                continue
+            print(f"[connect] LAN path available for {peer[:16]}... — migrating from slower link")
+            try:
+                await self._run_blocking(
+                    self.messaging.connect_to,
+                    peer,
+                    peer_ip,
+                    peer_port,
+                    self._discovery_peer_for_connect,
+                    detect_lan_ip(),
+                    self.port,
+                    True,
+                )
+            except Exception as e:
+                print(f"[connect] LAN migration failed: {e}")
+
     async def handle_network_status(self, request):
         rns_interfaces = []
         try:
@@ -1239,7 +1355,11 @@ class ChatWebServer:
             pass
         peers = self.discovery.get_peers() if self.discovery else []
         link_active = bool(self.messaging and self.messaging.active_link)
-        active_peer = self.active_peer if link_active else None
+        active_peer = None
+        if link_active:
+            active_peer = self.active_peer or (
+                self.messaging.active_peer_hash if self.messaging else None
+            )
         return web.json_response({
             "platform": "android" if is_android() else "desktop",
             "app_version": APP_VERSION,
@@ -1505,7 +1625,7 @@ class ChatWebServer:
                 return web.json_response({"status": "queued", "name": fname, "size": size})
             my_hash = self._my_sender_hash()
             ts = time.time()
-            chat_peer = self._peer_dest_hash(self.active_peer)
+            chat_peer = self._session_chat_peer() or self._peer_dest_hash(self.active_peer)
             transfer_id = str(uuid.uuid4())[:12]
             entry = self._enrich_message({
                 "type": msg_type,
@@ -1600,7 +1720,7 @@ class ChatWebServer:
                 return web.json_response({"status": "queued", "name": zip_name, "size": zsize})
             my_hash = self._my_sender_hash()
             ts = time.time()
-            chat_peer = self._peer_dest_hash(self.active_peer)
+            chat_peer = self._session_chat_peer() or self._peer_dest_hash(self.active_peer)
             transfer_id = str(uuid.uuid4())[:12]
             entry = self._enrich_message({
                 "type": "file",
@@ -1690,7 +1810,7 @@ class ChatWebServer:
 
             my_hash = self._my_sender_hash()
             ts = time.time()
-            chat_peer = self._peer_dest_hash(self.active_peer)
+            chat_peer = self._session_chat_peer() or self._peer_dest_hash(self.active_peer)
             voice_name = os.path.basename(voice_path)
             transfer_id = str(uuid.uuid4())[:12]
             entry = self._enrich_message({
@@ -1797,7 +1917,7 @@ class ChatWebServer:
         before = len(self.message_history)
         self.message_history = [
             m for m in self.message_history
-            if self._peer_dest_hash(m.get("chat_peer") or m.get("peer")) != peer
+            if not self._peers_equivalent(m.get("chat_peer") or m.get("peer"), peer)
         ]
         self._save_history()
         return before - len(self.message_history)
@@ -1920,7 +2040,7 @@ class ChatWebServer:
                     result = self.messaging.send_message(text, receipt_callback=on_receipt)
                     if result:
                         my_hash = self._my_sender_hash()
-                        chat_peer = self._peer_dest_hash(self.active_peer)
+                        chat_peer = self._session_chat_peer() or self._peer_dest_hash(self.active_peer)
                         entry = self._enrich_message({
                             "type": result.msg_type,
                             "content": result.content,
@@ -1993,6 +2113,9 @@ class ChatWebServer:
             self._save_history()
             print("[history] Cleared on restart")
         asyncio.create_task(self._history_maintenance_loop())
+        if not is_android():
+            asyncio.create_task(self._path_preference_loop())
+            asyncio.create_task(self._serial_watchdog_loop())
 
     def _register_routes(self, app):
         app.router.add_get("/", self.handle_index)

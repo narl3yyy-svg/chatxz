@@ -1176,6 +1176,7 @@ let incomingTransfers = {};
 let allContacts = [];
 let sidebarOpen = true;
 let appPlatform = 'desktop';
+const peerAliasGroups = new Map();
 
 const EMOJIS = ['😀','😃','😄','😁','😅','😂','🤣','😊','😇','🙂','😉','😌','😍','🥰','😘','😋','😛','😜','🤪','😝','🤗','🤭','🤫','🤔','🤐','🤨','😐','😑','😶','😏','😒','🙄','😬','🤥','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🥴','😵','🤯','🤠','🥳','🥺','😢','😭','😤','😠','😡','🤬','💀','💩','🤡','👻','👽','🤖','😺','😸','😹','😻','😼','😽','🙀','😿','😾','🙌','👏','👍','👎','👊','✊','🤛','🤜','🤞','✌️','🤟','🤘','👌','👈','👉','👆','👇','☝️','✋','🤚','🖐','🖖','👋','🤙','💪','🦾','🖕','✍️','🙏','💯','🔥','⭐','🌟','✨','💥','💫','💦','💨','❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💘','💝','💟','🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐔','🐧','🐦','🐤','🐣','🐥','🦆','🦅','🦉','🦇','🐺','🐗','🐴','🦄','🐝','🐛','🦋','🐌','🐞','🐜','🦟','🦗','🕷','🦂','🐢','🐍','🦎','🦖','🦕','🐙','🦑','🦐','🦀','🐡','🐠','🐟','🐬','🐳','🐋','🦈','🐊','🐅','🐆','🦓','🦍','🐘','🦛','🦏','🐪','🐫','🦒','🦘','🐃','🐂','🐄','🐎','🐖','🐏','🐑','🦙','🐐','🦌','🐕','🐩','🐈','🐓','🦃','🦚','🦜','🦢','🦩','🕊','🐇','🦝','🦡','🦨','🦦','🦥','🐁','🐀','🐿','🦔','🌵','🎄','🌲','🌳','🌴','🌱','🌿','☘️','🍀','🍃','🍂','🍁','🍄','🌾','💐','🌷','🌹','🥀','🌺','🌸','🌼','🌻','🌞','🌝','🌛','🌜','🌚','🌕','🌖','🌗','🌘','🌑','🌒','🌓','🌔','🌙','🌎','🌍','🌏','🪐','💫','⚡','☄️','🔥','🌪','🌈','☀️','🌤','⛅','🌥','☁️','🌦','🌧','⛈','🌩','🌨','❄️','☃️','⛄','🌬','💧','💦','☔','🌊','🍏','🍎','🍐','🍊','🍋','🍌','🍉','🍇','🍓','🫐','🍈','🍒','🍑','🥭','🍍','🥥','🥝','🍅','🍆','🥑','🥦','🥬','🥒','🌶','🌽','🥕','🧄','🧅','🥔','🍠','🥐','🍞','🥖','🥨','🧀','🥚','🍳','🥞','🧇','🥓','🥩','🍗','🍖','🌭','🍔','🍟','🍕','🥪','🥙','🌮','🌯','🥗','🥘','🍝','🍜','🍲',' curry','🍣','🍱','🥟','🍤','🍙','🍚','🍘','🍥','🥠','🥮','🍢','🍡','🍧','🍨','🍦','🥧','🧁','🍰','🎂','🍮','🍭','🍬','🍫','🍿','🍩','🍪','🌰','🥜','🍯','🥛','🍼','☕','🫖','🍵','🧃','🥤','🧋','🍶','🍺','🍻','🥂','🍷','🥃','🍸','🍹','🧉','🍾','🧊','🥄','🍴','🥢','🥡','🥣','🧂','⚽','🏀','🏈','⚾','🥎','🎾','🏐','🏉','🥏','🎱','🪀','🏓','🏸','🏒','🏑','🥍','🏏','🥅','⛳','🪁','🏹','🎣','🤿','🥊','🥋','🎽','⛸','🥌','sled','🎿','⛷','🏂','🪐','🏋️','🤼','🤸','⛹️','🤺','🏌️','🏇','🧘','🏄','🏊','🤽','🚣','🧗','🚵','🚴','🏆','🥇','🥈','🥉','🏅','🎖','🏵','🎗','🎫','🎟','🎪','🤹','🎭','🩰','🎨','🎬','🎤','🎧','🎼','🎹','🥁','🪘','🎷','🎺','🎸','🪕','🎻','🎲','♟','🎯','🎳','🎮','🎰','🧩','⌚','📱','📲','💻','⌨️','🖥','🖨','🖱','🖲','🕹','🗜','💽','💾','💿','📀','📼','📷','📸','📹','🎥','📽','🎞','📞','☎️','📟','📠','📺','📻','🎙','🎚','🎛','🧭','⏱','⏲','⏰','🕰','⌛','⏳','📡','🔋','🔌','💡','🔦','🕯','🪔','🧯','🛢','💸','💵','💴','💶','💷','🪙','💰','💳','💎','⚖️','🪜','🧰','🪛','🔧','🔨','⚒','🛠','⛏','🪚','🔩','⚙️','🪤','🧱','⛓','🧲','🔫','💣','🧨','🪓','🔪','🗡','⚔️','盾','🚬','⚰️','🪦','⚱️','🏺','🔮','📿','🧿','💈','⚗️','🔭','🔬','🕳','🩹','🩺','💊','💉','🩸','🧬','🦠','🧫','🧬','🔬','🔭','📡','💡','🔦','🕯','🪔','🧯','🛢','🔋','🔌','💻','⌨️','🖥','🖨','🖱','🖲','🕹','🗜','💽','💾','💿','📀','📼','📷','📸','📹','🎥','📽','🎞','📞','☎️','📟','📠','📺','📻','🎙','🎚','🎛','🧭','⌚','📱','📲','⏱','⏲','⏰','🕰','⌛','⏳','📊','📈','📉','📌','📍','📎','🖇','📏','📐','✂️','🗃','🗄','🗑','🔒','🔓','🔏','🔐','🔑','🗝','🔨','🪓','⛏','⚒','🛠','🗡','⚔️','🔫','弓','🛡','🔧','🔩','⚙️','🧰','🧲','🧪','🧫','🧬','🔬','🔭','📡','💉','💊','🩹','🩺','🩻','🚪','🛏','🛋','🪑','🚽','🚿','🛁','🪒','🧴','🧷','🧹','🧺','🧻','🪣','🧼','🪥','🧽','🧯','🛒','🚬','⚰️','🪦','⚱️','🗿','🪧','🪪','🏧','🚮','🚰','🚹','🚺','🚻','🚼','🚾','🛂','🛃','🛄','🛅','⚠️','🚸','⛔','🚫','🚳','🚭','🚯','🚱','🚷','📵','🔞','☢️','☣️','⬆️','↗️','➡️','↘️','⬇️','↙️','⬅️','↖️','↕️','↔️','↩️','↪️','⤴️','⤵️','🔃','🔄','🔙','🔚','🔛','🔜','🔝','🛐','⚛️','🕉','✡️','☸️','☯️','✝️','☦️','☪️','☮️','🕎','🔯','♈','♉','♊','♋','♌','♍','♎','♏','♐','♑','♒','♓','⛎','🔀','🔁','🔂','▶️','⏩','⏭','⏯','◀️','⏪','⏮','🔼','⏫','🔽','⏬','⏸','⏹','⏺','⏏','🎦','🔅','🔆','📶','📳','📴','♀️','♂️','⚧','✖️','➕','➖','➗','♾','‼️','⁉️','❓','❔','❕','❗','〰️','💱','💲','⚕️','♻️','⚜️','🔱','📛','🔰','⭕','✅','☑️','✔️','❌','❎','➰','➿','〽️','✳️','✴️','❇️','©️','®️','™️','#️⃣','*️⃣','0️⃣','1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟','🔞','🔠','🔡','🔢','🔣','🔤','🅰️','🆎','🅱️','🆑','🆒','🆓','ℹ️','🆔','Ⓜ️','🆕','🆖','🅾️','🆗','🅿️','🆘','🆙','🆚','🈁','🈂️','🈷️','🈶','🈯','🉐','🈹','🈚','🈲','🉑','🈸','🈴','🈳','㊗️','㊙️','🈺','🈵','🔴','🟠','🟡','🟢','🔵','🟣','🟤','⚫','⚪','🟥','🟧','🟨','🟩','🟦','🟪','🟫','⬛','⬜','◼️','◻️','◾','◽','▪️','▫️','🔶','🔷','🔸','🔹','🔺','🔻','💠','🔘','🔲','🔳','🏁','🚩','🎌','🏴','🏳️','🏴‍☠️'];
 
@@ -1263,7 +1264,7 @@ function pollLinkStatus() {
     .then(r => r.json())
     .then(d => {
       if (d.link_active && d.active_peer) {
-        if (!linkPeer || peerKey(linkPeer) !== peerKey(d.active_peer)) {
+        if (!linkPeer || !peersMatch(linkPeer, d.active_peer)) {
           setLinkPeer(d.active_peer);
           if (!viewingPeer) openChat(d.active_peer, false);
         }
@@ -1312,7 +1313,7 @@ function updatePeerHeader() {
   if (!viewingPeer) return;
   const name = contactNameFor(viewingPeer) || truncateHash(viewingPeer);
   document.getElementById('peer-name').textContent = name;
-  const linked = linkPeer && peerKey(linkPeer) === peerKey(viewingPeer);
+  const linked = linkPeer && peersMatch(linkPeer, viewingPeer);
   document.getElementById('peer-status').textContent = linked
     ? 'Encrypted · Connected'
     : 'Viewing history · not connected';
@@ -1418,9 +1419,17 @@ function handleWSMessage(msg) {
     showProgress(msg.data);
   } else if (msg.type === 'link_established') {
     if (msg.data?.hash) {
-      setLinkPeer(msg.data.hash);
-      openChat(msg.data.hash, false);
-      toast('Peer connected');
+      const h = msg.data.hash;
+      registerPeerAliases(h, ...(msg.data.aliases || []));
+      setLinkPeer(h);
+      if (!viewingPeer || peersMatch(viewingPeer, h)) {
+        if (!viewingPeer) openChat(h, false);
+        else {
+          updatePeerHeader();
+          loadHistoryForPeer(viewingPeer);
+        }
+      }
+      toast(msg.data.path_switch ? 'Switched to faster link' : 'Peer connected');
     }
   } else if (msg.type === 'link_closed') {
     linkPeer = null;
@@ -1435,7 +1444,7 @@ function handleWSMessage(msg) {
     connectInFlight = false;
     toast('Connection failed: ' + (msg.error || 'peer not reachable'));
   } else if (msg.type === 'peer_history_cleared') {
-    if (viewingPeer && peerKey(msg.data?.peer) === peerKey(viewingPeer)) {
+    if (viewingPeer && peersMatch(msg.data?.peer, viewingPeer)) {
       document.getElementById('messages').innerHTML = '';
     }
   } else if (msg.type === 'network_reset') {
@@ -1643,8 +1652,8 @@ function renderContacts(contacts) {
   contacts.forEach(c => {
     const div = document.createElement('div');
     const name = c.name || c.hash;
-    const active = peerKey(c.hash) === peerKey(viewingPeer);
-    const linked = peerKey(c.hash) === peerKey(linkPeer);
+    const active = peersMatch(c.hash, viewingPeer);
+    const linked = peersMatch(c.hash, linkPeer);
     div.className = 'contact-item' + (active ? ' active' : '');
     div.innerHTML = `<div class="contact-avatar contact-avatar-saved">${name.charAt(0).toUpperCase()}</div>
       <div class="contact-info">
@@ -1675,8 +1684,9 @@ function renderDiscovered(peers) {
     if (!hasLink) return;
   }
   discovered.forEach(p => {
+    if (p.identity_hash) registerPeerAliases(p.hash, p.identity_hash);
     const div = document.createElement('div');
-    const active = peerKey(p.hash) === peerKey(viewingPeer);
+    const active = peersMatch(p.hash, viewingPeer);
     div.className = 'contact-item' + (active ? ' active' : '');
     const name = p.name || truncateHash(p.hash);
     div.innerHTML = `<div class="contact-avatar contact-avatar-lan">${escapeHtml(name).charAt(0).toUpperCase()}</div>
@@ -1788,7 +1798,7 @@ function clearPeerHistory(peerHash) {
     body: JSON.stringify({peer})
   }).then(r => r.json()).then(d => {
     if (d.status === 'ok') {
-      if (viewingPeer && peerKey(viewingPeer) === peerKey(peer)) {
+      if (viewingPeer && peersMatch(viewingPeer, peer)) {
         document.getElementById('messages').innerHTML = '';
       }
       toast('Chat history cleared');
@@ -1803,7 +1813,7 @@ function connectTo(hash, ip, port) {
     toast('Connection already in progress...');
     return;
   }
-  if (linkPeer && peerKey(linkPeer) === peerKey(hash)) {
+  if (linkPeer && peersMatch(linkPeer, hash)) {
     openChat(hash, false);
     toast('Already connected');
     return;
@@ -2186,7 +2196,7 @@ function refreshNetworkStatus() {
       html += row('Link active', d.link_active ? 'yes — encrypted chat session' : 'no — not connected to a peer', d.link_active);
       if (d.active_peer) html += row('Active peer', truncateHash(d.active_peer), true);
       html += row('Discovered peers', d.discovered_count ?? 0, (d.discovered_count || 0) > 0);
-      html += row('WS clients', d.ws_clients ?? 0);
+      html += row('WS clients', (d.ws_clients ?? 0) + ' (browser tabs on this device)', true);
       if (d.beacon) {
         html += row('Beacon mode', (d.beacon.interval_sec ? 'auto' : 'manual only'), !d.beacon.interval_sec);
         html += row('Beacon sent (session)', d.beacon.packets_sent ?? 0);
@@ -2197,6 +2207,7 @@ function refreshNetworkStatus() {
       html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45"><strong>Link active</strong> = encrypted RNS session open. <strong>Inactive</strong> = no session — connect to a peer or wait for incoming. Connect waits for RNS announce, then times out in ~10s if the peer is offline.</div>';
       html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45">Announce and beacon are <strong>manual only</strong> — use the Announce button. Connect uses reverse-connect for Android when outbound link fails.</div>';
       html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45">Beacon UDP 8743 = LAN discovery. RNS UDP 4242 = encrypted chat. HTTP 8742 = this web UI only.</div>';
+      html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45"><strong>WS clients</strong> counts open browser tabs connected to <em>this</em> machine\'s web UI — not remote peers. One tab on Arch = 1; Ubuntu has its own count.</div>';
       if (Array.isArray(d.configured_interfaces) && d.configured_interfaces.length) {
         html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Configured presets</div>';
         d.configured_interfaces.forEach(iface => {
@@ -2336,7 +2347,8 @@ function saveSettings() {
 }
 
 function setLinkPeer(hash) {
-  linkPeer = (hash || '').replace(/:/g, '');
+  linkPeer = peerKey(hash);
+  if (viewingPeer) registerPeerAliases(linkPeer, viewingPeer);
   renderContacts(allContacts);
   renderDiscovered(window._discoveredPeers || []);
 }
@@ -2351,10 +2363,10 @@ function openChat(hash, tryConnect, meta) {
   loadHistoryForPeer(viewingPeer);
   renderContacts(allContacts);
   renderDiscovered(window._discoveredPeers || []);
-  if (tryConnect && (!linkPeer || peerKey(linkPeer) !== peerKey(viewingPeer))) {
+  if (tryConnect && (!linkPeer || !peersMatch(linkPeer, viewingPeer))) {
     const m = meta || peerMetaForHash(hash);
     connectTo(hash, m?.ip, m?.port);
-  } else if (!document.body.classList.contains('modal-open') && linkPeer && peerKey(linkPeer) === peerKey(viewingPeer)) {
+  } else if (!document.body.classList.contains('modal-open') && linkPeer && peersMatch(linkPeer, viewingPeer)) {
     document.getElementById('msg-input').focus();
   }
 }
@@ -2369,7 +2381,7 @@ function sendMessage() {
   const input = document.getElementById('msg-input');
   const text = input.value.trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-  if (!linkPeer || !viewingPeer || peerKey(linkPeer) !== peerKey(viewingPeer)) {
+  if (!linkPeer || !viewingPeer || !peersMatch(linkPeer, viewingPeer)) {
     toast('Connect to this peer first');
     return;
   }
@@ -2453,13 +2465,40 @@ function peerKey(hash) {
   return (hash || '').replace(/:/g, '').toLowerCase();
 }
 
+function registerPeerAliases(...hashes) {
+  const keys = [...new Set(hashes.map(peerKey).filter(Boolean))];
+  if (keys.length < 2) return;
+  let group = null;
+  for (const key of keys) {
+    if (peerAliasGroups.has(key)) {
+      group = peerAliasGroups.get(key);
+      break;
+    }
+  }
+  if (!group) group = new Set();
+  keys.forEach(k => group.add(k));
+  group.forEach(k => peerAliasGroups.set(k, group));
+}
+
+function peersMatch(a, b) {
+  const ka = peerKey(a);
+  const kb = peerKey(b);
+  if (!ka || !kb) return false;
+  if (ka === kb) return true;
+  const ga = peerAliasGroups.get(ka);
+  const gb = peerAliasGroups.get(kb);
+  return !!(ga && gb && ga === gb);
+}
+
 function messageBelongsToPeer(data) {
   if (!viewingPeer) return false;
   const active = peerKey(viewingPeer);
   const chatPeer = peerKey(data.chat_peer || data.peer);
-  if (chatPeer && chatPeer === active) return true;
-  if (linkPeer && !data.outgoing && peerKey(linkPeer) === active) return true;
-  if (data.type === 'system' && chatPeer === active) return true;
+  if (chatPeer && peersMatch(chatPeer, active)) return true;
+  const sender = peerKey(data.sender);
+  if (sender && peersMatch(sender, active) && data.sender !== 'system') return true;
+  if (linkPeer && !data.outgoing && peersMatch(linkPeer, active)) return true;
+  if (data.type === 'system' && peersMatch(chatPeer, active)) return true;
   return false;
 }
 
