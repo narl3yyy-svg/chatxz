@@ -24,7 +24,7 @@ from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 CONFIG_DIR = get_config_dir()
 DATA_DIR = get_data_dir()
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
-APP_VERSION = "0.3.15"
+APP_VERSION = "0.3.16"
 LAN_SESSION_TTL = 600
 
 def build_desktop_rns_config(broadcast_ip="255.255.255.255"):
@@ -251,10 +251,43 @@ class ChatWebServer:
         self.rns_init_error = None
         self._announce_lock = threading.Lock()
         self.lan_sessions = {}
+        self._shutting_down = False
 
     @staticmethod
     def _clean_hash(h):
         return (h or "").replace("<", "").replace(">", "").replace(":", "").strip()
+
+    async def _run_blocking(self, fn, *args):
+        if self._shutting_down:
+            return None
+        try:
+            return await asyncio.to_thread(fn, *args)
+        except asyncio.CancelledError:
+            if self._shutting_down:
+                return None
+            raise
+
+    async def _on_shutdown(self, app):
+        self._shutting_down = True
+        if self.messaging:
+            self.messaging.shutdown_requested = True
+
+    async def _on_cleanup(self, app):
+        self._shutting_down = True
+        if self.messaging:
+            self.messaging.shutdown_requested = True
+            self.messaging.running = False
+            try:
+                self.messaging._teardown_active_link()
+            except Exception:
+                pass
+        for ws in list(self.websockets):
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        self.websockets.clear()
+        print("[shutdown] Server stopped")
 
     async def _wait_for_rns(self, timeout=90.0):
         deadline = time.time() + timeout
@@ -631,6 +664,8 @@ class ChatWebServer:
             return web.json_response({"error": str(e)}, status=400)
 
     async def handle_connect(self, request):
+        if self._shutting_down:
+            return web.json_response({"error": "server shutting down"}, status=503)
         try:
             data = await request.json()
             peer_hash = data.get("hash", "").strip()
@@ -651,7 +686,9 @@ class ChatWebServer:
                 peer_info["port"] = data.get("port", 8742)
             if self.messaging:
                 self.messaging.prepare_connect(resolved_hash, peer_info)
-            ok = await asyncio.to_thread(self.messaging.connect_to, resolved_hash)
+            ok = await self._run_blocking(self.messaging.connect_to, resolved_hash)
+            if self._shutting_down or ok is None:
+                return web.json_response({"error": "server shutting down"}, status=503)
             if ok:
                 clean = (
                     self.messaging.active_peer_hash
@@ -660,6 +697,8 @@ class ChatWebServer:
                 self.active_peer = clean
                 return web.json_response({"status": "ok", "hash": clean})
             return web.json_response({"error": "connection failed"}, status=400)
+        except asyncio.CancelledError:
+            return web.json_response({"error": "server shutting down"}, status=503)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
@@ -776,12 +815,14 @@ class ChatWebServer:
             "token": token,
             "expires": time.time() + LAN_SESSION_TTL,
         }
-        if self.messaging and peer_hash:
+        if self.messaging and peer_hash and not self._shutting_down:
             try:
-                await asyncio.to_thread(
+                await self._run_blocking(
                     self.messaging.accept_http_peer,
                     remote, peer_port, peer_hash, token, name,
                 )
+            except asyncio.CancelledError:
+                pass
             except Exception as e:
                 print(f"[lan-handshake] accept error from {remote}: {e}")
         return web.json_response({
@@ -800,8 +841,8 @@ class ChatWebServer:
             session = self.lan_sessions.get(remote)
             if not session or session.get("token") != data.get("token"):
                 return web.json_response({"error": "unauthorized"}, status=401)
-            if self.messaging:
-                await asyncio.to_thread(
+            if self.messaging and not self._shutting_down:
+                await self._run_blocking(
                     self.messaging.deliver_http_message,
                     data.get("message", {}),
                     data.get("from_hash", session.get("hash", "")),
@@ -1481,8 +1522,10 @@ class ChatWebServer:
                     peer_info["ip"] = data.get("ip")
                     peer_info["port"] = data.get("port", 8742)
                 self.messaging.prepare_connect(resolved_hash, peer_info)
-                ok = await asyncio.to_thread(self.messaging.connect_to, resolved_hash)
-                if ok:
+                ok = await self._run_blocking(self.messaging.connect_to, resolved_hash)
+                if self._shutting_down or ok is None:
+                    await ws.send_str(json.dumps({"type": "connect_fail", "error": "server shutting down"}))
+                elif ok:
                     clean = (
                         self.messaging.active_peer_hash
                         or self._clean_hash(resolved_hash)
@@ -1591,6 +1634,8 @@ class ChatWebServer:
                 self._save_history()
 
         app.on_startup.append(_embedded_startup)
+        app.on_shutdown.append(self._on_shutdown)
+        app.on_cleanup.append(self._on_cleanup)
         print(f"[embedded] starting http://{self.host}:{self.port}")
 
         async def _serve():
@@ -1604,17 +1649,24 @@ class ChatWebServer:
         asyncio.run(_serve())
 
     def run(self):
+        from aiohttp.web_runner import GracefulExit
+
         app = web.Application()
         self._register_routes(app)
         my_hash = self.start_rns()
         app.on_startup.append(self._on_startup)
+        app.on_shutdown.append(self._on_shutdown)
+        app.on_cleanup.append(self._on_cleanup)
 
         print(f"chatxz web server v{APP_VERSION}")
         print(f"Your identity: {my_hash}")
         print(f"Web interface: http://{self.host}:{self.port}")
         print("Press Ctrl+C to stop")
 
-        web.run_app(app, host=self.host, port=self.port, print=lambda _: None)
+        try:
+            web.run_app(app, host=self.host, port=self.port, print=lambda _: None)
+        except GracefulExit:
+            pass
 
 
 def main():

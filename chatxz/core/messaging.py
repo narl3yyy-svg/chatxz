@@ -93,6 +93,7 @@ class MessagingBackend:
         self.active_link = None
         self.active_peer_hash = None
         self.running = False
+        self.shutdown_requested = False
         self._announce_thread = None
         self._pending_files = {}
         self.peer_ips = {}
@@ -683,10 +684,15 @@ class MessagingBackend:
         else:
             RNS.Transport.request_path(dest_hash)
 
+    def _interrupted(self):
+        return self.shutdown_requested or not self.running
+
     def _wait_for_path(self, dest_hash, timeout=20):
         deadline = time.time() + timeout
         requested = False
         while time.time() < deadline:
+            if self._interrupted():
+                return False
             if RNS.Transport.has_path(dest_hash):
                 return True
             if not requested:
@@ -703,6 +709,8 @@ class MessagingBackend:
         if peer and peer.get("ip"):
             print(f"[connect] Trying directed UDP to {peer['ip']}...")
             for attempt in range(3):
+                if self._interrupted():
+                    return False
                 if self._directed_path_attempt(dest_hash, peer["ip"], timeout=8):
                     print(f"[connect] RNS path ready (directed UDP to {peer['ip']})")
                     return True
@@ -858,9 +866,13 @@ class MessagingBackend:
 
     def connect_to(self, destination_hash_hex):
         with self._connect_lock:
+            if self._interrupted():
+                return False
             return self._connect_to_locked(destination_hash_hex)
 
     def _connect_to_locked(self, destination_hash_hex):
+        if self._interrupted():
+            return False
         clean = normalize_hash(destination_hash_hex)
         if len(clean) != 32:
             print(f"[connect] Invalid hash length ({len(clean)} chars, expected 32)")
@@ -926,6 +938,13 @@ class MessagingBackend:
             print(f"[connect] Link initiated, waiting for establishment...")
 
             for _ in range(60):
+                if self._interrupted():
+                    print("[connect] Aborted (shutdown)")
+                    try:
+                        link.teardown()
+                    except Exception:
+                        pass
+                    return False
                 time.sleep(0.25)
                 try:
                     if link.status == RNS.Link.ACTIVE:
