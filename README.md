@@ -223,6 +223,9 @@ chatxz --daemon
 
 ## Changelog (recent)
 
+### v0.3.40
+- **APK build fix** — `UsbSerialHelper` uses `ChatxzApplication` context instead of invalid `Platform.getApplication()` Java API
+
 ### v0.3.39
 - **Android debug log** — stdout/stderr saved to Downloads (`chatxz-debug-YYYYMMDD-HHMMSS.txt`)
 - **Android connect** — wake peer via reverse-connect before outbound link; 30s reverse wait

@@ -7,15 +7,17 @@ import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.os.Build;
 
-import com.chaquo.python.Python;
-
 public final class UsbSerialHelper {
     public static final String ACTION_USB_PERMISSION = "com.chatxz.android.USB_PERMISSION";
 
     private UsbSerialHelper() {}
 
     public static Context appContext() {
-        return Python.getPlatform().getApplication();
+        ChatxzApplication app = ChatxzApplication.getInstance();
+        if (app == null) {
+            throw new IllegalStateException("ChatxzApplication not initialized");
+        }
+        return app.getApplicationContext();
     }
 
     public static UsbManager usbManager() {
