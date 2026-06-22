@@ -127,7 +127,7 @@ class ChatxzApp:
             return False
         is_image = file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'))
         msg_type = "image" if is_image else "file"
-        return self.messaging.send_file_smart(file_path, msg_type)
+        return self.messaging.send_file(file_path, msg_type)
 
     def send_voice(self, duration=None):
         if not self.messaging or not self.messaging.active_link:

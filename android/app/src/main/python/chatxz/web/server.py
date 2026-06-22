@@ -1,7 +1,6 @@
-import os, json, time, base64, mimetypes, asyncio, socket, zipfile, shutil, subprocess, tempfile, signal, re, sys, threading, secrets
+import os, json, time, base64, mimetypes, asyncio, socket, zipfile, shutil, subprocess, tempfile, signal, re, sys, threading
 from pathlib import Path
 
-import aiohttp
 from aiohttp import web
 import RNS
 
@@ -24,8 +23,7 @@ from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 CONFIG_DIR = get_config_dir()
 DATA_DIR = get_data_dir()
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
-APP_VERSION = "0.3.17"
-LAN_SESSION_TTL = 600
+APP_VERSION = "0.3.18"
 
 def build_desktop_rns_config(broadcast_ip="255.255.255.255"):
     return f"""[reticulum]
@@ -250,7 +248,6 @@ class ChatWebServer:
         self._loop = None
         self.rns_init_error = None
         self._announce_lock = threading.Lock()
-        self.lan_sessions = {}
         self._shutting_down = False
 
     @staticmethod
@@ -473,11 +470,8 @@ class ChatWebServer:
             on_message=self._on_message,
             on_progress=self._on_transfer_progress,
             on_link_established=self._on_link_established,
-            on_http_session=self._on_http_session,
             display_name=settings.get("name", ""),
             auto_announce=False,
-            my_ip=my_ip,
-            my_port=self.port,
             receive_dir=received_dir,
         )
         self.voice_recorder = VoiceRecorder(self.config_dir)
@@ -533,22 +527,11 @@ class ChatWebServer:
                 self.websockets.discard(ws)
 
     def _on_peer_discovered(self, peer):
-        if self.messaging and peer.get("ip"):
-            self.messaging.prepare_connect(peer.get("hash"), peer)
-
-    def _on_http_session(self, peer_ip, token, peer_hash, peer_port=8742):
-        self._clean_lan_sessions()
-        self.lan_sessions[peer_ip] = {
-            "hash": self._clean_hash(peer_hash),
-            "name": "",
-            "token": token,
-            "expires": time.time() + LAN_SESSION_TTL,
-        }
+        pass
 
     def _on_link_established(self, peer_hash, link):
         self.active_peer = self._clean_hash(peer_hash)
-        transport = getattr(self.messaging, "lan_transport", "rns") if self.messaging else "rns"
-        print(f"[connect] Session active with {self.active_peer[:16]} ({transport})")
+        print(f"[connect] Session active with {self.active_peer[:16]}")
 
     def _on_transfer_progress(self, data):
         if self.websockets and self._loop:
@@ -667,21 +650,13 @@ class ChatWebServer:
             peer_hash = data.get("hash", "").strip()
             if not peer_hash:
                 return web.json_response({"error": "hash required"}, status=400)
-            peer_info = None
             resolved_hash = peer_hash
             if self.discovery:
                 target = self._clean_hash(peer_hash)
                 for p in self.discovery.get_peers():
                     if self._clean_hash(p.get("hash")) == target:
-                        peer_info = p
                         resolved_hash = p.get("hash", peer_hash)
                         break
-            if data.get("ip"):
-                peer_info = peer_info or {}
-                peer_info["ip"] = data.get("ip")
-                peer_info["port"] = data.get("port", 8742)
-            if self.messaging:
-                self.messaging.prepare_connect(resolved_hash, peer_info)
             ok = await self._run_blocking(self.messaging.connect_to, resolved_hash)
             if self._shutting_down or ok is None:
                 return web.json_response({"error": "server shutting down"}, status=503)
@@ -707,49 +682,6 @@ class ChatWebServer:
             "ip": detect_lan_ip() or "",
             "port": self.port,
         }
-
-    async def _fanout_beacon_http(self):
-        ip = detect_lan_ip()
-        if not ip:
-            return 0
-        parts = ip.split(".")
-        if len(parts) != 4:
-            return 0
-        base = f"{parts[0]}.{parts[1]}.{parts[2]}"
-        payload = self._beacon_payload()
-        timeout = aiohttp.ClientTimeout(total=0.75)
-        hits = 0
-
-        async def post_one(session, host):
-            nonlocal hits
-            if host == ip:
-                return
-            try:
-                url = f"http://{host}:{self.port}/api/beacon-ingest"
-                async with session.post(url, json=payload) as resp:
-                    if resp.status == 200:
-                        hits += 1
-            except Exception:
-                pass
-
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            hosts = [f"{base}.{i}" for i in range(1, 255)]
-            await asyncio.gather(*[post_one(session, h) for h in hosts], return_exceptions=True)
-        print(f"[beacon] HTTP subnet scan reached {hits} peer(s)")
-        return hits
-
-    async def handle_beacon_ingest(self, request):
-        try:
-            data = await request.json()
-            if self.discovery:
-                remote = request.remote or ""
-                if remote and not data.get("ip"):
-                    data["ip"] = remote
-                my_hash = self.destination_hash or (self.identity_mgr.get_hex_hash() if self.identity_mgr else "")
-                self.discovery._on_beacon(data, my_hash)
-            return web.json_response({"status": "ok"})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=400)
 
     async def handle_network_status(self, request):
         rns_interfaces = []
@@ -781,88 +713,8 @@ class ChatWebServer:
             "discovered_count": len(peers),
             "ws_clients": len(self.websockets),
             "link_active": link_active,
-            "lan_transport": getattr(self.messaging, "lan_transport", "rns") if self.messaging else "rns",
             "active_peer": self.active_peer,
             "queue_size": self.messaging.queue_size() if self.messaging else 0,
-        })
-
-    def _clean_lan_sessions(self):
-        now = time.time()
-        for ip in [k for k, s in self.lan_sessions.items() if s.get("expires", 0) < now]:
-            del self.lan_sessions[ip]
-
-    async def handle_lan_handshake(self, request):
-        try:
-            data = await request.json()
-        except Exception:
-            data = {}
-        remote = (request.remote or "").replace("::ffff:", "")
-        token = data.get("session_token") or secrets.token_urlsafe(16)
-        peer_hash = self._clean_hash(data.get("hash", ""))
-        name = (data.get("name") or "").strip()
-        try:
-            peer_port = int(data.get("port") or 8742)
-        except (TypeError, ValueError):
-            peer_port = 8742
-        self._clean_lan_sessions()
-        self.lan_sessions[remote] = {
-            "hash": peer_hash,
-            "name": name,
-            "token": token,
-            "expires": time.time() + LAN_SESSION_TTL,
-        }
-        if self.messaging and peer_hash and not self._shutting_down:
-            try:
-                await self._run_blocking(
-                    self.messaging.accept_http_peer,
-                    remote, peer_port, peer_hash, token, name,
-                )
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                print(f"[lan-handshake] accept error from {remote}: {e}")
-        return web.json_response({
-            "status": "ok",
-            "token": token,
-            "destination_hash": self.destination_hash,
-            "name": self.load_settings().get("name", ""),
-            "app_version": APP_VERSION,
-        })
-
-    async def handle_lan_message(self, request):
-        try:
-            data = await request.json()
-            remote = (request.remote or "").replace("::ffff:", "")
-            self._clean_lan_sessions()
-            session = self.lan_sessions.get(remote)
-            if not session or session.get("token") != data.get("token"):
-                return web.json_response({"error": "unauthorized"}, status=401)
-            if self.messaging and not self._shutting_down:
-                await self._run_blocking(
-                    self.messaging.deliver_http_message,
-                    data.get("message", {}),
-                    data.get("from_hash", session.get("hash", "")),
-                    remote,
-                    int(data.get("from_port", 8742)),
-                )
-            return web.json_response({"status": "ok"})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=400)
-
-    async def handle_rns_info(self, request):
-        if request.query.get("announce") and self.messaging:
-            await asyncio.to_thread(self.messaging.announce)
-            if self.lan_beacon:
-                await asyncio.to_thread(self.lan_beacon.send, 1, False)
-        dest_hash = self.destination_hash
-        pub_key = b""
-        if self.identity_mgr and self.identity_mgr.identity:
-            pub_key = self.identity_mgr.identity.get_public_key()
-        return web.json_response({
-            "destination_hash": dest_hash,
-            "public_key": base64.b64encode(pub_key).decode("ascii") if pub_key else "",
-            "name": self.load_settings().get("name", ""),
-            "app": "chatxz",
         })
 
     async def handle_announce(self, request):
@@ -877,13 +729,11 @@ class ChatWebServer:
                     beacon_sent = await asyncio.to_thread(
                         self.lan_beacon.send, 1, is_android()
                     )
-                http_hits = await self._fanout_beacon_http()
                 return web.json_response({
                     "status": "ok",
                     "broadcast": lan_broadcast(),
                     "beacon_port": BEACON_PORT,
                     "beacon_sent": beacon_sent,
-                    "http_probe_hits": http_hits,
                     "lan_ip": detect_lan_ip(),
                 })
             except Exception as e:
@@ -1117,7 +967,7 @@ class ChatWebServer:
             self._save_history()
             await self._broadcast({"type": "message", "data": entry})
 
-            result = self.messaging.send_file_smart(save_path, msg_type,
+            result = self.messaging.send_file(save_path, msg_type,
                                                progress_callback=self._make_progress_callback(fname, size))
             if result:
                 return web.json_response({"status": "ok", "name": fname, "size": size, "method": "resource"})
@@ -1185,7 +1035,7 @@ class ChatWebServer:
             self.message_history.append(entry)
             self._save_history()
             await self._broadcast({"type": "message", "data": entry})
-            result = self.messaging.send_file_smart(zip_path, "file",
+            result = self.messaging.send_file(zip_path, "file",
                                                progress_callback=self._make_progress_callback(zip_name, zsize))
             if result:
                 return web.json_response({"status": "ok", "name": zip_name, "size": zsize})
@@ -1268,7 +1118,7 @@ class ChatWebServer:
             self._save_history()
             await self._broadcast({"type": "message", "data": entry})
 
-            result = self.messaging.send_file_smart(voice_path, "voice",
+            result = self.messaging.send_file(voice_path, "voice",
                                                progress_callback=self._make_progress_callback(os.path.basename(voice_path), len(audio_bytes)))
             if result:
                 return web.json_response({"status": "ok"})
@@ -1305,79 +1155,6 @@ class ChatWebServer:
         resp = web.FileResponse(full_path)
         if ct:
             resp.headers['Content-Type'] = ct
-        return resp
-
-    async def handle_direct_transfer(self, request):
-        token = request.match_info.get("token", "")
-        if not self.messaging:
-            return web.Response(text="Not ready", status=503)
-        info = self.messaging.direct_transfer_tokens.get(token)
-        if not info:
-            return web.Response(text="Invalid or expired token", status=404)
-        file_path = info["path"]
-        if not os.path.exists(file_path):
-            self.messaging.direct_transfer_tokens.pop(token, None)
-            return web.Response(text="File not found", status=404)
-
-        fname = info.get("name") or os.path.basename(file_path)
-        total = info.get("size") or os.path.getsize(file_path)
-        transfer_id = info.get("transfer_id", token)
-        ct, _ = mimetypes.guess_type(file_path)
-        if not ct:
-            ct = "application/octet-stream"
-
-        resp = web.StreamResponse()
-        resp.headers["Content-Type"] = ct
-        resp.headers["Content-Length"] = str(total)
-        resp.headers["X-Direct-Transfer"] = "1"
-        await resp.prepare(request)
-
-        sent = 0
-        start = time.time()
-        try:
-            with open(file_path, "rb") as f:
-                while True:
-                    if self.messaging._cancel_events.get(transfer_id) and self.messaging._cancel_events[transfer_id].is_set():
-                        break
-                    chunk = f.read(262144)
-                    if not chunk:
-                        break
-                    await resp.write(chunk)
-                    sent += len(chunk)
-                    elapsed = time.time() - start
-                    pct = int(sent * 100 / total) if total else 0
-                    speed = format_speed(sent / elapsed) if elapsed > 0 else ""
-                    self._on_transfer_progress({
-                        "file_name": fname,
-                        "progress": pct,
-                        "size": total,
-                        "speed": speed,
-                        "direction": "send",
-                        "transfer_id": transfer_id,
-                        "status": "active",
-                    })
-            if sent >= total:
-                self._on_transfer_progress({
-                    "file_name": fname,
-                    "progress": 100,
-                    "size": total,
-                    "direction": "send",
-                    "transfer_id": transfer_id,
-                    "status": "complete",
-                })
-        except Exception as e:
-            print(f"[direct] stream error: {e}")
-            self._on_transfer_progress({
-                "file_name": fname,
-                "progress": 0,
-                "size": total,
-                "direction": "send",
-                "transfer_id": transfer_id,
-                "status": "failed",
-            })
-        finally:
-            self.messaging.direct_transfer_tokens.pop(token, None)
-            await resp.write_eof()
         return resp
 
     async def handle_queue(self, request):
@@ -1504,20 +1281,13 @@ class ChatWebServer:
         elif msg_type == "connect":
             peer_hash = data.get("hash", "")
             if peer_hash and self.messaging:
-                peer_info = None
                 resolved_hash = peer_hash
                 if self.discovery:
                     target = self._clean_hash(peer_hash)
                     for p in self.discovery.get_peers():
                         if self._clean_hash(p.get("hash")) == target:
-                            peer_info = p
                             resolved_hash = p.get("hash", peer_hash)
                             break
-                if data.get("ip"):
-                    peer_info = peer_info or {}
-                    peer_info["ip"] = data.get("ip")
-                    peer_info["port"] = data.get("port", 8742)
-                self.messaging.prepare_connect(resolved_hash, peer_info)
                 ok = await self._run_blocking(self.messaging.connect_to, resolved_hash)
                 if self._shutting_down or ok is None:
                     await ws.send_str(json.dumps({"type": "connect_fail", "error": "server shutting down"}))
@@ -1537,7 +1307,6 @@ class ChatWebServer:
                     await asyncio.to_thread(self.messaging.announce)
                     if self.lan_beacon:
                         await asyncio.to_thread(self.lan_beacon.send, 1, is_android())
-                    await self._fanout_beacon_http()
             elif err:
                 await ws.send_str(json.dumps({"type": "info", "data": "Announce failed: " + err}))
         elif msg_type == "read_receipt":
@@ -1564,11 +1333,6 @@ class ChatWebServer:
         app.router.add_delete("/api/contacts/{hash}", self.handle_delete_contact)
         app.router.add_post("/api/connect", self.handle_connect)
         app.router.add_post("/api/announce", self.handle_announce)
-        app.router.add_get("/api/rns-info", self.handle_rns_info)
-        app.router.add_post("/api/rns-info", self.handle_lan_handshake)
-        app.router.add_post("/api/lan-handshake", self.handle_lan_handshake)
-        app.router.add_post("/api/lan-message", self.handle_lan_message)
-        app.router.add_post("/api/beacon-ingest", self.handle_beacon_ingest)
         app.router.add_get("/api/network-status", self.handle_network_status)
         app.router.add_post("/api/disconnect", self.handle_disconnect)
         app.router.add_post("/api/file", self.handle_file_upload)
@@ -1586,7 +1350,6 @@ class ChatWebServer:
         app.router.add_post("/api/browse-dir", self.handle_browse_dir)
         app.router.add_post("/api/transfer/cancel", self.handle_transfer_cancel)
         app.router.add_get("/api/file/{filepath:.*}", self.handle_serve_file)
-        app.router.add_get("/api/direct-transfer/{token}", self.handle_direct_transfer)
         app.router.add_get("/api/queue", self.handle_queue)
         app.router.add_delete("/api/queue", self.handle_queue_clear)
         app.router.add_post("/api/identity/regenerate", self.handle_regenerate_identity)
