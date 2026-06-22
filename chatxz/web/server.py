@@ -33,6 +33,7 @@ from chatxz.core.rns_interfaces import (
     user_has_serial_group_access,
 )
 from chatxz.utils.helpers import get_config_dir, get_data_dir, format_speed, media_type_for_filename
+from chatxz.utils.debug_log import debug_log_path
 from chatxz.utils.platform import (
     is_android,
     lan_ip as platform_lan_ip,
@@ -939,7 +940,8 @@ class ChatWebServer:
                 self.identity_mgr.load_or_create()
             except Exception:
                 pass
-        h = self.destination_hash or self.identity_mgr.get_hex_hash()
+        from chatxz.core.discovery import normalize_hash
+        h = normalize_hash(self.destination_hash or self.identity_mgr.get_hex_hash())
         contacts = []
         contacts_dir = os.path.join(self.config_dir, "contacts")
         os.makedirs(contacts_dir, exist_ok=True)
@@ -963,6 +965,7 @@ class ChatWebServer:
             "app_version": APP_VERSION,
             "rns_ready": bool(self.messaging and self.messaging.destination),
             "rns_error": self.rns_init_error,
+            "debug_log_path": debug_log_path() if is_android() else None,
         })
 
     async def handle_add_contact(self, request):
@@ -1412,6 +1415,7 @@ class ChatWebServer:
                 if self.messaging else None
             ),
             "queue_size": self.messaging.queue_size() if self.messaging else 0,
+            "debug_log_path": debug_log_path() if is_android() else None,
         })
 
     async def handle_announce(self, request):

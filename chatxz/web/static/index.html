@@ -952,30 +952,6 @@ body.sidebar-open #sidebar-backdrop { display: block; }
         <button class="panel-close" onclick="toggleSettings()" title="Close">&times;</button>
       </div>
       <div class="settings-scroll">
-        <div class="settings-card" id="network-settings-card">
-          <h4>📡 Network</h4>
-          <div style="display:flex;gap:8px;margin-bottom:8px">
-            <button class="btn-block" style="flex:1" onclick="refreshNetworkStatus()">Refresh status</button>
-            <button class="btn-block danger" style="flex:1" onclick="resetNetwork()">Reset network</button>
-          </div>
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin-bottom:8px">
-            <input type="checkbox" id="settings-network-auto-reset" onchange="saveNetworkAutoReset()">
-            Auto-reset beacon counters weekly
-          </label>
-          <div id="network-status-panel" class="network-status">Tap Refresh to load network status.</div>
-          <div style="margin-top:12px">
-            <h4 style="margin:0 0 8px;font-size:12px;color:var(--text2)">RNS interface presets</h4>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-              <button class="btn-block" style="flex:1;min-width:90px" onclick="addRnsInterface('udp_lan')">+ UDP</button>
-              <button class="btn-block" style="flex:1;min-width:90px" onclick="addRnsInterface('tcp_client')">+ TCP</button>
-              <button class="btn-block" style="flex:1;min-width:90px" onclick="addRnsInterface('serial')">+ Serial</button>
-            </div>
-            <div id="serial-devices-panel" class="serial-devices-panel" style="display:none"></div>
-            <div id="rns-interfaces-list" style="font-size:11px;color:var(--text2)">Loading...</div>
-            <div id="serial-permission-hint" style="display:none;margin-top:6px;font-size:10px;color:var(--warn,#e8a838);line-height:1.45"></div>
-            <div id="serial-setup-hint" style="margin-top:6px;font-size:10px;color:var(--text3)">Plug in USB serial, pick device + baud (default 57600), click Apply. Restart chatxz after applying.</div>
-          </div>
-        </div>
         <div class="settings-card">
           <h4>👤 Profile</h4>
           <div class="settings-section">
@@ -1012,8 +988,33 @@ body.sidebar-open #sidebar-backdrop { display: block; }
             <input type="file" id="dir-picker-fallback" style="display:none" webkitdirectory onchange="pickReceivedDirFallback(this)">
           </div>
         </div>
+        <div class="settings-card" id="network-settings-card">
+          <h4>📡 Network</h4>
+          <div style="display:flex;gap:8px;margin-bottom:8px">
+            <button class="btn-block" style="flex:1" onclick="refreshNetworkStatus()">Refresh status</button>
+            <button class="btn-block danger" style="flex:1" onclick="resetNetwork()">Reset network</button>
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin-bottom:8px">
+            <input type="checkbox" id="settings-network-auto-reset" onchange="saveNetworkAutoReset()">
+            Auto-reset beacon counters weekly
+          </label>
+          <div id="network-status-panel" class="network-status">Tap Refresh to load network status.</div>
+          <div style="margin-top:12px">
+            <h4 style="margin:0 0 8px;font-size:12px;color:var(--text2)">RNS interface presets</h4>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+              <button class="btn-block" style="flex:1;min-width:90px" onclick="addRnsInterface('udp_lan')">+ UDP</button>
+              <button class="btn-block" style="flex:1;min-width:90px" onclick="addRnsInterface('tcp_client')">+ TCP</button>
+              <button class="btn-block" style="flex:1;min-width:90px" onclick="addRnsInterface('serial')">+ Serial</button>
+            </div>
+            <div id="serial-devices-panel" class="serial-devices-panel" style="display:none"></div>
+            <div id="rns-interfaces-list" style="font-size:11px;color:var(--text2)">Loading...</div>
+            <div id="serial-permission-hint" style="display:none;margin-top:6px;font-size:10px;color:var(--warn,#e8a838);line-height:1.45"></div>
+            <div id="serial-setup-hint" style="margin-top:6px;font-size:10px;color:var(--text3)">Plug in USB serial, pick device + baud (default 57600), click Apply. Restart chatxz after applying.</div>
+          </div>
+        </div>
         <div class="settings-card danger">
           <h4>⚠ Advanced</h4>
+          <div id="android-debug-log-hint" style="display:none;margin-bottom:10px;font-size:11px;color:var(--text2);line-height:1.5;word-break:break-all"></div>
           <div style="display:flex;flex-direction:column;gap:8px">
             <button class="btn-block danger" onclick="regenerateIdentity()">Regenerate identity</button>
             <button class="btn-block danger" onclick="restartServer()">Restart server</button>
@@ -1346,8 +1347,9 @@ function fetchIdentity() {
     .then(r => r.json())
     .then(d => {
       myHash = d.hash;
-      document.getElementById('identity-box').textContent = truncateHash(myHash);
-      document.getElementById('identity-box').title = myHash + ' (click to copy)';
+      document.getElementById('identity-box').textContent = formatHashDisplay(myHash);
+      document.getElementById('identity-box').title = stripHashColons(myHash) + ' (click to copy)';
+      updateAndroidDebugLogHint(d.debug_log_path);
       const sh = document.getElementById('settings-hash');
       if (sh) sh.value = myHash;
       renderContacts(d.contacts);
@@ -2261,6 +2263,10 @@ function refreshNetworkStatus() {
           html += row(label, (p.via || 'peer') + ip, true);
         });
       }
+      if (d.debug_log_path) {
+        html += row('Debug log file', d.debug_log_path, true);
+        updateAndroidDebugLogHint(d.debug_log_path);
+      }
       panel.innerHTML = html;
     })
     .catch(() => { panel.textContent = 'Failed to load network status.'; });
@@ -2822,8 +2828,9 @@ function regenerateIdentity() {
       if (d.status === 'ok') {
         myHash = d.new_hash;
         document.getElementById('settings-hash').value = myHash;
-        document.getElementById('identity-box').textContent = truncateHash(myHash);
-      document.getElementById('identity-box').title = myHash + ' (click to copy)';
+        document.getElementById('identity-box').textContent = formatHashDisplay(myHash);
+      document.getElementById('identity-box').title = stripHashColons(myHash) + ' (click to copy)';
+      updateAndroidDebugLogHint(d.debug_log_path);
       const sh = document.getElementById('settings-hash');
       if (sh) sh.value = myHash;
         toast('New identity: ' + d.new_hash.substring(0, 16) + '...');
@@ -2892,12 +2899,35 @@ function deleteMessage(msgId) {
 }
 
 function copyIdentity() {
-  navigator.clipboard.writeText(myHash).then(() => toast('Identity copied!'));
+  const text = stripHashColons(myHash);
+  navigator.clipboard.writeText(text).then(() => toast('Identity copied!'));
+}
+
+function stripHashColons(h) {
+  return (h || '').replace(/:/g, '').toLowerCase();
+}
+
+function formatHashDisplay(h) {
+  const clean = stripHashColons(h);
+  if (!clean) return '';
+  if (clean.length <= 16) return clean;
+  return clean.substring(0, 16) + '...';
 }
 
 function truncateHash(h) {
-  if (!h || h.length <= 16) return h || '';
-  return h.substring(0, 16) + '...';
+  return formatHashDisplay(h);
+}
+
+function updateAndroidDebugLogHint(path) {
+  const el = document.getElementById('android-debug-log-hint');
+  if (!el) return;
+  if (appPlatform !== 'android' || !path) {
+    el.style.display = 'none';
+    el.textContent = '';
+    return;
+  }
+  el.style.display = 'block';
+  el.innerHTML = '<strong>Debug log (temporary):</strong> server output is saved to your phone Downloads folder.<br><code style="font-size:10px">' + escapeHtml(path) + '</code><br>Also see <code>chatxz-debug-latest.txt</code> for the current file path.';
 }
 
 function formatSize(bytes) {

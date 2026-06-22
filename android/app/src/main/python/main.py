@@ -59,9 +59,14 @@ def start_server():
 
     def _run():
         try:
+            try:
+                from chatxz.utils.debug_log import start_debug_capture
+                start_debug_capture()
+            except Exception:
+                pass
             from chatxz.web.server import ChatWebServer
             server = ChatWebServer(
-                host=BIND_HOST, port=PORT, verbose=False, force=False, embedded=True,
+                host=BIND_HOST, port=PORT, verbose=True, force=False, embedded=True,
             )
             server.run_embedded()
         except Exception:

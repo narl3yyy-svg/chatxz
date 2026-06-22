@@ -186,7 +186,7 @@ The APK embeds the same Python tree as desktop (`chatxz/`) via Chaquopy. **Alway
 
 ```bash
 # 1. Bump version (updates version.properties, chatxz/_version.py, Gradle)
-./scripts/bump-version.sh 0.3.38
+./scripts/bump-version.sh 0.3.39
 
 # 2. Copy chatxz/ → android/app/src/main/python/chatxz/ (Python + web UI)
 bash scripts/sync-android.sh
@@ -196,7 +196,9 @@ cd android && chmod +x gradlew && ./gradlew assembleDebug
 # Output: android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-**Release APK via CI:** tag `v0.3.38` (or current `VERSION_NAME` in `version.properties`) — workflow runs `sync-android.sh` then `assembleDebug` and publishes to GitHub Releases.
+**Release APK via CI:** tag `v0.3.39` (or current `VERSION_NAME` in `version.properties`) — workflow runs `sync-android.sh` then `assembleDebug` and publishes to GitHub Releases.
+
+**Android debug log (temporary):** each session writes `chatxz-debug-YYYYMMDD-HHMMSS.txt` to Phone Downloads (or app Downloads if scoped storage blocks public write). Path is shown in Settings → Advanced and Network status.
 
 **Android notes:**
 - Same failover, messaging, and web UI as desktop (WebView loads embedded `index.html`)
@@ -220,6 +222,12 @@ chatxz --daemon
 ```
 
 ## Changelog (recent)
+
+### v0.3.39
+- **Android debug log** — stdout/stderr saved to Downloads (`chatxz-debug-YYYYMMDD-HHMMSS.txt`)
+- **Android connect** — wake peer via reverse-connect before outbound link; 30s reverse wait
+- **Identity display** — hash shown without `:` separators in sidebar and settings
+- **Settings order** — Network section moved between Storage and Advanced
 
 ### v0.3.38
 - **Android bundle synced** with desktop (failover, serial teardown, UI fixes, network panel)

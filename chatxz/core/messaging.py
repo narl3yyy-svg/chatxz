@@ -28,6 +28,7 @@ FAILOVER_CONNECT_TIMEOUT_S = 22
 LINK_CONNECT_POLL_S = 0.1
 IDENTITY_WAIT_TIMEOUT_S = 18
 REVERSE_CONNECT_WAIT_S = 15
+ANDROID_REVERSE_CONNECT_WAIT_S = 30
 LINK_FAILOVER_GRACE_S = 12
 RECEIPT_FAILOVER_TIMEOUT_S = 10
 
@@ -1320,6 +1321,15 @@ class MessagingBackend:
             connect_timeout = FAILOVER_CONNECT_TIMEOUT_S if failover else LINK_CONNECT_TIMEOUT_S
             print(f"[connect] Connecting to {dest_hex[:16]}... (timeout {connect_timeout}s)")
 
+            if is_android() and peer_ip:
+                print(f"[connect] Android: waking peer at {peer_ip}:{peer_port} before outbound link")
+                self._request_peer_connect(
+                    peer_ip, peer_port, my_hash,
+                    caller_ip=caller_ip, caller_port=caller_port,
+                )
+                time.sleep(0.8)
+                request_paths_for_hash(dest_hex)
+
             link = None
             try:
                 link = RNS.Link(destination)
@@ -1375,12 +1385,13 @@ class MessagingBackend:
                         del self.links[link.link_id]
 
             if peer_ip:
-                print("[connect] Outbound link timed out — waiting for reverse connect...")
+                reverse_wait = ANDROID_REVERSE_CONNECT_WAIT_S if is_android() else REVERSE_CONNECT_WAIT_S
+                print(f"[connect] Outbound link timed out — waiting for reverse connect ({reverse_wait}s)...")
                 self._request_peer_connect(
                     peer_ip, peer_port, my_hash,
                     caller_ip=caller_ip, caller_port=caller_port,
                 )
-                if self._wait_for_reverse_link(dest_hex, alt_hex=clean):
+                if self._wait_for_reverse_link(dest_hex, alt_hex=clean, timeout_s=reverse_wait):
                     print("[connect] Reverse connect established")
                     return True
 
