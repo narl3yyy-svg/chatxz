@@ -1,5 +1,6 @@
 import threading, RNS, json, time, os, tempfile, uuid, base64, secrets
 import urllib.request
+import urllib.error
 from chatxz.utils.helpers import format_speed
 from chatxz.core.discovery import normalize_hash
 
@@ -644,15 +645,13 @@ class MessagingBackend:
 
     def _prepare_paths(self, dest_hash, peer=None):
         self._announce()
-        if peer:
-            self._bootstrap_via_http(dest_hash, peer["ip"], peer["port"])
         if self._wait_for_path(dest_hash, timeout=18):
             print(f"[connect] RNS path ready")
             return True
         if peer:
-            print(f"[connect] Retrying bootstrap + path...")
-            self._announce()
+            print(f"[connect] Retrying remote announce + path...")
             self._bootstrap_via_http(dest_hash, peer["ip"], peer["port"])
+            self._announce()
             if self._wait_for_path(dest_hash, timeout=12):
                 print(f"[connect] RNS path ready after retry")
                 return True
@@ -731,23 +730,39 @@ class MessagingBackend:
 
     def _connect_via_http(self, peer, peer_hash):
         session_token = secrets.token_urlsafe(16)
-        url = f"http://{peer['ip']}:{peer['port']}/api/lan-handshake"
-        body = json.dumps({
+        payload = json.dumps({
             "hash": self.my_dest_hash or "",
             "name": self.display_name or "",
             "port": self.my_port,
             "session_token": session_token,
         }).encode("utf-8")
-        try:
-            req = urllib.request.Request(
-                url, data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                info = json.loads(resp.read().decode("utf-8"))
-        except Exception as e:
-            print(f"[connect] HTTP LAN handshake failed: {e}")
+        headers = {"Content-Type": "application/json"}
+        urls = [
+            f"http://{peer['ip']}:{peer['port']}/api/lan-handshake",
+            f"http://{peer['ip']}:{peer['port']}/api/rns-info",
+        ]
+        info = None
+        last_err = None
+        for url in urls:
+            try:
+                req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    info = json.loads(resp.read().decode("utf-8"))
+                    break
+            except urllib.error.HTTPError as e:
+                last_err = e
+                detail = ""
+                try:
+                    detail = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+                print(f"[connect] HTTP LAN handshake {url} -> {e.code}: {detail[:200]}")
+            except Exception as e:
+                last_err = e
+                print(f"[connect] HTTP LAN handshake {url} failed: {e}")
+        if info is None:
+            if last_err and getattr(last_err, "code", None) == 404:
+                print("[connect] Peer lacks HTTP LAN support — upgrade peer to chatxz 0.3.12+")
             return False
         token = info.get("token") or session_token
         if info.get("status") != "ok" or not token:
