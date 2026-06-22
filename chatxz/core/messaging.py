@@ -5,17 +5,27 @@ from chatxz.utils.helpers import format_speed
 from chatxz.core.discovery import normalize_hash, message_dest_hash_for_identity
 from chatxz.core.lan_rns import (
     build_announce_packet,
+    clear_peer_path,
+    detach_unhealthy_interfaces,
+    interface_family,
+    interface_is_healthy,
+    online_interfaces,
+    peer_path_entry,
     request_path_for_hash,
     request_paths_for_hash,
+    scrub_peer_path,
     unicast_announce_packet,
+    wait_for_peer_path,
 )
 from chatxz.utils.platform import is_android
 
 APP_NAME = "chatxz"
 LINK_CONNECT_TIMEOUT_S = 10
+FAILOVER_CONNECT_TIMEOUT_S = 22
 LINK_CONNECT_POLL_S = 0.1
 IDENTITY_WAIT_TIMEOUT_S = 18
 REVERSE_CONNECT_WAIT_S = 15
+LINK_FAILOVER_GRACE_S = 12
 
 MESSAGE_TYPE_TEXT = "text"
 MESSAGE_TYPE_FILE = "file"
@@ -116,8 +126,9 @@ class MessagingBackend:
         self._link_handoff = False
         self._last_handoff = False
         self._failover_last_attempt = 0
-        self._failover_cooldown_s = 6
+        self._failover_cooldown_s = 4
         self._failover_in_progress = False
+        self._last_link_established_at = 0
 
     def _is_self_hash(self, h):
         clean = normalize_hash(h)
@@ -204,11 +215,19 @@ class MessagingBackend:
         return getattr(link, "attached_interface", None)
 
     def _interface_healthy(self, iface):
-        if iface is None:
-            return False
-        if hasattr(iface, "online"):
-            return bool(iface.online)
-        return True
+        return interface_is_healthy(iface)
+
+    def _interface_path_score(self, iface):
+        if not self._interface_healthy(iface):
+            return 0
+        fam = interface_family(iface)
+        if fam == "lan":
+            return 100
+        if fam == "serial":
+            return 20
+        if fam == "udp":
+            return 80
+        return 50
 
     def _link_interface_healthy(self, link):
         return self._interface_healthy(self._link_attached_interface(link))
@@ -217,24 +236,14 @@ class MessagingBackend:
         clean = normalize_hash(dest_hash)
         if len(clean) != 32:
             return False
-        try:
-            return RNS.Transport.has_path(bytes.fromhex(clean))
-        except Exception:
-            return False
+        scrub_peer_path(clean)
+        _, path_iface = peer_path_entry(clean)
+        return bool(path_iface and self._interface_healthy(path_iface))
 
     def _peer_path_interface(self, dest_hash):
-        clean = normalize_hash(dest_hash)
-        if len(clean) != 32:
-            return None
-        try:
-            dest_bytes = bytes.fromhex(clean)
-            with RNS.Transport.path_table_lock:
-                entry = RNS.Transport.path_table.get(dest_bytes)
-            if entry and len(entry) > 5:
-                return entry[5]
-        except Exception:
-            pass
-        return None
+        scrub_peer_path(dest_hash)
+        _, path_iface = peer_path_entry(dest_hash)
+        return path_iface
 
     def _interfaces_equivalent(self, iface_a, iface_b):
         if iface_a is None or iface_b is None:
@@ -242,6 +251,63 @@ class MessagingBackend:
         if iface_a is iface_b:
             return True
         return str(iface_a) == str(iface_b)
+
+    def _has_online_family(self, family):
+        ifaces = online_interfaces(family=family)
+        if not ifaces:
+            return False
+        if family != "lan":
+            return True
+        for iface in ifaces:
+            if type(iface).__name__ == "AutoInterfacePeer":
+                return True
+        for iface in ifaces:
+            spawned = getattr(iface, "spawned_interfaces", None)
+            if isinstance(spawned, dict) and spawned:
+                return True
+        try:
+            from chatxz.utils.platform import lan_ip as _lan_ip
+            return bool(_lan_ip())
+        except Exception:
+            return False
+
+    def _preferred_failover_family(self, peer, attached=None):
+        attached = attached or self._link_attached_interface(self.active_link)
+        att_fam = interface_family(attached)
+        if att_fam == "serial" and self._has_online_family("lan"):
+            return "lan"
+        if att_fam == "lan" and self._has_online_family("serial"):
+            return "serial"
+        path_iface = self._peer_path_interface(peer)
+        if path_iface and self._interface_healthy(path_iface):
+            fam = interface_family(path_iface)
+            if fam != att_fam:
+                return fam
+        if self._has_online_family("lan"):
+            return "lan"
+        if self._has_online_family("serial"):
+            return "serial"
+        return None
+
+    def _prepare_failover_path(self, peer, prefer_family=None):
+        scrub_peer_path(peer)
+        detached = detach_unhealthy_interfaces()
+        if detached:
+            print(f"[connect] Detached {detached} offline RNS interface(s)")
+        clear_peer_path(peer)
+        self._announce()
+        request_paths_for_hash(peer, family=prefer_family)
+        if prefer_family:
+            path_iface = wait_for_peer_path(peer, family=prefer_family, timeout_s=10.0)
+            if path_iface:
+                print(f"[connect] Path ready on {type(path_iface).__name__} ({prefer_family})")
+                return True
+        path_iface = wait_for_peer_path(peer, family=None, timeout_s=6.0)
+        if path_iface:
+            print(f"[connect] Path ready on {type(path_iface).__name__}")
+            return True
+        print(f"[connect] Waiting for path to {peer[:16]}... (no {prefer_family or 'usable'} path yet)")
+        return False
 
     def link_needs_failover(self):
         if not self.active_link or not self.active_peer_hash:
@@ -251,16 +317,35 @@ class MessagingBackend:
             return False, ""
 
         attached = self._link_attached_interface(self.active_link)
-        if not self._interface_healthy(attached):
+        in_grace = (time.time() - self._last_link_established_at) < LINK_FAILOVER_GRACE_S
+
+        if not self._link_interface_healthy(self.active_link):
             return True, f"link interface offline ({type(attached).__name__ if attached else 'none'})"
 
         path_iface = self._peer_path_interface(peer)
+        att_fam = interface_family(attached)
+        path_fam = interface_family(path_iface) if path_iface else ""
+
         if path_iface and attached and not self._interfaces_equivalent(path_iface, attached):
             if self._interface_healthy(path_iface):
-                return True, f"path available on {type(path_iface).__name__}"
+                new_score = self._interface_path_score(path_iface)
+                old_score = self._interface_path_score(attached)
+                if path_fam != att_fam:
+                    if not in_grace or new_score > old_score:
+                        return True, f"path moved to {path_fam} (link on {att_fam})"
+                elif new_score > old_score + 15:
+                    return True, f"better path on {type(path_iface).__name__}"
 
-        if not self._peer_has_path(peer) and not self._interface_healthy(attached):
-            return True, "no RNS path to peer"
+        if att_fam == "lan" and not self._has_online_family("lan") and self._has_online_family("serial"):
+            return True, "LAN down, serial available"
+
+        if att_fam == "serial" and not self._has_online_family("serial") and self._has_online_family("lan"):
+            return True, "serial down, LAN available"
+
+        if not self._peer_has_path(peer):
+            alt = self._preferred_failover_family(peer, attached)
+            if alt and self._has_online_family(alt):
+                return True, f"path lost, trying {alt}"
 
         try:
             if getattr(self.active_link, "status", None) == RNS.Link.STALE:
@@ -283,11 +368,13 @@ class MessagingBackend:
                 or getattr(link, "interface", None)
                 or getattr(link, "parent_interface", None)
             )
-            iname = str(iface or "").lower()
-            if "serial" in iname or "tty" in iname:
-                return 10
-            if "auto" in iname or "udp" in iname or "enp" in iname or "wlan" in iname or "eth" in iname:
+            fam = interface_family(iface)
+            if fam == "serial":
+                score = 20
+            elif fam == "lan":
                 score = 100
+            elif fam == "udp":
+                score = 80
             else:
                 score = 50
             rtt = getattr(link, "rtt", None)
@@ -660,6 +747,7 @@ class MessagingBackend:
             return
         self.active_link = link
         self.active_peer_hash = peer
+        self._last_link_established_at = time.time()
         if self._send_link is None:
             self._send_link = link
         if self.on_link_established:
@@ -1068,10 +1156,12 @@ class MessagingBackend:
         self._failover_last_attempt = now
         self._failover_in_progress = True
         try:
+            prefer = self._preferred_failover_family(peer)
             print(f"[connect] Failover reconnect to {peer[:16]}... ({reason})")
-            request_paths_for_hash(peer)
             self._teardown_active_link(preserve_peer=True, handoff=True)
-            time.sleep(0.6)
+            time.sleep(0.3)
+            if not self._prepare_failover_path(peer, prefer_family=prefer):
+                return False
             if peer_ip:
                 self._request_peer_connect(
                     peer_ip, int(peer_port or 8742),
@@ -1086,6 +1176,7 @@ class MessagingBackend:
                 caller_ip,
                 caller_port,
                 replace=False,
+                failover=True,
             )
         finally:
             self._failover_in_progress = False
@@ -1094,7 +1185,7 @@ class MessagingBackend:
         return self.shutdown_requested or not self.running
 
     def connect_to(self, destination_hash_hex, peer_ip=None, peer_port=None, peer_lookup=None,
-                   caller_ip=None, caller_port=8742, replace=False):
+                   caller_ip=None, caller_port=8742, replace=False, failover=False):
         with self._connect_lock:
             if self._interrupted():
                 return False
@@ -1166,13 +1257,15 @@ class MessagingBackend:
                     peer_ip, peer_port, my_hash,
                     caller_ip=caller_ip, caller_port=caller_port,
                 )
+            scrub_peer_path(dest_hex)
             request_paths_for_hash(dest_hex)
-            print(f"[connect] Connecting to {dest_hex[:16]}... (timeout {LINK_CONNECT_TIMEOUT_S}s)")
+            connect_timeout = FAILOVER_CONNECT_TIMEOUT_S if failover else LINK_CONNECT_TIMEOUT_S
+            print(f"[connect] Connecting to {dest_hex[:16]}... (timeout {connect_timeout}s)")
 
             link = None
             try:
                 link = RNS.Link(destination)
-                deadline = time.time() + LINK_CONNECT_TIMEOUT_S
+                deadline = time.time() + connect_timeout
                 while time.time() < deadline:
                     if self._interrupted():
                         print("[connect] Aborted (shutdown)")

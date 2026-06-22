@@ -1289,6 +1289,7 @@ class ChatWebServer:
             print(f"[serial] Could not disable runtime serial interface: {e}")
 
     async def _serial_watchdog_loop(self):
+        serial_detach_sent = False
         while True:
             await asyncio.sleep(10)
             if self._shutting_down:
@@ -1305,7 +1306,11 @@ class ChatWebServer:
                 if serial_port_status(port) == "missing":
                     unplugged = True
             if unplugged:
-                self._disable_rns_serial_interfaces()
+                if not serial_detach_sent:
+                    self._disable_rns_serial_interfaces()
+                    serial_detach_sent = True
+            else:
+                serial_detach_sent = False
 
     def _peer_connect_meta(self, peer_hash):
         peer_ip = None
@@ -1333,10 +1338,6 @@ class ChatWebServer:
                 continue
 
             peer_ip, peer_port = self._peer_connect_meta(peer)
-            try:
-                await self._run_blocking(self.messaging.announce)
-            except Exception:
-                pass
 
             result = await self._run_blocking(
                 self.messaging.reconnect_active_peer,

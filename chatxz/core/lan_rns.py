@@ -1,6 +1,7 @@
 """LAN helpers for RNS UDP announces (unicast supplements broadcast on Android/Wi-Fi)."""
 
 import socket
+import time
 
 import RNS
 
@@ -97,31 +98,142 @@ def request_path_for_hash(hash_hex):
         return False
 
 
-def request_paths_for_hash(hash_hex):
-    """Request a path to peer on all online RNS interfaces."""
+def interface_family(iface):
+    if iface is None:
+        return ""
+    name = type(iface).__name__.lower()
+    text = str(iface).lower()
+    if "serial" in name or "tty" in text:
+        return "serial"
+    if "autointerfacepeer" in name or "auto" in name:
+        return "lan"
+    if "udp" in name:
+        return "udp"
+    return "other"
+
+
+def interface_is_healthy(iface):
+    if iface is None:
+        return False
+    if getattr(iface, "detached", False):
+        return False
+    if hasattr(iface, "online") and not iface.online:
+        return False
+    owner = getattr(iface, "owner", None)
+    if owner is not None:
+        if getattr(owner, "detached", False):
+            return False
+        if hasattr(owner, "online") and not owner.online:
+            return False
+        spawned = getattr(owner, "spawned_interfaces", None)
+        addr = getattr(iface, "addr", None)
+        if isinstance(spawned, dict) and addr is not None and addr not in spawned:
+            return False
+    return True
+
+
+def iter_transport_interfaces():
+    for iface in getattr(RNS.Transport, "interfaces", []) or []:
+        yield iface
+        spawned = getattr(iface, "spawned_interfaces", None)
+        if isinstance(spawned, dict):
+            for child in spawned.values():
+                yield child
+
+
+def online_interfaces(family=None):
+    out = []
+    for iface in iter_transport_interfaces():
+        if not interface_is_healthy(iface):
+            continue
+        if family and interface_family(iface) != family:
+            continue
+        out.append(iface)
+    return out
+
+
+def peer_path_entry(hash_hex):
+    dest_bytes = _dest_bytes_for_hash(hash_hex)
+    if dest_bytes is None:
+        return None, None
+    try:
+        with RNS.Transport.path_table_lock:
+            entry = RNS.Transport.path_table.get(dest_bytes)
+        if entry and len(entry) > 5:
+            return entry, entry[5]
+    except Exception:
+        pass
+    return None, None
+
+
+def clear_peer_path(hash_hex):
     dest_bytes = _dest_bytes_for_hash(hash_hex)
     if dest_bytes is None:
         return False
     try:
-        RNS.Transport.request_path(dest_bytes)
-        for iface in getattr(RNS.Transport, "interfaces", []) or []:
-            if not getattr(iface, "online", True):
-                continue
+        with RNS.Transport.path_table_lock:
+            if dest_bytes in RNS.Transport.path_table:
+                RNS.Transport.path_table.pop(dest_bytes, None)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def scrub_peer_path(hash_hex):
+    """Drop cached path when it points at an offline interface."""
+    _, path_iface = peer_path_entry(hash_hex)
+    if path_iface and not interface_is_healthy(path_iface):
+        return clear_peer_path(hash_hex)
+    return False
+
+
+def detach_unhealthy_interfaces():
+    detached = 0
+    for iface in list(iter_transport_interfaces()):
+        if interface_is_healthy(iface):
+            continue
+        try:
+            if hasattr(iface, "detach"):
+                iface.detach()
+                detached += 1
+        except Exception:
+            pass
+    return detached
+
+
+def request_paths_for_hash(hash_hex, family=None):
+    """Request a path to peer on online RNS interfaces (optionally one family)."""
+    dest_bytes = _dest_bytes_for_hash(hash_hex)
+    if dest_bytes is None:
+        return False
+    try:
+        targets = online_interfaces(family=family)
+        if not targets:
+            RNS.Transport.request_path(dest_bytes)
+            return True
+        for iface in targets:
             try:
                 RNS.Transport.request_path(dest_bytes, on_interface=iface)
             except Exception:
                 pass
-            spawned = getattr(iface, "spawned_interfaces", None)
-            if isinstance(spawned, dict):
-                for child in spawned.values():
-                    if getattr(child, "online", True):
-                        try:
-                            RNS.Transport.request_path(dest_bytes, on_interface=child)
-                        except Exception:
-                            pass
         return True
     except Exception:
         return False
+
+
+def wait_for_peer_path(hash_hex, family=None, timeout_s=12.0, poll_s=0.25):
+    """Wait until path table lists peer on a healthy interface (optional family filter)."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        scrub_peer_path(hash_hex)
+        _, path_iface = peer_path_entry(hash_hex)
+        if path_iface and interface_is_healthy(path_iface):
+            fam = interface_family(path_iface)
+            if family is None or fam == family:
+                return path_iface
+        time.sleep(poll_s)
+    return None
 
 
 def udp_interface_targets():
