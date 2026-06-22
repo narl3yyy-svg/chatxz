@@ -213,6 +213,10 @@ body::before {
   text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace;
   margin-top: 1px;
 }
+.contact-preview {
+  font-size: 11px; color: var(--text3); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; margin-top: 3px;
+}
 .contact-badge {
   font-size: 9px; font-weight: 600; text-transform: uppercase;
   letter-spacing: 0.06em; padding: 3px 7px; border-radius: 99px;
@@ -663,7 +667,7 @@ body.modal-open #save-contact-dialog * { pointer-events: auto; user-select: auto
 #progress-bar .progress-fill {
   height: 100%;
   background: linear-gradient(90deg, #7c6aef, #58c4dc);
-  border-radius: 99px; transition: width 0.25s ease; width: 0%;
+  border-radius: 99px; width: 0%;
 }
 #progress-bar #progress-label {
   font-size: 10px; color: var(--text2); min-width: 0; flex: 1;
@@ -896,8 +900,8 @@ body.sidebar-open #sidebar-backdrop { display: block; }
       <div class="header-left">
         <button id="sidebar-toggle" onclick="event.stopPropagation(); toggleSidebar()" title="Toggle sidebar">☰</button>
         <div class="peer-info">
-          <span id="peer-name">No one connected</span>
-          <div class="status" id="peer-status">Select a peer to start chatting</div>
+          <span id="peer-name">No chat selected</span>
+          <div class="status" id="peer-status">Pick a contact or discovered peer</div>
         </div>
       </div>
       <div class="header-actions">
@@ -1002,8 +1006,11 @@ body.sidebar-open #sidebar-backdrop { display: block; }
 <script>
 let ws = null;
 let myHash = '';
-let connected = null;
+let viewingPeer = null;
+let linkPeer = null;
 let connectInFlight = false;
+let progressLastUpdate = 0;
+const LS_VIEWING_PEER = 'chatxz_viewing_peer';
 let recording = false;
 let mediaRecorder = null;
 let audioChunks = [];
@@ -1105,15 +1112,39 @@ function filterContacts(query) {
 }
 
 function showWelcome() {
-  connected = null;
+  viewingPeer = null;
+  linkPeer = null;
+  try { localStorage.removeItem(LS_VIEWING_PEER); } catch (_) {}
   document.getElementById('messages').innerHTML = '';
-  document.getElementById('peer-name').textContent = 'No one connected';
-  document.getElementById('peer-status').textContent = 'Disconnected';
+  document.getElementById('peer-name').textContent = 'No chat selected';
+  document.getElementById('peer-status').textContent = 'Pick a contact or discovered peer';
   document.getElementById('placeholder').style.display = 'flex';
   document.getElementById('messages').style.display = 'none';
   document.getElementById('input-area').style.display = 'none';
   document.getElementById('disconnect-btn').style.display = 'none';
   setLinkStatus('disconnected', 'Inactive');
+  renderContacts(allContacts);
+}
+
+function updatePeerHeader() {
+  if (!viewingPeer) return;
+  const name = contactNameFor(viewingPeer) || truncateHash(viewingPeer);
+  document.getElementById('peer-name').textContent = name;
+  const linked = linkPeer && peerKey(linkPeer) === peerKey(viewingPeer);
+  document.getElementById('peer-status').textContent = linked
+    ? 'Encrypted · Connected'
+    : 'Viewing history · not connected';
+  document.getElementById('disconnect-btn').style.display = linked ? 'block' : 'none';
+  setLinkStatus(linked ? 'connected' : 'disconnected', linked ? 'Active' : 'Inactive');
+  document.getElementById('input-area').style.display = linked ? 'block' : 'none';
+}
+
+function contactNameFor(hash) {
+  const key = peerKey(hash);
+  const c = allContacts.find(x => peerKey(x.hash) === key);
+  if (c && c.name) return c.name;
+  const d = (window._discoveredPeers || []).find(x => peerKey(x.hash) === key);
+  return d?.name || '';
 }
 
 function loadHistoryForPeer(peerHash) {
@@ -1147,14 +1178,15 @@ function fetchIdentity() {
         if (hint) hint.textContent = 'Tap Browse to open the Android folder picker, then Save to apply.';
       }
       if (d.connected) {
-        setLinkStatus('connected', 'Active');
-        if (!connected) {
-          setConnected(d.connected);
-        }
-      } else if (connected) {
-        setLinkStatus('disconnected', 'Inactive');
-        document.getElementById('peer-status').textContent = 'Disconnected · viewing history';
+        setLinkPeer(d.connected);
+        if (!viewingPeer) openChat(d.connected, false);
+        else updatePeerHeader();
+      } else {
+        linkPeer = null;
+        updatePeerHeader();
       }
+      const saved = localStorage.getItem(LS_VIEWING_PEER);
+      if (saved && !viewingPeer) openChat(saved, false);
     });
   pollQueue();
 }
@@ -1198,9 +1230,19 @@ function handleWSMessage(msg) {
     renderDiscovered(msg.data);
   } else if (msg.type === 'progress') {
     showProgress(msg.data);
+  } else if (msg.type === 'link_established') {
+    if (msg.data?.hash) {
+      setLinkPeer(msg.data.hash);
+      openChat(msg.data.hash, false);
+      toast('Peer connected');
+    }
+  } else if (msg.type === 'link_closed') {
+    linkPeer = null;
+    updatePeerHeader();
   } else if (msg.type === 'connect_ok') {
     if (connectInFlight) {
-      setConnected(msg.hash);
+      setLinkPeer(msg.hash);
+      openChat(msg.hash, false);
       toast('Connected!');
     }
   } else if (msg.type === 'connect_fail') {
@@ -1227,10 +1269,12 @@ function showProgress(data) {
   if (!bar) return;
 
   if (data.status === 'cancelled' || data.status === 'failed') {
+    progressLastUpdate = 0;
     hideProgress(data.status === 'cancelled' ? 'Transfer cancelled' : 'Transfer failed');
     return;
   }
   if (data.status === 'complete' || data.progress >= 100) {
+    progressLastUpdate = 0;
     bar.querySelector('.progress-fill').style.width = '100%';
     label.textContent = (data.file_name || 'File') + ' — complete';
     if (speedEl && data.speed) {
@@ -1240,6 +1284,10 @@ function showProgress(data) {
     setTimeout(hideProgress, 2500);
     return;
   }
+
+  const now = Date.now();
+  if (now - progressLastUpdate < 200 && (data.progress || 0) < 100) return;
+  progressLastUpdate = now;
 
   bar.classList.add('active');
   cancelBtn?.classList.add('visible');
@@ -1354,13 +1402,15 @@ function renderContacts(contacts) {
   contacts.forEach(c => {
     const div = document.createElement('div');
     const name = c.name || c.hash;
-    div.className = 'contact-item' + (peerKey(c.hash) === peerKey(connected) ? ' active' : '');
+    const active = peerKey(c.hash) === peerKey(viewingPeer);
+    const linked = peerKey(c.hash) === peerKey(linkPeer);
+    div.className = 'contact-item' + (active ? ' active' : '');
     div.innerHTML = `<div class="contact-avatar contact-avatar-saved">${name.charAt(0).toUpperCase()}</div>
       <div class="contact-info">
-        <div class="contact-name">${escapeHtml(name)}</div>
+        <div class="contact-name">${escapeHtml(name)}${linked ? ' <span style="color:var(--success);font-size:10px">●</span>' : ''}</div>
         <div class="contact-hash">${truncateHash(c.hash)}</div>
       </div>`;
-    div.onclick = () => connectTo(c.hash, c.ip, c.port);
+    div.onclick = () => openChat(c.hash, true);
     div.oncontextmenu = (e) => { e.preventDefault(); showActionPanel(e, c.hash); };
     el.appendChild(div);
   });
@@ -1370,21 +1420,23 @@ function renderContacts(contacts) {
 
 function renderDiscovered(peers) {
   console.log('[render] Discovered peers:', peers);
+  window._discoveredPeers = peers || [];
   const el = document.getElementById('discovered-list');
   el.innerHTML = '';
-  let connected = document.getElementById('peer-name').textContent !== 'No one connected';
+  let hasLink = !!linkPeer;
   let discovered = peers ? peers.filter(p => !p.connected) : [];
   let count = discovered.length;
-  document.getElementById('peer-count').textContent = count + ' peer' + (count !== 1 ? 's' : '') + (connected ? ' · 1 linked' : '');
+  document.getElementById('peer-count').textContent = count + ' peer' + (count !== 1 ? 's' : '') + (hasLink ? ' · 1 linked' : '');
   const dc = document.getElementById('discovered-count');
   if (dc) dc.textContent = count;
   if (!discovered || discovered.length === 0) {
     el.innerHTML = '<div class="empty-state small"><span class="empty-icon">📡</span><span>No peers on LAN yet</span><span class="empty-hint">Try Announce to broadcast</span></div>';
-    if (!connected) return;
+    if (!hasLink) return;
   }
   discovered.forEach(p => {
     const div = document.createElement('div');
-    div.className = 'contact-item';
+    const active = peerKey(p.hash) === peerKey(viewingPeer);
+    div.className = 'contact-item' + (active ? ' active' : '');
     const name = p.name || truncateHash(p.hash);
     div.innerHTML = `<div class="contact-avatar contact-avatar-lan">${escapeHtml(name).charAt(0).toUpperCase()}</div>
       <div class="contact-info">
@@ -1392,7 +1444,7 @@ function renderDiscovered(peers) {
         <div class="contact-hash">${truncateHash(p.hash)}${p.ip ? ' · ' + escapeHtml(p.ip) : ''}</div>
       </div>
       <span class="contact-badge lan">LAN</span>`;
-    div.onclick = () => connectTo(p.hash, p.ip, p.port);
+    div.onclick = () => openChat(p.hash, true);
     div.oncontextmenu = (e) => {
       e.preventDefault();
       showActionPanel(e, p.hash);
@@ -1487,7 +1539,8 @@ function connectTo(hash, ip, port) {
     body: JSON.stringify(body)
   }).then(r => r.json()).then(d => {
     if (d.status === 'ok') {
-      setConnected(d.hash || hash);
+      setLinkPeer(d.hash || hash);
+      openChat(d.hash || hash, false);
       toast('Connected!');
     } else {
       toast('Connection failed: ' + (d.error || 'unknown'));
@@ -1694,18 +1747,25 @@ function clearHistory() {
   });
 }
 
-function setConnected(hash) {
-  connected = hash.replace(/:/g, '');
-  document.getElementById('peer-name').textContent = truncateHash(hash);
-  document.getElementById('peer-status').textContent = 'Encrypted · Connected';
+function setLinkPeer(hash) {
+  linkPeer = (hash || '').replace(/:/g, '');
+  renderContacts(allContacts);
+  renderDiscovered(window._discoveredPeers || []);
+}
+
+function openChat(hash, tryConnect) {
+  viewingPeer = (hash || '').replace(/:/g, '');
+  try { localStorage.setItem(LS_VIEWING_PEER, viewingPeer); } catch (_) {}
   document.getElementById('placeholder').style.display = 'none';
   document.getElementById('messages').style.display = 'flex';
-  document.getElementById('input-area').style.display = 'block';
-  document.getElementById('disconnect-btn').style.display = 'block';
-  setLinkStatus('connected', 'Active');
+  updatePeerHeader();
   closeSidebar();
-  loadHistoryForPeer(hash);
-  if (!document.body.classList.contains('modal-open')) {
+  loadHistoryForPeer(viewingPeer);
+  renderContacts(allContacts);
+  renderDiscovered(window._discoveredPeers || []);
+  if (tryConnect && (!linkPeer || peerKey(linkPeer) !== peerKey(viewingPeer))) {
+    connectTo(hash);
+  } else if (!document.body.classList.contains('modal-open') && linkPeer && peerKey(linkPeer) === peerKey(viewingPeer)) {
     document.getElementById('msg-input').focus();
   }
 }
@@ -1720,6 +1780,10 @@ function sendMessage() {
   const input = document.getElementById('msg-input');
   const text = input.value.trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!linkPeer || !viewingPeer || peerKey(linkPeer) !== peerKey(viewingPeer)) {
+    toast('Connect to this peer first');
+    return;
+  }
   ws.send(JSON.stringify({type: 'send', text}));
   input.value = '';
   autoResize(input);
@@ -1738,12 +1802,19 @@ function autoResize(el) {
   el.style.height = Math.min(el.scrollHeight, 120) + 'px';
 }
 
-function fileUrl(path) {
+function fileUrl(path, data) {
+  if (data?.file_url) return data.file_url;
   if (!path) return '';
   var idx = path.indexOf('/received/');
-  if (idx >= 0) return '/api/file/received/' + encodeURIComponent(path.substring(idx + 10));
+  if (idx >= 0) {
+    const rel = path.substring(idx + 10).split('/').map(encodeURIComponent).join('/');
+    return '/api/file/received/' + rel;
+  }
   idx = path.indexOf('/sent/');
-  if (idx >= 0) return '/api/file/sent/' + encodeURIComponent(path.substring(idx + 6));
+  if (idx >= 0) {
+    const rel = path.substring(idx + 6).split('/').map(encodeURIComponent).join('/');
+    return '/api/file/sent/' + rel;
+  }
   return '';
 }
 
@@ -1761,14 +1832,12 @@ function peerKey(hash) {
 }
 
 function messageBelongsToPeer(data) {
-  if (!connected) return true;
-  const active = peerKey(connected);
-  const mp = peerKey(data.peer);
-  if (mp && (mp === active || mp === peerKey(myHash))) return true;
-  const sender = peerKey(data.sender);
-  if (sender === 'system') return false;
-  if (sender === peerKey(myHash)) return true;
-  return sender === active;
+  if (!viewingPeer) return false;
+  const active = peerKey(viewingPeer);
+  const chatPeer = peerKey(data.chat_peer || data.peer);
+  if (chatPeer && chatPeer === active) return true;
+  if (data.type === 'system' && chatPeer === active) return true;
+  return false;
 }
 
 function pickFiles() {
@@ -1794,7 +1863,7 @@ window.onChatxzFolderSendError = function(msg) {
 
 function addMessage(data) {
   const msgs = document.getElementById('messages');
-  if (msgs.style.display === 'none') return;
+  if (msgs.style.display === 'none' || !viewingPeer) return;
   if (!messageBelongsToPeer(data)) return;
 
   if (data.msg_id) {
@@ -1803,14 +1872,14 @@ function addMessage(data) {
       const statusEl = existing.querySelector('.receipt');
       if (statusEl) statusEl.textContent = receiptIcon(data.status || '');
       if (data.status === 'received' || data.status === 'read') {
-        data.type === 'text' && peerKey(data.sender) !== peerKey(myHash) && sendReadReceipt(data.msg_id);
+        data.type === 'text' && !data.outgoing && sendReadReceipt(data.msg_id);
       }
       return;
     }
   }
 
   const div = document.createElement('div');
-  const isSelf = peerKey(data.sender) === peerKey(myHash);
+  const isSelf = data.outgoing === true;
   const isSystem = data.sender === 'system' || data.type === 'system';
   div.className = 'msg msg-enter ' + (isSystem ? 'system' : isSelf ? 'self' : 'other');
   if (data.msg_id) div.setAttribute('data-msgid', data.msg_id);
@@ -1827,22 +1896,26 @@ function addMessage(data) {
   } else if (data.type === 'image') {
     html = `<div>📷 ${escapeHtml(data.file_name || 'Image')}</div>`;
     if (data.content) {
-      const url = fileUrl(data.content);
-      html += `<img class="msg-img" src="${url}" onclick="showImage(this.src)">`;
-      html += `<div style="margin-top:2px"><a href="${url}" download="${escapeHtml(data.file_name || 'image')}" style="color:var(--primary);font-size:11px">💾 Save image</a></div>`;
+      const url = fileUrl(data.content, data);
+      if (url) {
+        html += `<img class="msg-img" src="${url}" onclick="showImage(this.src)" onerror="this.style.display='none'">`;
+        html += `<div style="margin-top:2px"><a href="${url}" download="${escapeHtml(data.file_name || 'image')}" style="color:var(--primary);font-size:11px">💾 Save image</a></div>`;
+      } else {
+        html += `<div style="margin-top:4px;color:var(--text3);font-size:12px">Image saved locally</div>`;
+      }
     }
   } else if (data.type === 'voice') {
     div.classList.add('voice-msg');
     html = `<div>🎤 ${escapeHtml(data.file_name || 'Voice note')}</div>`;
     if (data.content) {
-      const url = fileUrl(data.content);
-      html += `<div class="voice-wrap"><audio class="voice-player" controls preload="metadata" src="${url}"></audio></div>`;
+      const url = fileUrl(data.content, data);
+      if (url) html += `<div class="voice-wrap"><audio class="voice-player" controls preload="metadata" src="${url}"></audio></div>`;
     }
   } else if (data.type === 'file') {
     const sz = data.file_size ? formatSize(data.file_size) : '';
     html = `<div class="file-info"><span class="file-icon">📄</span><span>${escapeHtml(data.file_name || 'File')} ${sz}</span></div>`;
     if (data.content) {
-      const url = fileUrl(data.content);
+      const url = fileUrl(data.content, data);
       html += `<div style="margin-top:4px"><a href="${url}" download="${escapeHtml(data.file_name || 'file')}" style="color:var(--primary);font-size:12px">Download</a></div>`;
     }
   } else if (data.type === 'system') {

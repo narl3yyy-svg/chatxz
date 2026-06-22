@@ -23,7 +23,7 @@ from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 CONFIG_DIR = get_config_dir()
 DATA_DIR = get_data_dir()
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
-APP_VERSION = "0.3.19"
+APP_VERSION = "0.3.20"
 
 def build_desktop_rns_config(broadcast_ip="255.255.255.255"):
     return f"""[reticulum]
@@ -220,10 +220,11 @@ def ensure_rns_ports_free(force=False):
     return False
 
 class ChatWebServer:
-    def __init__(self, host="127.0.0.1", port=8742, verbose=False, force=False, embedded=False):
+    def __init__(self, host="127.0.0.1", port=8742, verbose=False, debug=False, force=False, embedded=False):
         self.host = host
         self.port = port
         self.verbose = verbose
+        self.debug = debug
         self.force = force
         self.embedded = embedded
         self.config_dir = CONFIG_DIR
@@ -249,6 +250,8 @@ class ChatWebServer:
         self.rns_init_error = None
         self._announce_lock = threading.Lock()
         self._shutting_down = False
+        self._progress_last = {}
+        self._progress_throttle_ms = 250
 
     @staticmethod
     def _clean_hash(h):
@@ -316,19 +319,64 @@ class ChatWebServer:
     def _my_sender_hash(self):
         return self._clean_hash(self.destination_hash or self.identity_mgr.get_hex_hash())
 
+    def _received_dir(self):
+        settings = self.load_settings()
+        return os.path.normpath(settings.get("received_dir", os.path.join(self.config_dir, "received")))
+
+    def _sent_dir(self):
+        return os.path.normpath(os.path.join(self.config_dir, "sent"))
+
+    def _file_url(self, filepath):
+        if not filepath or not os.path.isfile(filepath):
+            return ""
+        full = os.path.normpath(filepath)
+        received = self._received_dir()
+        sent = self._sent_dir()
+        if full.startswith(received + os.sep) or full == received:
+            rel = os.path.relpath(full, received)
+            return "/api/file/received/" + rel.replace(os.sep, "/")
+        if full.startswith(sent + os.sep) or full == sent:
+            rel = os.path.relpath(full, sent)
+            return "/api/file/sent/" + rel.replace(os.sep, "/")
+        default_received = os.path.normpath(os.path.join(self.config_dir, "received"))
+        if full.startswith(default_received + os.sep):
+            rel = os.path.relpath(full, default_received)
+            return "/api/file/received/" + rel.replace(os.sep, "/")
+        return ""
+
+    def _enrich_message(self, entry, outgoing=None):
+        enriched = dict(entry)
+        if outgoing is not None:
+            enriched["outgoing"] = bool(outgoing)
+        elif "outgoing" not in enriched:
+            sender = self._peer_dest_hash(enriched.get("sender"))
+            enriched["outgoing"] = bool(sender and sender == self._my_sender_hash())
+        peer = enriched.get("chat_peer") or enriched.get("peer")
+        if not peer:
+            if enriched.get("outgoing"):
+                peer = enriched.get("peer") or self.active_peer
+            else:
+                peer = enriched.get("sender")
+        enriched["chat_peer"] = self._peer_dest_hash(peer)
+        if enriched.get("content") and enriched.get("type") in ("image", "file", "voice"):
+            url = self._file_url(enriched["content"])
+            if url:
+                enriched["file_url"] = url
+        return enriched
+
     def _history_for_peer(self, peer_hash, limit=500):
         peer = self._peer_dest_hash(peer_hash)
         if not peer:
             return self.message_history[-limit:]
         filtered = []
         for m in self.message_history:
-            mp = self._peer_dest_hash(m.get("peer"))
-            if mp and mp == peer:
-                filtered.append(m)
+            cp = self._peer_dest_hash(m.get("chat_peer") or m.get("peer"))
+            if cp and cp == peer:
+                filtered.append(self._enrich_message(m))
                 continue
             sender = self._peer_dest_hash(m.get("sender"))
-            if sender == peer:
-                filtered.append(m)
+            if sender == peer and m.get("sender") != "system":
+                filtered.append(self._enrich_message(m))
         return filtered[-limit:]
 
     def load_settings(self):
@@ -446,7 +494,12 @@ class ChatWebServer:
                 raise RuntimeError(msg)
             sys.exit(1)
 
-        loglevel = RNS.LOG_DEBUG if self.verbose else RNS.LOG_NOTICE
+        if self.debug:
+            loglevel = getattr(RNS, "LOG_EXTREME", RNS.LOG_DEBUG)
+        elif self.verbose:
+            loglevel = RNS.LOG_DEBUG
+        else:
+            loglevel = RNS.LOG_NOTICE
         try:
             RNS.Reticulum(self.config_dir, loglevel=loglevel)
         except OSError as e:
@@ -502,24 +555,34 @@ class ChatWebServer:
 
     def _on_message(self, chat_msg, sender_hash):
         if sender_hash and sender_hash != "system":
-            peer = self._peer_dest_hash(sender_hash)
-            sender = peer
+            chat_peer = self._peer_dest_hash(sender_hash)
+            sender = chat_peer
         else:
-            peer = self._peer_dest_hash(self.active_peer)
+            chat_peer = self._peer_dest_hash(self.active_peer)
             sender = "system"
-        entry = {
+        entry = self._enrich_message({
             "type": chat_msg.msg_type,
             "content": chat_msg.content,
             "sender": sender,
-            "peer": peer,
+            "peer": chat_peer,
+            "chat_peer": chat_peer,
             "timestamp": chat_msg.timestamp,
             "file_name": chat_msg.file_name,
             "file_size": chat_msg.file_size,
             "msg_id": chat_msg.msg_id,
             "status": "received" if sender_hash and sender_hash != "system" else "",
-        }
+        }, outgoing=False)
+        if chat_msg.msg_type == "system" and "Link closed" in (chat_msg.content or ""):
+            self.active_peer = None
+            if self.websockets and self._loop:
+                asyncio.run_coroutine_threadsafe(
+                    self._broadcast({"type": "link_closed", "data": {}}),
+                    self._loop
+                )
         self.message_history.append(entry)
         self._save_history()
+        if self.debug:
+            print(f"[chat] recv type={entry['type']} peer={entry.get('chat_peer', '')[:16]} msg_id={entry.get('msg_id', '')[:8]}")
         if self.websockets and self._loop:
             asyncio.run_coroutine_threadsafe(
                 self._broadcast({"type": "message", "data": entry}),
@@ -544,8 +607,25 @@ class ChatWebServer:
     def _on_link_established(self, peer_hash, link):
         self.active_peer = self._peer_dest_hash(peer_hash)
         print(f"[connect] Session active with {self.active_peer[:16]}")
+        if self.websockets and self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast({"type": "link_established", "data": {"hash": self.active_peer}}),
+                self._loop
+            )
 
     def _on_transfer_progress(self, data):
+        status = data.get("status", "active")
+        if status in ("complete", "cancelled", "failed"):
+            self._progress_last.pop(data.get("transfer_id") or data.get("file_name"), None)
+        else:
+            key = data.get("transfer_id") or data.get("file_name") or "default"
+            now = time.time()
+            last = self._progress_last.get(key, {})
+            pct = data.get("progress", 0)
+            if last and (now - last.get("ts", 0)) < (self._progress_throttle_ms / 1000.0):
+                if abs(pct - last.get("pct", -1)) < 1:
+                    return
+            self._progress_last[key] = {"ts": now, "pct": pct}
         if self.websockets and self._loop:
             asyncio.run_coroutine_threadsafe(
                 self._broadcast({"type": "progress", "data": data}),
@@ -963,23 +1043,25 @@ class ChatWebServer:
             msg_type = "image" if is_image else "file"
             my_hash = self._my_sender_hash()
             ts = time.time()
-            entry = {
+            chat_peer = self._peer_dest_hash(self.active_peer)
+            entry = self._enrich_message({
                 "type": msg_type,
                 "content": save_path,
                 "sender": my_hash,
-                "peer": self._peer_dest_hash(self.active_peer),
+                "peer": chat_peer,
+                "chat_peer": chat_peer,
                 "timestamp": ts,
                 "file_name": fname,
                 "file_size": size,
                 "msg_id": str(int(ts * 1000))[-12:],
                 "status": "sent",
-            }
+            }, outgoing=True)
             self.message_history.append(entry)
             self._save_history()
             await self._broadcast({"type": "message", "data": entry})
 
             result = self.messaging.send_file(save_path, msg_type,
-                                         progress_callback=self._make_progress_callback(fname, size))
+                                         progress_callback=self._make_progress_callback(fname, size, entry["msg_id"]))
             if result:
                 return web.json_response({"status": "ok", "name": fname, "size": size, "method": "resource"})
             return web.json_response({"error": "send failed"}, status=400)
@@ -1032,29 +1114,31 @@ class ChatWebServer:
                 return web.json_response({"status": "queued", "name": zip_name, "size": zsize})
             my_hash = self._my_sender_hash()
             ts = time.time()
-            entry = {
+            chat_peer = self._peer_dest_hash(self.active_peer)
+            entry = self._enrich_message({
                 "type": "file",
                 "content": zip_path,
                 "sender": my_hash,
-                "peer": self._peer_dest_hash(self.active_peer),
+                "peer": chat_peer,
+                "chat_peer": chat_peer,
                 "timestamp": ts,
                 "file_name": zip_name,
                 "file_size": zsize,
                 "msg_id": str(int(ts * 1000))[-12:],
                 "status": "sent",
-            }
+            }, outgoing=True)
             self.message_history.append(entry)
             self._save_history()
             await self._broadcast({"type": "message", "data": entry})
             result = self.messaging.send_file(zip_path, "file",
-                                        progress_callback=self._make_progress_callback(zip_name, zsize))
+                                        progress_callback=self._make_progress_callback(zip_name, zsize, entry["msg_id"]))
             if result:
                 return web.json_response({"status": "ok", "name": zip_name, "size": zsize})
             return web.json_response({"error": "send failed"}, status=400)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
-    def _make_progress_callback(self, fname, total_size):
+    def _make_progress_callback(self, fname, total_size, transfer_id=None):
         start = time.time()
         def callback(resource):
             try:
@@ -1071,6 +1155,7 @@ class ChatWebServer:
                     "speed": speed_str,
                     "direction": "send",
                     "status": "active",
+                    "transfer_id": transfer_id,
                 })
             except:
                 pass
@@ -1114,23 +1199,26 @@ class ChatWebServer:
 
             my_hash = self._my_sender_hash()
             ts = time.time()
-            entry = {
+            chat_peer = self._peer_dest_hash(self.active_peer)
+            voice_name = os.path.basename(voice_path)
+            entry = self._enrich_message({
                 "type": "voice",
                 "content": voice_path,
                 "sender": my_hash,
-                "peer": self._peer_dest_hash(self.active_peer),
+                "peer": chat_peer,
+                "chat_peer": chat_peer,
                 "timestamp": ts,
-                "file_name": os.path.basename(voice_path),
+                "file_name": voice_name,
                 "file_size": len(audio_bytes),
                 "msg_id": str(int(ts * 1000))[-12:],
                 "status": "sent",
-            }
+            }, outgoing=True)
             self.message_history.append(entry)
             self._save_history()
             await self._broadcast({"type": "message", "data": entry})
 
             result = self.messaging.send_file(voice_path, "voice",
-                                               progress_callback=self._make_progress_callback(os.path.basename(voice_path), len(audio_bytes)))
+                                               progress_callback=self._make_progress_callback(voice_name, len(audio_bytes), entry["msg_id"]))
             if result:
                 return web.json_response({"status": "ok"})
             return web.json_response({"error": "send failed"}, status=400)
@@ -1150,12 +1238,20 @@ class ChatWebServer:
 
     async def handle_serve_file(self, request):
         filepath = request.match_info["filepath"]
-        settings = self.load_settings()
-        received_dir = os.path.normpath(settings.get("received_dir", os.path.join(self.config_dir, "received")))
-        sent_dir = os.path.normpath(os.path.join(self.config_dir, "sent"))
-        full_path = os.path.normpath(os.path.join(self.config_dir, filepath))
+        received_dir = self._received_dir()
+        sent_dir = self._sent_dir()
+        if filepath.startswith("received/"):
+            full_path = os.path.normpath(os.path.join(received_dir, filepath[9:]))
+        elif filepath.startswith("sent/"):
+            full_path = os.path.normpath(os.path.join(sent_dir, filepath[5:]))
+        else:
+            full_path = os.path.normpath(os.path.join(self.config_dir, filepath))
 
-        if not (full_path.startswith(received_dir) or full_path.startswith(sent_dir)):
+        allowed = (
+            full_path.startswith(received_dir + os.sep) or full_path == received_dir or
+            full_path.startswith(sent_dir + os.sep) or full_path == sent_dir
+        )
+        if not allowed:
             return web.Response(text="Forbidden", status=403)
         if not os.path.exists(full_path) or not os.path.isfile(full_path):
             return web.Response(text="Not found: " + full_path, status=404)
@@ -1205,7 +1301,7 @@ class ChatWebServer:
         peer = request.query.get("peer", "")
         if peer:
             return web.json_response(self._history_for_peer(peer, limit))
-        return web.json_response(self.message_history[-limit:])
+        return web.json_response([self._enrich_message(m) for m in self.message_history[-limit:]])
 
     async def handle_websocket(self, request):
         ws = web.WebSocketResponse()
@@ -1273,17 +1369,21 @@ class ChatWebServer:
                     result = self.messaging.send_message(text, receipt_callback=on_receipt)
                     if result:
                         my_hash = self._my_sender_hash()
-                        entry = {
+                        chat_peer = self._peer_dest_hash(self.active_peer)
+                        entry = self._enrich_message({
                             "type": result.msg_type,
                             "content": result.content,
                             "sender": my_hash,
-                            "peer": self._peer_dest_hash(self.active_peer),
+                            "peer": chat_peer,
+                            "chat_peer": chat_peer,
                             "timestamp": result.timestamp,
                             "msg_id": result.msg_id,
                             "status": "sent",
-                        }
+                        }, outgoing=True)
                         self.message_history.append(entry)
                         self._save_history()
+                        if self.debug:
+                            print(f"[chat] send type={entry['type']} peer={chat_peer[:16]} msg_id={entry['msg_id'][:8]}")
                         await self._broadcast({"type": "message", "data": entry})
                 else:
                     self.messaging.enqueue("text", text)
@@ -1445,11 +1545,13 @@ def main():
     parser.add_argument("--port", type=int, default=8742, help="Port")
     parser.add_argument("--share", action="store_true", help="Listen on 0.0.0.0 (accessible on LAN)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show RNS debug logs")
+    parser.add_argument("--debug", "-d", action="store_true",
+                        help="Extreme RNS logging + chatxz trace logs (very noisy)")
     parser.add_argument("--force", "-f", action="store_true",
                         help="Stop any existing chatxz server before starting")
     args = parser.parse_args()
     host = "0.0.0.0" if args.share else args.host
-    server = ChatWebServer(host=host, port=args.port, verbose=args.verbose, force=args.force)
+    server = ChatWebServer(host=host, port=args.port, verbose=args.verbose, debug=args.debug, force=args.force)
     server.run()
 
 

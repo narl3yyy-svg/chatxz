@@ -2,49 +2,45 @@
 
 Decentralized peer-to-peer messaging over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no central servers — your identity is a local cryptographic keypair.
 
-Send text, emoji, files and folders of any size, inline images, and voice notes. Everything is encrypted end-to-end by Reticulum.
+Send text, emoji, files and folders of any size, inline images, and voice notes. Everything is encrypted end-to-end by Reticulum over **RNS Links and Resources only** (no HTTP file relay between peers).
 
 ## What It Does
 
 chatxz is a self-hosted chat application with a modern web UI and a CLI. You run a local server that speaks Reticulum on your network (WiFi, LAN, packet radio, LoRa, or the internet). Peers connect directly using identity hashes — no signup, no cloud relay.
 
-The web interface handles day-to-day use: connect to friends, send messages, transfer large files with live progress, manage contacts, and configure storage. The CLI is for scripting, headless use, and quick one-off sends.
+The web interface handles day-to-day use: per-peer chats, send messages, transfer large files with live progress, manage contacts, and configure storage. The CLI is for scripting, headless use, and quick one-off sends.
+
+**HTTP (port 8742) is only the local web UI** — it serves the browser interface and previews files saved on your machine. Peer-to-peer chat and file transfer always travel over encrypted RNS (UDP 4242).
 
 ## Features
 
 ### Messaging
 - **End-to-end encrypted** text, emoji, and system messages via Reticulum Links
+- **Per-peer chats** — each contact has its own conversation thread and history
+- **Clear left/right alignment** — your messages on the right, received on the left
 - **Delivery receipts** — sending, sent, delivered, read indicators
 - **Copy button** — hover any text/emoji message to copy
 - **Delete individual messages** — hover and click 🗑 to remove a message from history
-- **Chat history** — persisted locally with configurable retention (1d / 1w / 1m / 6m / 12m / never / on restart / on close)
-- **Clear all history** — one-click wipe from Settings
+- **Chat history** — persisted locally per peer with configurable retention
 - **Offline queue** — messages queued when peer is disconnected, sent on reconnect
-- **Long text** — messages exceeding link MTU are sent as file resources and reconstructed on receive
+- **Long text** — messages exceeding link MTU are sent as RNS file resources
 
 ### Files & Media
-- **Unlimited file sizes** — large files use direct HTTP transfer (fast, resumable progress); RNS Resources as fallback
-- **Real-time transfer speed** — live MB/s shown in the bottom dock during send and receive
-- **Cancel transfers** — stop an in-progress send or receive from the bottom dock
+- **Unlimited file sizes** — all transfers use RNS Resources (segmented, encrypted)
+- **Real-time transfer speed** — live MB/s in the bottom dock during send/receive
+- **Cancel transfers** — stops the RNS resource and clears the progress bar
 - **Folder upload** — entire directories compressed to zip and sent
 - **Drag & drop** and **clipboard paste** for files and screenshots
-- **Inline image preview** — click to enlarge, save button
-- **Voice notes** — record from browser mic (MediaRecorder) and send
-- **Configurable received-files directory** — choose save location with native folder picker (Linux)
+- **Inline image preview** on both sender and receiver (click to enlarge)
+- **Voice notes** — record from browser mic and send
+- **Configurable received-files directory** — custom save location with native folder picker
 
 ### Network & Peers
-- **LAN discovery** — auto-discovers peers broadcasting on the same network
-- **Manual announce** — you choose when to broadcast presence
-- **Contacts** — save peers with display names; right-click sidebar for actions
+- **LAN discovery** — auto-discovers peers via RNS announces + UDP beacon (8743)
+- **Manual announce** — broadcast presence when you choose
+- **Contacts** — save peers with display names; click to open their chat
+- **Incoming connections** — when a peer connects to you, the UI updates automatically
 - **Connection status** — WebSocket and Reticulum link indicators in the bottom dock
-
-### System & Settings
-- **Modern dark UI** — glass panels, bottom status dock, card-based settings
-- **Average CPU temperature** — single reading averaged across all cores (hwmon → thermal zones → sensors)
-- **CPU usage** — live percentage in the bottom dock
-- **Regenerate identity** — create a new keypair from Settings
-- **Restart server** — restart from the GUI
-- **Off-grid capable** — works over LoRa, packet radio, WiFi, or the internet
 
 ### Platforms
 | Platform | Status |
@@ -52,195 +48,148 @@ The web interface handles day-to-day use: connect to friends, send messages, tra
 | Arch Linux | Supported |
 | Ubuntu / Debian | Supported |
 | Android (APK) | Supported (WebView + embedded Python) |
-| macOS | Planned |
-| Windows | Planned |
 
 ## Quick Start (Linux)
 
-### Clone & Install
-
 ```bash
 git clone https://github.com/narl3yyy-svg/chatzx.git
-cd chatzx
-
-# Arch Linux
-bash scripts/install-arch.sh
-
-# Ubuntu / Debian
-bash scripts/install-debian.sh
-
-# Or install manually
-pip install rns aiohttp
-pip install .
-```
-
-### Run
-
-```bash
-# Web UI (development, verbose RNS logging)
+cd chatxz
+bash scripts/install-arch.sh   # or scripts/install-debian.sh
 ./run.sh web --share --verbose
-
-# Web UI (production, LAN accessible)
-chatzx-web --share
-
-# CLI
-./run.sh cli
-# or
-chatzx
 ```
 
 Open **http://localhost:8742** (or your LAN IP with `--share`).
 
 ## Web Interface Guide
 
-### Connecting to a Peer
+### Per-peer chats
+
+1. Click a **contact** or **discovered peer** in the sidebar to open their chat.
+2. History for that peer loads automatically.
+3. If not connected yet, the app connects in the background (or use **Connect** panel).
+4. **Your messages** appear on the **right**; **received** messages on the **left**.
+5. When a peer connects **to you** (incoming link), the chat opens automatically.
+
+### Connecting
 
 1. Share your **identity hash** from the sidebar (click to copy).
-2. Enter your friend's hash in the Connect panel.
-3. Click a contact or discovered peer to connect — green **Link: active** when ready.
-4. Click **Announce** to broadcast on LAN; discovered peers appear in the sidebar.
-5. Right-click any contact for Connect, Save Contact, or Delete.
+2. Peers must **Announce** (📡) so RNS learns their identity.
+3. Click a discovered peer or paste a hash in **Connect**.
+4. Green **Link: Active** in the bottom dock when the encrypted RNS link is up.
 
-### Session & Startup Behavior
+### Sending files
 
-- **Server restart** (including `git pull` + restart, or Restart Server from Settings) always starts **disconnected**. The main window shows the **Welcome to chatxz** screen — no chat messages until you connect to a peer.
-- **While the server stays running**, your active peer and chat stay visible. Refreshing the browser tab reconnects to the live session if the Reticulum link is still up.
-- **Chat history is saved locally** per peer. When you connect, messages for that peer load automatically. Disconnecting returns to the welcome screen without deleting history.
+- **📎** attach files, **📁** send folders (zipped), drag & drop, or paste screenshots
+- Progress bar shows filename, %, size, and speed
+- **Cancel** stops the RNS transfer
 
-### Sending Files
-
-- **Single / multiple files** — 📎 button, or drag & drop onto the page
-- **Folder** — 📁 button (compressed to zip)
-- **Progress** — bottom dock shows filename, percentage, size, and **live transfer speed**
-- **Cancel** — Cancel button appears during active transfers
-
-### Message Actions
-
-- **Copy** — hover a text/emoji message, click 📋
-- **Delete** — hover any message, click 🗑 (removes from local history)
-- **Receipts** — 🕐 sending · ✓ sent · ✓✓ delivered · 👁 read
-
-### Settings (⚙ in sidebar header)
+### Settings
 
 | Setting | Description |
 |---------|-------------|
 | Display Name | Shown in LAN announces |
 | History Retention | Auto-delete by time or on restart/close |
-| Clear History Now | Delete all messages immediately |
-| Save Received Files To | Incoming file directory (with browse button on Linux) |
-| Regenerate Identity | New keypair (old key deleted, no backup) |
+| Save Received Files To | Incoming file directory |
+| Regenerate Identity | New keypair (peers must reconnect) |
 | Restart Server | Restart from the GUI |
 
-### Bottom Dock
+## Debugging & Logging
 
-| Indicator | Meaning |
-|-----------|---------|
-| 🌡 | Average CPU temperature across cores |
-| ⚡ | CPU usage % |
-| WS dot | WebSocket to local server (green = connected) |
-| Link dot | Reticulum link to peer (green = active) |
-| Center bar | File transfer progress + live speed |
-| Cancel | Stop active transfer |
-
-## CLI Usage
+Use these flags when diagnosing issues:
 
 ```bash
-chatzx                              # Interactive mode
-chatzx --connect <hash> --send "Hi" # One-off message
-chatzx --connect <hash> --file x.png
-chatzx --connect <hash> --voice     # Record and send
-chatzx --daemon                     # Listen only
+# Normal — RNS notice-level logs
+./run.sh web --share
+
+# Verbose — RNS debug (shows per-segment resource prep for large files)
+./run.sh web --share --verbose
+
+# Debug — extreme RNS logging + chatxz send/recv trace lines
+./run.sh web --share --debug
 ```
 
-Interactive commands: `/connect`, `/send`, `/file`, `/voice`, `/play`, `/contacts`, `/add`, `/myid`, `/help`, `/quit`
+**Additional visibility:**
+
+1. Edit `~/.config/chatxz/config` and set `loglevel = 7` under `[logging]` for maximum RNS detail (extreme).
+2. Check `http://localhost:8742/api/network-status` — RNS interfaces, link state, discovered peers.
+3. Check `http://localhost:8742/api/debug` — beacon counters, active peer, message count.
+4. Browser devtools console shows WebSocket events (`[ws] Message type: ...`).
+
+**Firewall (Linux desktop):** allow UDP **4242** (RNS chat) and **8743** (discovery beacon):
+
+```bash
+sudo ufw allow 4242/udp
+sudo ufw allow 8743/udp
+```
+
+HTTP **8742** is only needed for the local web UI on each machine.
 
 ## Architecture
 
 ```
-Web UI (browser)  ←WebSocket/HTTP→  Local Server (aiohttp)
+Web UI (browser)  ←WebSocket/HTTP→  Local Server (aiohttp, UI only)
                                          ↓
                                    MessagingBackend
                                          ↓
-                              Reticulum (RNS) — encrypted links
+                              Reticulum (RNS) — encrypted links + resources
                                          ↓
                                     Remote Peer
 ```
 
-### File Transfer Strategy
+### File Transfer
 
-1. **Direct HTTP** (primary for files/images) — sender offers a token over RNS; receiver downloads via `http://peer:port/api/direct-transfer/{token}`. Handles large files without RNS segment timeouts.
-2. **RNS Resources** (fallback) — reliable transfer for smaller payloads and when direct HTTP is unavailable.
-3. Progress and speed are broadcast over WebSocket to all connected browser tabs.
+All peer-to-peer files (images, folders, voice, large zips) use **RNS Resources** over the encrypted link. Received files are saved locally and served back to the browser via `/api/file/...` for preview only.
 
 ### Data Storage
 
 ```
 ~/.config/chatxz/
-  config              # RNS configuration (auto-generated)
+  config              # RNS configuration
   settings.json       # Display name, retention, received_dir
-  history.json        # Chat messages (with msg_id for delete)
+  history.json        # Chat messages (per-peer via chat_peer field)
   queue.json          # Offline message queue
   identities/identity # Ed25519/X25519 keypair
-  contacts/           # Saved contacts (hash → name)
+  contacts/           # Saved contacts
   received/           # Default incoming files
   sent/               # Copies of sent files
 ```
 
 ## Android APK
 
-Download `chatxz.apk` from [Releases](https://github.com/narl3yyy-svg/chatzx/releases).
-
-The APK bundles Python 3.13, RNS, cryptography, aiohttp, and the full chatxz web server in a WebView. On launch it starts the same `ChatWebServer` used on desktop (Reticulum + WebSocket + file transfer), with Android-specific storage paths and RNS config.
-
-On phone-sized screens the chat area fills the display by default. Tap **☰** in the header to open the sidebar (contacts, connect, settings). The sidebar stays open while you use it and only closes when you connect to a peer, tap outside, or press the Android back button.
-
-**LAN discovery:** chatxz uses Reticulum UDP (**4242**), a LAN beacon (**8743**), and an HTTP subnet scan on **Announce** (each device probes `192.168.x.1–254`). Android binds the server on `0.0.0.0` so other devices can reach it. Check **Settings → Network** for interface and beacon counters.
-
-If devices never appear under **Discovered**:
-- Confirm all devices are on the **same Wi‑Fi subnet** (not guest/isolated VLAN)
-- Disable **AP/client isolation** on your router if enabled
-- On Linux desktops, allow UDP **4242** and **8743** through the firewall (`ufw allow 4242/udp && ufw allow 8743/udp`)
-- Check `http://localhost:8742/api/debug` — `lan_beacon_received` should increase when another device announces
-
-**Received files folder on Android:** Settings → Received Files Folder → **Browse** opens the native Android folder picker. Pick a folder, then **Save**.
-
-### Build locally
+Download from [Releases](https://github.com/narl3yyy-svg/chatzx/releases). Push a `v*` tag to trigger the GitHub Actions APK build.
 
 ```bash
-# Sync latest Python sources into the Android bundle
 bash scripts/sync-android.sh
-
 cd android && ./gradlew assembleDebug
-# Output: android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Requires Android SDK 34, JDK 17, Gradle 8.x. CPU: arm64-v8a.
+## CLI Usage
 
-GitHub Actions runs `scripts/sync-android.sh` before each APK build. Push a tag like `v0.3.0` or use **workflow_dispatch** to trigger a build.
+```bash
+chatxz --connect <hash> --send "Hi"
+chatxz --connect <hash> --file x.png
+chatxz --daemon
+```
 
 ## Development
 
 ```bash
-./run.sh web --share --verbose   # Verbose RNS logging
+./run.sh web --share --verbose   # RNS debug
+./run.sh web --share --debug     # RNS extreme + chat trace
 ```
 
-### Project Layout
+## Changelog (recent)
 
-```
-chatxz/
-  app.py              # CLI entry point
-  core/
-    messaging.py      # RNS links, file transfer, queue
-    identity.py       # Keypair management
-    discovery.py      # LAN peer discovery
-    voice.py          # Voice record/playback
-  web/
-    server.py         # aiohttp server + API + WebSocket
-    static/index.html # Single-file web UI
-  utils/
-    helpers.py        # Paths, format_size, format_speed
-    system.py         # CPU temp & usage metrics
-```
+### v0.3.20
+- Per-peer messenger UI with correct sent/received alignment (`outgoing` flag)
+- Incoming RNS links now update the web UI automatically (fixes Ubuntu→Arch)
+- Image preview on receiver via fixed file URLs and custom `received_dir`
+- Transfer cancel actually stops RNS resources; progress bar throttling
+- Pure RNS file transfer docs (removed HTTP LAN relay references)
+- `--debug` flag for maximum runtime visibility
+
+### v0.3.19
+- Message filtering and session dedup fixes
 
 ## License
 

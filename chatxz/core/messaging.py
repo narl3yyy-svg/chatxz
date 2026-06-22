@@ -86,7 +86,10 @@ class MessagingBackend:
         self._receipt_callbacks = {}
         self._active_resources = {}
         self._cancel_events = {}
+        self._cancelled_transfers = set()
         self._current_transfer_id = None
+        self._progress_last = {}
+        self._progress_throttle_s = 0.25
         self.my_dest_hash = None
         self.identity_to_dest = {}
         self.dest_to_identity = {}
@@ -463,6 +466,18 @@ class MessagingBackend:
         return callback
 
     def _emit_progress(self, file_name, progress, total_size=0, speed="", direction="receive", transfer_id=None, status="active"):
+        if transfer_id and transfer_id in self._cancelled_transfers and status == "active":
+            return
+        if status in ("complete", "cancelled", "failed"):
+            self._progress_last.pop(transfer_id or file_name, None)
+        elif status == "active":
+            key = transfer_id or file_name or "default"
+            now = time.time()
+            last = self._progress_last.get(key, {})
+            if last and (now - last.get("ts", 0)) < self._progress_throttle_s:
+                if abs(progress - last.get("pct", -1)) < 1:
+                    return
+            self._progress_last[key] = {"ts": now, "pct": progress}
         if self.on_progress:
             try:
                 self.on_progress({
@@ -480,22 +495,37 @@ class MessagingBackend:
     def cancel_transfer(self, transfer_id=None):
         cancelled = False
         tid = transfer_id or self._current_transfer_id
+        if tid:
+            self._cancelled_transfers.add(tid)
         if tid and tid in self._cancel_events:
             self._cancel_events[tid].set()
             cancelled = True
-        for rid, resource in list(self._active_resources.items()):
+        targets = list(self._active_resources.items())
+        if tid:
+            targets = [(rid, res) for rid, res in targets if rid == tid]
+        for rid, resource in targets:
             try:
                 if hasattr(resource, "cancel"):
                     resource.cancel()
                 elif hasattr(resource, "close"):
                     resource.close()
                 cancelled = True
+                print(f"[transfer] Cancelled resource {rid}")
             except Exception as e:
                 print(f"[transfer] cancel resource {rid}: {e}")
             self._active_resources.pop(rid, None)
+            self._cancel_events.pop(rid, None)
+        if not targets and tid:
+            cancelled = True
         if cancelled:
-            self._emit_progress("", 0, status="cancelled", direction="send", transfer_id=tid)
-        self._current_transfer_id = None
+            fname = ""
+            for entry in reversed(self.message_queue):
+                if entry.get("msg_id") == tid:
+                    fname = entry.get("file_name", "")
+                    break
+            self._emit_progress(fname, 0, status="cancelled", direction="send", transfer_id=tid)
+        if self._current_transfer_id == tid:
+            self._current_transfer_id = None
         return cancelled
 
     def _session_occupied(self, peer_hash):
@@ -678,8 +708,17 @@ class MessagingBackend:
                 packet = RNS.Packet(link, chat_msg.to_json().encode("utf-8"))
                 packet.send()
 
+                resource_holder = {"resource": None}
+
                 def wrapped_progress(resource):
-                    if cancel_ev.is_set():
+                    if cancel_ev.is_set() or transfer_id in self._cancelled_transfers:
+                        try:
+                            if hasattr(resource, "cancel"):
+                                resource.cancel()
+                            elif hasattr(resource, "close"):
+                                resource.close()
+                        except Exception:
+                            pass
                         return
                     if progress_callback:
                         progress_callback(resource)
@@ -694,6 +733,7 @@ class MessagingBackend:
                              callback=self._resource_send_callback(fname, transfer_id, fsize),
                              progress_callback=wrapped_progress,
                              auto_compress=False)
+                resource_holder["resource"] = resource
                 self._active_resources[transfer_id] = resource
                 print(f"[messaging] Sent file: {fname} ({fsize} bytes)")
                 self._sent_messages[chat_msg.msg_id] = chat_msg
@@ -707,9 +747,16 @@ class MessagingBackend:
 
     def _resource_send_callback(self, fname, transfer_id=None, fsize=0):
         def callback(resource):
-            print(f"[messaging] File transfer complete: {fname}")
             self._active_resources.pop(transfer_id, None)
             self._cancel_events.pop(transfer_id, None)
+            if transfer_id in self._cancelled_transfers:
+                self._cancelled_transfers.discard(transfer_id)
+                print(f"[messaging] File transfer cancelled: {fname}")
+                self._emit_progress(fname, 0, fsize, status="cancelled", direction="send", transfer_id=transfer_id)
+                if self._current_transfer_id == transfer_id:
+                    self._current_transfer_id = None
+                return
+            print(f"[messaging] File transfer complete: {fname}")
             status = "complete"
             try:
                 if resource.status != RNS.Resource.COMPLETE:
