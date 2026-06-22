@@ -1952,6 +1952,7 @@ function messageBelongsToPeer(data) {
   const active = peerKey(viewingPeer);
   const chatPeer = peerKey(data.chat_peer || data.peer);
   if (chatPeer && chatPeer === active) return true;
+  if (linkPeer && !data.outgoing && peerKey(linkPeer) === active) return true;
   if (data.type === 'system' && chatPeer === active) return true;
   return false;
 }

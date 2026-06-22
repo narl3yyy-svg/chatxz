@@ -185,6 +185,11 @@ chatxz --daemon
 
 ## Changelog (recent)
 
+### v0.3.25
+- Fix Ubuntu→Arch (incoming) messages not showing in web UI — correct peer hash via discovery + link cache
+- Outgoing connects call RNS `identify()` so receivers learn the remote identity
+- UI shows incoming messages for the active linked peer even if chat_peer was mis-tagged
+
 ### v0.3.24
 - Fast connect: single ~4s attempt, no 60s retry loop
 - **Reset network** button + `POST /api/network/reset` — clears peers, disconnects link, zeros beacon counters

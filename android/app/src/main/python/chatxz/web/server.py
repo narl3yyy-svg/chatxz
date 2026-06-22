@@ -24,7 +24,7 @@ from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 CONFIG_DIR = get_config_dir()
 DATA_DIR = get_data_dir()
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
-APP_VERSION = "0.3.24"
+APP_VERSION = "0.3.25"
 NETWORK_STATS_AUTO_RESET_SEC = 7 * 86400
 
 def build_desktop_rns_config(broadcast_ip="255.255.255.255"):
@@ -321,19 +321,26 @@ class ChatWebServer:
     def _my_sender_hash(self):
         return self._clean_hash(self.destination_hash or self.identity_mgr.get_hex_hash())
 
-    def _resolve_incoming_peer(self, ident_hex=None, computed_dest=None, fallback=None, link=None):
+    def _is_self_hash(self, h):
         from chatxz.core.discovery import normalize_hash
+        clean = normalize_hash(h)
+        if not clean:
+            return False
         my_ident = normalize_hash(self.identity_mgr.get_hex_hash() if self.identity_mgr else "")
         my_dest = normalize_hash(self.destination_hash or "")
+        return clean in (my_dest, my_ident)
 
-        if computed_dest and computed_dest not in (my_dest, my_ident):
+    def _resolve_incoming_peer(self, ident_hex=None, computed_dest=None, fallback=None, link=None):
+        from chatxz.core.discovery import normalize_hash
+
+        if computed_dest and not self._is_self_hash(computed_dest):
             return computed_dest
 
         clean_fallback = normalize_hash(fallback)
-        if clean_fallback and clean_fallback not in (my_dest, my_ident):
+        if clean_fallback and not self._is_self_hash(clean_fallback):
             return clean_fallback
 
-        if ident_hex and ident_hex not in (my_dest, my_ident) and self.discovery:
+        if ident_hex and not self._is_self_hash(ident_hex) and self.discovery:
             for p in self.discovery.get_peers():
                 ph = normalize_hash(p.get("hash"))
                 ih = normalize_hash(p.get("identity_hash"))
@@ -341,13 +348,19 @@ class ChatWebServer:
                     return ph or ident_hex
 
         if self.discovery:
-            rns_peers = [p for p in self.discovery.get_peers() if p.get("via") == "rns"]
-            if len(rns_peers) == 1:
-                return normalize_hash(rns_peers[0].get("hash"))
+            candidates = []
+            for p in self.discovery.get_peers():
+                ph = normalize_hash(p.get("hash"))
+                if not ph or self._is_self_hash(ph):
+                    continue
+                candidates.append((p.get("last_seen", 0), ph, p.get("via")))
+            if candidates:
+                candidates.sort(key=lambda row: (10 if row[2] == "rns" else 0, row[0]), reverse=True)
+                return candidates[0][1]
 
-        if ident_hex and ident_hex != my_ident:
+        if ident_hex and not self._is_self_hash(ident_hex):
             return computed_dest or ident_hex
-        return computed_dest or clean_fallback or ""
+        return ""
 
     def _resolve_peer_hash(self, peer_hash):
         clean = self._clean_hash(peer_hash).lower()
@@ -419,6 +432,21 @@ class ChatWebServer:
                 enriched["file_url"] = url
         return enriched
 
+    def _session_peer_at(self, timestamp):
+        session_peer = None
+        for m in self.message_history:
+            ts = m.get("timestamp", 0)
+            if ts > timestamp:
+                break
+            if m.get("type") != "system":
+                continue
+            content = m.get("content") or ""
+            if content.startswith("Link established with "):
+                session_peer = self._peer_dest_hash(m.get("chat_peer") or content.split("with ", 1)[-1].strip())
+            elif "Link closed" in content:
+                session_peer = None
+        return session_peer
+
     def _history_for_peer(self, peer_hash, limit=500):
         peer = self._peer_dest_hash(peer_hash)
         if not peer:
@@ -432,6 +460,17 @@ class ChatWebServer:
             sender = self._peer_dest_hash(m.get("sender"))
             if sender == peer and m.get("sender") != "system":
                 filtered.append(self._enrich_message(m))
+                continue
+            if not m.get("outgoing") and m.get("sender") != "system":
+                if self._is_self_hash(cp) or self._is_self_hash(sender):
+                    session_peer = self._session_peer_at(m.get("timestamp", 0))
+                    if session_peer and session_peer == peer:
+                        repaired = dict(m)
+                        repaired["chat_peer"] = peer
+                        repaired["peer"] = peer
+                        if self._is_self_hash(sender):
+                            repaired["sender"] = peer
+                        filtered.append(self._enrich_message(repaired, outgoing=False))
         return filtered[-limit:]
 
     def load_settings(self):
@@ -614,7 +653,11 @@ class ChatWebServer:
 
     def _on_message(self, chat_msg, sender_hash):
         if sender_hash and sender_hash != "system":
-            chat_peer = self._peer_dest_hash(sender_hash)
+            resolved = self._peer_dest_hash(sender_hash)
+            if self._is_self_hash(resolved) and self.active_peer and not self._is_self_hash(self.active_peer):
+                chat_peer = self._peer_dest_hash(self.active_peer)
+            else:
+                chat_peer = resolved
             sender = chat_peer
         else:
             chat_peer = self._peer_dest_hash(self.active_peer)
@@ -670,7 +713,12 @@ class ChatWebServer:
             )
 
     def _on_link_established(self, peer_hash, link):
-        self.active_peer = self._peer_dest_hash(peer_hash)
+        resolved = self._peer_dest_hash(peer_hash)
+        if self._is_self_hash(resolved) and self.discovery:
+            fixed = self._resolve_incoming_peer(link=link)
+            if fixed and not self._is_self_hash(fixed):
+                resolved = fixed
+        self.active_peer = resolved
         print(f"[connect] Session active with {self.active_peer}")
         if self.websockets and self._loop:
             asyncio.run_coroutine_threadsafe(

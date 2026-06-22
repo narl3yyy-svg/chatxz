@@ -99,6 +99,39 @@ class MessagingBackend:
         self.dest_to_identity = {}
         self._send_link = None
         self.peer_resolver = peer_resolver
+        self._link_peer_hashes = {}
+
+    def _is_self_hash(self, h):
+        clean = normalize_hash(h)
+        if not clean:
+            return False
+        if self.my_dest_hash and clean == normalize_hash(self.my_dest_hash):
+            return True
+        try:
+            if self.identity and clean == normalize_hash(RNS.hexrep(self.identity.hash)):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _cache_link_peer(self, link, peer_hash):
+        if link and peer_hash and peer_hash != "unknown" and not self._is_self_hash(peer_hash):
+            self._link_peer_hashes[link.link_id] = normalize_hash(peer_hash)
+
+    def _peer_for_link(self, link, fallback=None):
+        cached = self._link_peer_hashes.get(link.link_id) if link else None
+        if cached and not self._is_self_hash(cached):
+            return self.dest_hash_for(cached)
+        resolved = self._resolve_remote_peer(link, fallback=fallback)
+        if self._is_self_hash(resolved):
+            if self.active_peer_hash and not self._is_self_hash(self.active_peer_hash):
+                return self.active_peer_hash
+            if cached:
+                return self.dest_hash_for(cached)
+            return "unknown"
+        if resolved and resolved != "unknown":
+            self._cache_link_peer(link, resolved)
+        return resolved
 
     def register_peer_mapping(self, dest_hash, identity_hash=None):
         dest = normalize_hash(dest_hash)
@@ -288,15 +321,15 @@ class MessagingBackend:
             return self.dest_hash_for(computed_dest)
         if fallback:
             return self.dest_hash_for(fallback)
-        if ident_hex:
+        if ident_hex and not self._is_self_hash(ident_hex):
             return self.dest_hash_for(ident_hex)
         return "unknown"
 
     def _get_remote_hash(self, link):
-        return self._resolve_remote_peer(link)
+        return self._peer_for_link(link)
 
     def _peer_destination_hash(self, link, fallback=None):
-        return self._resolve_remote_peer(link, fallback=fallback)
+        return self._peer_for_link(link, fallback=fallback)
 
     def _notify_link_established(self, link, peer_hash=None):
         peer = self.dest_hash_for(peer_hash or self._peer_destination_hash(link))
@@ -341,6 +374,14 @@ class MessagingBackend:
 
     def _link_callback(self, link):
         peer_hash = self._peer_destination_hash(link)
+        if self._is_self_hash(peer_hash) and self.peer_resolver:
+            try:
+                fixed = self.peer_resolver(ident_hex="", computed_dest="", link=link)
+                if fixed and not self._is_self_hash(fixed):
+                    peer_hash = self.dest_hash_for(fixed)
+            except Exception as e:
+                print(f"[messaging] incoming peer resolve fallback: {e}")
+        self._cache_link_peer(link, peer_hash)
         if self.active_link and self.hashes_equivalent(peer_hash, self.active_peer_hash):
             print(f"[messaging] Ignoring duplicate incoming link from {peer_hash[:16]}...")
             try:
@@ -368,13 +409,14 @@ class MessagingBackend:
         def callback(link):
             if link.link_id in self.links:
                 del self.links[link.link_id]
+            self._link_peer_hashes.pop(link.link_id, None)
             if self.active_link and self.active_link.link_id == link.link_id:
                 self.active_link = None
                 self.active_peer_hash = None
             if self._send_link and self._send_link.link_id == link.link_id:
                 self._send_link = self.active_link
             if self.on_message:
-                remote_hash = self.dest_hash_for(self._peer_destination_hash(link))
+                remote_hash = self.dest_hash_for(self._peer_for_link(link))
                 system_msg = ChatMessage("system", f"Link closed with {remote_hash}")
                 self.on_message(system_msg, remote_hash)
         return callback
@@ -383,7 +425,7 @@ class MessagingBackend:
         def callback(message, packet):
             try:
                 chat_msg = ChatMessage.from_json(message.decode("utf-8"))
-                remote_hash = self.dest_hash_for(self._peer_destination_hash(link))
+                remote_hash = self.dest_hash_for(self._peer_for_link(link))
 
                 if chat_msg.msg_type == "__receipt":
                     try:
@@ -497,7 +539,7 @@ class MessagingBackend:
                             print(f"[messaging] Failed to read long text: {e}")
                     else:
                         chat_msg.content = save_path
-                    remote_hash = self.dest_hash_for(self._peer_destination_hash(link))
+                    remote_hash = self.dest_hash_for(self._peer_for_link(link))
                     if self.on_message:
                         self.on_message(chat_msg, remote_hash)
                     self._send_receipt(link, chat_msg.msg_id, "received")
@@ -509,7 +551,7 @@ class MessagingBackend:
                     if chat_msg and self.on_message:
                         self.on_message(
                             ChatMessage("system", f"File transfer failed: {chat_msg.file_name}"),
-                            self.dest_hash_for(self._peer_destination_hash(link))
+                            self.dest_hash_for(self._peer_for_link(link))
                         )
             except Exception as e:
                 print(f"[messaging] Resource concluded error: {e}")
@@ -592,6 +634,7 @@ class MessagingBackend:
         self.active_link = None
         self.active_peer_hash = None
         self._send_link = None
+        self._link_peer_hashes.clear()
 
     def _interrupted(self):
         return self.shutdown_requested or not self.running
@@ -665,8 +708,13 @@ class MessagingBackend:
                                 except Exception:
                                     pass
                             self._setup_link(link)
+                            self._cache_link_peer(link, clean)
                             self._notify_link_established(link, clean)
                             self._send_link = link
+                            try:
+                                link.identify(self.identity)
+                            except Exception:
+                                pass
                             print("[connect] Link established")
                             self.drain_queue(link, clean)
                             return True
