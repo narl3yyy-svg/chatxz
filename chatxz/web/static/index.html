@@ -1354,7 +1354,7 @@ function renderContacts(contacts) {
   contacts.forEach(c => {
     const div = document.createElement('div');
     const name = c.name || c.hash;
-    div.className = 'contact-item' + (c.hash === connected ? ' active' : '');
+    div.className = 'contact-item' + (peerKey(c.hash) === peerKey(connected) ? ' active' : '');
     div.innerHTML = `<div class="contact-avatar contact-avatar-saved">${name.charAt(0).toUpperCase()}</div>
       <div class="contact-info">
         <div class="contact-name">${escapeHtml(name)}</div>
@@ -1487,7 +1487,7 @@ function connectTo(hash, ip, port) {
     body: JSON.stringify(body)
   }).then(r => r.json()).then(d => {
     if (d.status === 'ok') {
-      setConnected(hash);
+      setConnected(d.hash || hash);
       toast('Connected!');
     } else {
       toast('Connection failed: ' + (d.error || 'unknown'));
@@ -1764,7 +1764,7 @@ function messageBelongsToPeer(data) {
   if (!connected) return true;
   const active = peerKey(connected);
   const mp = peerKey(data.peer);
-  if (mp) return mp === active;
+  if (mp && (mp === active || mp === peerKey(myHash))) return true;
   const sender = peerKey(data.sender);
   if (sender === 'system') return false;
   if (sender === peerKey(myHash)) return true;
@@ -1803,14 +1803,14 @@ function addMessage(data) {
       const statusEl = existing.querySelector('.receipt');
       if (statusEl) statusEl.textContent = receiptIcon(data.status || '');
       if (data.status === 'received' || data.status === 'read') {
-        data.type === 'text' && data.sender !== myHash && sendReadReceipt(data.msg_id);
+        data.type === 'text' && peerKey(data.sender) !== peerKey(myHash) && sendReadReceipt(data.msg_id);
       }
       return;
     }
   }
 
   const div = document.createElement('div');
-  const isSelf = data.sender === myHash;
+  const isSelf = peerKey(data.sender) === peerKey(myHash);
   const isSystem = data.sender === 'system' || data.type === 'system';
   div.className = 'msg msg-enter ' + (isSystem ? 'system' : isSelf ? 'self' : 'other');
   if (data.msg_id) div.setAttribute('data-msgid', data.msg_id);

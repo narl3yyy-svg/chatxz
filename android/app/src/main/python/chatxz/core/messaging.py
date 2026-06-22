@@ -87,6 +87,39 @@ class MessagingBackend:
         self._active_resources = {}
         self._cancel_events = {}
         self._current_transfer_id = None
+        self.my_dest_hash = None
+        self.identity_to_dest = {}
+        self.dest_to_identity = {}
+        self._send_link = None
+
+    def register_peer_mapping(self, dest_hash, identity_hash=None):
+        dest = normalize_hash(dest_hash)
+        if not dest:
+            return
+        if identity_hash:
+            ident = normalize_hash(identity_hash)
+            if ident and ident != dest:
+                self.identity_to_dest[ident] = dest
+                self.dest_to_identity[dest] = ident
+
+    def dest_hash_for(self, any_hash):
+        clean = normalize_hash(any_hash)
+        if not clean:
+            return ""
+        if clean in self.dest_to_identity:
+            return clean
+        mapped = self.identity_to_dest.get(clean)
+        if mapped:
+            return mapped
+        return clean
+
+    def hashes_equivalent(self, hash_a, hash_b):
+        a = self.dest_hash_for(hash_a)
+        b = self.dest_hash_for(hash_b)
+        return bool(a and b and a == b)
+
+    def _outgoing_link(self):
+        return self._send_link or self.active_link
 
     def _load_queue(self):
         try:
@@ -223,24 +256,30 @@ class MessagingBackend:
         return "unknown"
 
     def _peer_destination_hash(self, link, fallback=None):
+        ident_hex = ""
         try:
             ident = link.get_remote_identity()
             if ident:
+                ident_hex = normalize_hash(RNS.hexrep(ident.hash))
                 pub = ident.get_public_key()
                 with RNS.Identity.known_destinations_lock:
                     for dest_hash, entry in RNS.Identity.known_destinations.items():
                         if entry[2] == pub:
-                            return normalize_hash(RNS.hexrep(dest_hash))
+                            dest = normalize_hash(RNS.hexrep(dest_hash))
+                            self.register_peer_mapping(dest, ident_hex)
+                            return dest
         except Exception:
             pass
         if fallback:
-            return normalize_hash(fallback)
-        return normalize_hash(self._get_remote_hash(link))
+            return self.dest_hash_for(fallback)
+        return self.dest_hash_for(self._get_remote_hash(link))
 
     def _notify_link_established(self, link, peer_hash=None):
-        peer = normalize_hash(peer_hash or self._peer_destination_hash(link))
+        peer = self.dest_hash_for(peer_hash or self._peer_destination_hash(link))
         self.active_link = link
         self.active_peer_hash = peer
+        if self._send_link is None:
+            self._send_link = link
         if self.on_link_established:
             try:
                 self.on_link_established(peer, link)
@@ -277,8 +316,14 @@ class MessagingBackend:
             pass
 
     def _link_callback(self, link):
-        remote_hash = self._get_remote_hash(link)
         peer_hash = self._peer_destination_hash(link)
+        if self.active_link and self.hashes_equivalent(peer_hash, self.active_peer_hash):
+            print(f"[messaging] Ignoring duplicate incoming link from {peer_hash[:16]}...")
+            try:
+                link.teardown()
+            except Exception:
+                pass
+            return
         if self._session_occupied(peer_hash):
             print(f"[messaging] Rejecting incoming link from {peer_hash[:16]}... (busy with {self.active_peer_hash[:16]}...)")
             try:
@@ -289,11 +334,11 @@ class MessagingBackend:
         print(f"[messaging] Incoming link established: {link.link_id.hex()[:12]}")
         self._setup_link(link)
         self._notify_link_established(link, peer_hash)
-        self.drain_queue(link, remote_hash)
+        self.drain_queue(link, peer_hash)
 
         if self.on_message:
-            system_msg = ChatMessage("system", f"Link established with {remote_hash}")
-            self.on_message(system_msg, remote_hash)
+            system_msg = ChatMessage("system", f"Link established with {peer_hash}")
+            self.on_message(system_msg, peer_hash)
 
     def _link_closed(self, link):
         def callback(link):
@@ -302,8 +347,10 @@ class MessagingBackend:
             if self.active_link and self.active_link.link_id == link.link_id:
                 self.active_link = None
                 self.active_peer_hash = None
+            if self._send_link and self._send_link.link_id == link.link_id:
+                self._send_link = self.active_link
             if self.on_message:
-                remote_hash = self._get_remote_hash(link)
+                remote_hash = self.dest_hash_for(self._peer_destination_hash(link))
                 system_msg = ChatMessage("system", f"Link closed with {remote_hash}")
                 self.on_message(system_msg, remote_hash)
         return callback
@@ -312,7 +359,7 @@ class MessagingBackend:
         def callback(message, packet):
             try:
                 chat_msg = ChatMessage.from_json(message.decode("utf-8"))
-                remote_hash = self._get_remote_hash(link)
+                remote_hash = self.dest_hash_for(self._peer_destination_hash(link))
 
                 if chat_msg.msg_type == "__receipt":
                     try:
@@ -399,7 +446,7 @@ class MessagingBackend:
                             print(f"[messaging] Failed to read long text: {e}")
                     else:
                         chat_msg.content = save_path
-                    remote_hash = self._get_remote_hash(link)
+                    remote_hash = self.dest_hash_for(self._peer_destination_hash(link))
                     if self.on_message:
                         self.on_message(chat_msg, remote_hash)
                     self._send_receipt(link, chat_msg.msg_id, "received")
@@ -409,7 +456,7 @@ class MessagingBackend:
                     if chat_msg and self.on_message:
                         self.on_message(
                             ChatMessage("system", f"File transfer failed: {chat_msg.file_name}"),
-                            self._get_remote_hash(link)
+                            self.dest_hash_for(self._peer_destination_hash(link))
                         )
             except Exception as e:
                 print(f"[messaging] Resource concluded error: {e}")
@@ -454,7 +501,7 @@ class MessagingBackend:
     def _session_occupied(self, peer_hash):
         if not self.active_link or not self.active_peer_hash:
             return False
-        return normalize_hash(peer_hash) != normalize_hash(self.active_peer_hash)
+        return not self.hashes_equivalent(peer_hash, self.active_peer_hash)
 
     def _teardown_active_link(self):
         if self.active_link:
@@ -464,6 +511,7 @@ class MessagingBackend:
                 pass
         self.active_link = None
         self.active_peer_hash = None
+        self._send_link = None
 
     def _interrupted(self):
         return self.shutdown_requested or not self.running
@@ -532,6 +580,7 @@ class MessagingBackend:
                             if link.status == RNS.Link.ACTIVE:
                                 self._setup_link(link)
                                 self._notify_link_established(link, clean)
+                                self._send_link = link
                                 print(f"[connect] Link established successfully")
                                 self.drain_queue(link, clean)
                                 return True
@@ -562,16 +611,17 @@ class MessagingBackend:
             return False
 
     def send_message(self, text, receipt_callback=None):
-        if not self.active_link:
+        link = self._outgoing_link()
+        if not link:
             print("[messaging] send_message: no active link")
             return False
         msg = ChatMessage(MESSAGE_TYPE_TEXT, text)
         data = msg.to_json().encode("utf-8")
-        mtu = getattr(self.active_link, 'mtu', 500)
+        mtu = getattr(link, 'mtu', 500)
         try:
             if len(data) > mtu - 50:
-                return self._send_long_text(msg, text, data, receipt_callback)
-            packet = RNS.Packet(self.active_link, data)
+                return self._send_long_text(msg, text, data, receipt_callback, link)
+            packet = RNS.Packet(link, data)
             packet.send()
             print(f"[messaging] Sent text message: {text[:50]}...")
             self._sent_messages[msg.msg_id] = msg
@@ -582,7 +632,8 @@ class MessagingBackend:
             print(f"[messaging] Send failed: {e}")
             return False
 
-    def _send_long_text(self, msg, text, data, receipt_callback):
+    def _send_long_text(self, msg, text, data, receipt_callback, link=None):
+        link = link or self._outgoing_link()
         import tempfile as _tf
         tmp = _tf.NamedTemporaryFile(delete=False, suffix=".txt", mode="w")
         tmp.write(text)
@@ -590,7 +641,7 @@ class MessagingBackend:
         tmp.close()
         meta = ChatMessage(MESSAGE_TYPE_LONGTEXT, json.dumps({"msg_id": msg.msg_id, "file_name": "longtext.txt"}))
         try:
-            packet = RNS.Packet(self.active_link, meta.to_json().encode("utf-8"))
+            packet = RNS.Packet(link, meta.to_json().encode("utf-8"))
             packet.send()
         except Exception as e:
             print(f"[messaging] Long text metadata send failed: {e}")
@@ -598,7 +649,7 @@ class MessagingBackend:
             return False
         try:
             f = open(tmp_path, "rb")
-            RNS.Resource(f, self.active_link, callback=self._resource_send_callback("longtext"),
+            RNS.Resource(f, link, callback=self._resource_send_callback("longtext"),
                          progress_callback=None, auto_compress=True)
             print(f"[messaging] Sent long text: {text[:50]}... ({len(data)} bytes as resource)")
             self._sent_messages[msg.msg_id] = msg
@@ -612,7 +663,8 @@ class MessagingBackend:
             return False
 
     def send_file(self, file_path, msg_type=MESSAGE_TYPE_FILE, progress_callback=None):
-        if not self.active_link or not os.path.exists(file_path):
+        link = self._outgoing_link()
+        if not link or not os.path.exists(file_path):
             return False
         with self._file_send_lock:
             fname = os.path.basename(file_path)
@@ -623,7 +675,7 @@ class MessagingBackend:
             cancel_ev = threading.Event()
             self._cancel_events[transfer_id] = cancel_ev
             try:
-                packet = RNS.Packet(self.active_link, chat_msg.to_json().encode("utf-8"))
+                packet = RNS.Packet(link, chat_msg.to_json().encode("utf-8"))
                 packet.send()
 
                 def wrapped_progress(resource):
@@ -638,7 +690,7 @@ class MessagingBackend:
                         pass
 
                 f = open(file_path, "rb")
-                resource = RNS.Resource(f, self.active_link,
+                resource = RNS.Resource(f, link,
                              callback=self._resource_send_callback(fname, transfer_id, fsize),
                              progress_callback=wrapped_progress,
                              auto_compress=False)

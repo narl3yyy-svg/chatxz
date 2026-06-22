@@ -17,7 +17,7 @@ class AnnounceHandler:
         self.discovery = discovery
 
     def received_announce(self, destination_hash, announced_identity, app_data):
-        self.discovery._on_announce(destination_hash, app_data)
+        self.discovery._on_announce(destination_hash, app_data, announced_identity)
 
 
 class PeerDiscovery:
@@ -61,11 +61,14 @@ class PeerDiscovery:
             except Exception as e:
                 print(f"[discovery] on_peer_seen error: {e}")
 
-    def _on_announce(self, destination_hash, app_data):
+    def _on_announce(self, destination_hash, app_data, announced_identity=None):
         if not self.running:
             return
 
         hash_hex = normalize_hash(RNS.hexrep(destination_hash))
+        identity_hex = ""
+        if announced_identity and hasattr(announced_identity, "hash"):
+            identity_hex = normalize_hash(RNS.hexrep(announced_identity.hash))
         name = ""
         app_name = ""
 
@@ -80,13 +83,16 @@ class PeerDiscovery:
         if app_name != APP_NAME:
             return
 
-        self._store_peer({
+        peer = {
             "hash": hash_hex,
             "name": name or hash_hex[:8],
             "app": app_name,
             "last_seen": time.time(),
             "via": "rns",
-        })
+        }
+        if identity_hex and identity_hex != hash_hex:
+            peer["identity_hash"] = identity_hex
+        self._store_peer(peer)
         self._log_once(hash_hex, f"[discovery] RNS peer discovered: {name or hash_hex[:12]}...")
 
     def _on_beacon(self, data, my_hash):

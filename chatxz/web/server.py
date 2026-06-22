@@ -23,7 +23,7 @@ from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 CONFIG_DIR = get_config_dir()
 DATA_DIR = get_data_dir()
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
-APP_VERSION = "0.3.18"
+APP_VERSION = "0.3.19"
 
 def build_desktop_rns_config(broadcast_ip="255.255.255.255"):
     return f"""[reticulum]
@@ -308,19 +308,25 @@ class ChatWebServer:
             self.messaging.active_link = None
         self.active_peer = None
 
+    def _peer_dest_hash(self, any_hash):
+        if self.messaging:
+            return self.messaging.dest_hash_for(any_hash)
+        return self._clean_hash(any_hash).lower()
+
+    def _my_sender_hash(self):
+        return self._clean_hash(self.destination_hash or self.identity_mgr.get_hex_hash())
+
     def _history_for_peer(self, peer_hash, limit=500):
-        peer = self._clean_hash(peer_hash)
+        peer = self._peer_dest_hash(peer_hash)
         if not peer:
             return self.message_history[-limit:]
-        my_hash = self._clean_hash(self.identity_mgr.get_hex_hash())
         filtered = []
         for m in self.message_history:
-            mp = self._clean_hash(m.get("peer"))
-            if mp:
-                if mp == peer:
-                    filtered.append(m)
+            mp = self._peer_dest_hash(m.get("peer"))
+            if mp and mp == peer:
+                filtered.append(m)
                 continue
-            sender = self._clean_hash(m.get("sender"))
+            sender = self._peer_dest_hash(m.get("sender"))
             if sender == peer:
                 filtered.append(m)
         return filtered[-limit:]
@@ -496,13 +502,15 @@ class ChatWebServer:
 
     def _on_message(self, chat_msg, sender_hash):
         if sender_hash and sender_hash != "system":
-            peer = self._clean_hash(sender_hash)
+            peer = self._peer_dest_hash(sender_hash)
+            sender = peer
         else:
-            peer = self._clean_hash(self.active_peer)
+            peer = self._peer_dest_hash(self.active_peer)
+            sender = "system"
         entry = {
             "type": chat_msg.msg_type,
             "content": chat_msg.content,
-            "sender": sender_hash or "system",
+            "sender": sender,
             "peer": peer,
             "timestamp": chat_msg.timestamp,
             "file_name": chat_msg.file_name,
@@ -527,10 +535,14 @@ class ChatWebServer:
                 self.websockets.discard(ws)
 
     def _on_peer_discovered(self, peer):
-        pass
+        if not self.messaging:
+            return
+        dest = self._peer_dest_hash(peer.get("hash"))
+        if peer.get("identity_hash"):
+            self.messaging.register_peer_mapping(dest, peer.get("identity_hash"))
 
     def _on_link_established(self, peer_hash, link):
-        self.active_peer = self._clean_hash(peer_hash)
+        self.active_peer = self._peer_dest_hash(peer_hash)
         print(f"[connect] Session active with {self.active_peer[:16]}")
 
     def _on_transfer_progress(self, data):
@@ -661,9 +673,8 @@ class ChatWebServer:
             if self._shutting_down or ok is None:
                 return web.json_response({"error": "server shutting down"}, status=503)
             if ok:
-                clean = (
-                    self.messaging.active_peer_hash
-                    or self._clean_hash(resolved_hash)
+                clean = self._peer_dest_hash(
+                    self.messaging.active_peer_hash or resolved_hash
                 )
                 self.active_peer = clean
                 return web.json_response({"status": "ok", "hash": clean})
@@ -950,13 +961,13 @@ class ChatWebServer:
                 return web.json_response({"status": "queued", "name": fname, "size": size})
 
             msg_type = "image" if is_image else "file"
-            my_hash = self.identity_mgr.get_hex_hash()
+            my_hash = self._my_sender_hash()
             ts = time.time()
             entry = {
                 "type": msg_type,
                 "content": save_path,
                 "sender": my_hash,
-                "peer": self._clean_hash(self.active_peer),
+                "peer": self._peer_dest_hash(self.active_peer),
                 "timestamp": ts,
                 "file_name": fname,
                 "file_size": size,
@@ -1019,13 +1030,13 @@ class ChatWebServer:
                 self.messaging.enqueue("file", zip_path,
                                         file_name=zip_name, file_size=zsize, file_path=zip_path)
                 return web.json_response({"status": "queued", "name": zip_name, "size": zsize})
-            my_hash = self.identity_mgr.get_hex_hash()
+            my_hash = self._my_sender_hash()
             ts = time.time()
             entry = {
                 "type": "file",
                 "content": zip_path,
                 "sender": my_hash,
-                "peer": self._clean_hash(self.active_peer),
+                "peer": self._peer_dest_hash(self.active_peer),
                 "timestamp": ts,
                 "file_name": zip_name,
                 "file_size": zsize,
@@ -1101,13 +1112,13 @@ class ChatWebServer:
                                         file_size=len(audio_bytes), file_path=voice_path)
                 return web.json_response({"status": "queued"})
 
-            my_hash = self.identity_mgr.get_hex_hash()
+            my_hash = self._my_sender_hash()
             ts = time.time()
             entry = {
                 "type": "voice",
                 "content": voice_path,
                 "sender": my_hash,
-                "peer": self._clean_hash(self.active_peer),
+                "peer": self._peer_dest_hash(self.active_peer),
                 "timestamp": ts,
                 "file_name": os.path.basename(voice_path),
                 "file_size": len(audio_bytes),
@@ -1261,12 +1272,12 @@ class ChatWebServer:
                             )
                     result = self.messaging.send_message(text, receipt_callback=on_receipt)
                     if result:
-                        my_hash = self.identity_mgr.get_hex_hash()
+                        my_hash = self._my_sender_hash()
                         entry = {
                             "type": result.msg_type,
                             "content": result.content,
                             "sender": my_hash,
-                            "peer": self._clean_hash(self.active_peer),
+                            "peer": self._peer_dest_hash(self.active_peer),
                             "timestamp": result.timestamp,
                             "msg_id": result.msg_id,
                             "status": "sent",
@@ -1292,9 +1303,8 @@ class ChatWebServer:
                 if self._shutting_down or ok is None:
                     await ws.send_str(json.dumps({"type": "connect_fail", "error": "server shutting down"}))
                 elif ok:
-                    clean = (
-                        self.messaging.active_peer_hash
-                        or self._clean_hash(resolved_hash)
+                    clean = self._peer_dest_hash(
+                        self.messaging.active_peer_hash or resolved_hash
                     )
                     self.active_peer = clean
                     await ws.send_str(json.dumps({"type": "connect_ok", "hash": clean}))
