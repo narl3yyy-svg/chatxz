@@ -185,6 +185,10 @@ chatxz --daemon
 
 ## Changelog (recent)
 
+### v0.3.29
+- Single version source: `version.properties` drives Gradle + `APP_VERSION` (via `chatxz/_version.py`)
+- Release bump: `./scripts/bump-version.sh 0.3.29` then tag `v0.3.29`
+
 ### v0.3.28
 - Bump Android APK build to match server version (0.3.28)
 - Network panel connect hint updated for longer announce/link wait

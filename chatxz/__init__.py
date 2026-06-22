@@ -1,2 +1,2 @@
-__version__ = "0.3.18"
+from chatxz._version import __version__  # noqa: F401
 __app_name__ = "chatxz"

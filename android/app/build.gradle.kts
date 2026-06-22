@@ -1,7 +1,22 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     id("com.chaquo.python")
 }
+
+val versionProps = Properties().apply {
+    val file = rootProject.file("../version.properties")
+    if (file.exists()) {
+        load(FileInputStream(file))
+    }
+}
+val appVersionName = versionProps.getProperty("VERSION_NAME", "0.0.0")
+val appVersionCode = versionProps.getProperty("VERSION_CODE", "1").toInt()
+// CI release metadata (keep in sync via scripts/bump-version.sh)
+val releaseVersionNameForCi = "0.3.29"  // versionName
+val releaseVersionCodeForCi = 29  // versionCode
 
 android {
     namespace = "com.chatzx.android"
@@ -11,8 +26,8 @@ android {
         applicationId = "com.chatzx.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 28
-        versionName = "0.3.28"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         ndk {
             abiFilters += listOf("arm64-v8a")
