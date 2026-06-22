@@ -14,9 +14,12 @@ MAGIC = b"CHATXZ1"
 
 
 class LanBeacon:
-    def __init__(self, discovery, identity_hash, display_name="", ip=None, port=8742, periodic=False):
+    def __init__(self, discovery, dest_hash, display_name="", ip=None, port=8742,
+                 periodic=False, identity_hash=None, on_periodic=None):
         self.discovery = discovery
+        self.dest_hash = (dest_hash or "").replace(":", "")
         self.identity_hash = (identity_hash or "").replace(":", "")
+        self.on_periodic = on_periodic
         self.display_name = display_name or ""
         self.ip = ip
         self.port = port
@@ -79,14 +82,17 @@ class LanBeacon:
 
     def _payload(self):
         self._refresh_ip()
-        return json.dumps({
+        payload = {
             "app": APP_NAME,
             "v": 1,
-            "hash": self.identity_hash,
+            "hash": self.dest_hash,
             "name": self.display_name,
             "ip": self.ip or "",
             "port": self.port,
-        }).encode("utf-8")
+        }
+        if self.identity_hash and self.identity_hash != self.dest_hash:
+            payload["identity_hash"] = self.identity_hash
+        return json.dumps(payload).encode("utf-8")
 
     def _broadcast_targets(self):
         targets = []
@@ -165,12 +171,17 @@ class LanBeacon:
             if not payload.get("ip"):
                 payload["ip"] = addr[0]
             self.packets_received += 1
-            self.discovery._on_beacon(payload, self.identity_hash)
+            self.discovery._on_beacon(payload, self.dest_hash)
 
     def _periodic(self):
         time.sleep(4)
         while self.running:
             self.send(count=1, subnet_probe=is_android())
+            if self.on_periodic:
+                try:
+                    self.on_periodic()
+                except Exception as exc:
+                    print(f"[beacon] periodic callback failed: {exc}")
             for _ in range(self._interval):
                 if not self.running:
                     return

@@ -24,7 +24,7 @@ from chatxz.utils.system import get_avg_cpu_temperature, get_cpu_percent
 CONFIG_DIR = get_config_dir()
 DATA_DIR = get_data_dir()
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
-APP_VERSION = "0.3.25"
+APP_VERSION = "0.3.26"
 NETWORK_STATS_AUTO_RESET_SEC = 7 * 86400
 
 def build_desktop_rns_config(broadcast_ip="255.255.255.255"):
@@ -363,18 +363,35 @@ class ChatWebServer:
         return ""
 
     def _resolve_peer_hash(self, peer_hash):
-        clean = self._clean_hash(peer_hash).lower()
+        from chatxz.core.discovery import normalize_hash, message_dest_hash_for_identity
+        clean = normalize_hash(peer_hash)
         if not clean:
             return clean
         if self.messaging:
             mapped = self.messaging.dest_hash_for(clean)
-            if mapped and len(mapped) == 32:
+            if mapped and len(mapped) == 32 and not self._is_self_hash(mapped):
                 return mapped
+            ident = self.messaging._identity_for_hash(clean)
+            if ident:
+                dest = message_dest_hash_for_identity(ident)
+                if dest:
+                    self.messaging.register_peer_mapping(
+                        dest, normalize_hash(RNS.hexrep(ident.hash))
+                    )
+                    return dest
         if self.discovery:
             for p in self.discovery.get_peers():
-                ph = self._clean_hash(p.get("hash")).lower()
-                ih = self._clean_hash(p.get("identity_hash")).lower()
+                ph = normalize_hash(p.get("hash"))
+                ih = normalize_hash(p.get("identity_hash"))
                 if clean == ph or clean == ih:
+                    if p.get("via") == "rns" and ph:
+                        return ph
+                    if self.messaging:
+                        ident = self.messaging._identity_for_hash(ih or ph)
+                        if ident:
+                            dest = message_dest_hash_for_identity(ident)
+                            if dest:
+                                return dest
                     return ph or clean
         return clean
 
@@ -627,7 +644,7 @@ class ChatWebServer:
             on_progress=self._on_transfer_progress,
             on_link_established=self._on_link_established,
             display_name=settings.get("name", ""),
-            auto_announce=False,
+            auto_announce=is_android(),
             receive_dir=received_dir,
             peer_resolver=self._resolve_incoming_peer,
         )
@@ -635,19 +652,25 @@ class ChatWebServer:
         dest = self.messaging.start()
 
         my_hash = RNS.hexrep(dest.hash)
-        self.messaging.my_dest_hash = my_hash.replace(":", "")
+        my_dest_clean = my_hash.replace(":", "")
+        self.messaging.my_dest_hash = my_dest_clean
         self.destination_hash = my_hash
         self.discovery = PeerDiscovery(on_peer_seen=self._on_peer_discovered)
         self.discovery.start()
         self.lan_beacon = LanBeacon(
             self.discovery,
-            my_hash,
+            my_dest_clean,
             display_name=settings.get("name", ""),
             ip=my_ip,
             port=self.port,
             periodic=is_android(),
+            identity_hash=self.identity_mgr.get_hex_hash(),
+            on_periodic=self.messaging.announce if is_android() else None,
         )
         self.lan_beacon.start()
+        if is_android():
+            self.messaging.announce()
+            print("[android] RNS auto-announce enabled (required for incoming connects)")
 
         return my_hash
 
@@ -1439,10 +1462,37 @@ class ChatWebServer:
             self.messaging._save_queue()
         return web.json_response({"status": "ok"})
 
+    def _clear_history_for_peer(self, peer_hash):
+        peer = self._peer_dest_hash(peer_hash)
+        if not peer:
+            return 0
+        before = len(self.message_history)
+        self.message_history = [
+            m for m in self.message_history
+            if self._peer_dest_hash(m.get("chat_peer") or m.get("peer")) != peer
+        ]
+        self._save_history()
+        return before - len(self.message_history)
+
     async def handle_history_clear(self, request):
+        peer = request.query.get("peer", "").strip()
+        if not peer and request.can_read_body:
+            try:
+                data = await request.json()
+                peer = (data.get("peer") or "").strip()
+            except Exception:
+                pass
+        if peer:
+            removed = self._clear_history_for_peer(peer)
+            peer_clean = self._peer_dest_hash(peer)
+            await self._broadcast({
+                "type": "peer_history_cleared",
+                "data": {"peer": peer_clean, "removed": removed},
+            })
+            return web.json_response({"status": "ok", "peer": peer_clean, "removed": removed})
         self.message_history = []
         self._save_history()
-        return web.json_response({"status": "ok"})
+        return web.json_response({"status": "ok", "removed": "all"})
 
     async def handle_delete_message(self, request):
         msg_id = request.match_info.get("msg_id", "")

@@ -185,6 +185,12 @@ chatxz --daemon
 
 ## Changelog (recent)
 
+### v0.3.26
+- Clear chat history is per-peer (chat header + peer actions), removed from Settings
+- Android: RNS auto-announce every 15s (beacon alone cannot establish encrypted links)
+- Beacon payload includes identity hash; connect resolves identity → message destination hash
+- Clearer connect errors when peer has not completed an RNS announce
+
 ### v0.3.25
 - Fix Ubuntu→Arch (incoming) messages not showing in web UI — correct peer hash via discovery + link cache
 - Outgoing connects call RNS `identify()` so receivers learn the remote identity

@@ -814,6 +814,7 @@ body.sidebar-open #sidebar-backdrop { display: block; }
       <div class="action-buttons">
         <button class="action-btn" onclick="actionConnect()">🔗 Connect to peer</button>
         <button class="action-btn" onclick="actionSaveContact()">💾 Save as contact</button>
+        <button class="action-btn danger" onclick="actionClearPeerHistory()">🧹 Clear chat history</button>
         <button class="action-btn danger" onclick="actionDelete()">🗑 Delete contact</button>
       </div>
     </div>
@@ -875,7 +876,6 @@ body.sidebar-open #sidebar-backdrop { display: block; }
         <div class="settings-card danger">
           <h4>⚠ Advanced</h4>
           <div style="display:flex;flex-direction:column;gap:8px">
-            <button class="btn-block" onclick="clearHistory()">Clear chat history</button>
             <button class="btn-block danger" onclick="regenerateIdentity()">Regenerate identity</button>
             <button class="btn-block danger" onclick="restartServer()">Restart server</button>
           </div>
@@ -917,6 +917,7 @@ body.sidebar-open #sidebar-backdrop { display: block; }
         </div>
       </div>
       <div class="header-actions">
+        <button id="clear-peer-history-btn" style="display:none" onclick="clearPeerHistory(viewingPeer)" title="Clear this chat">Clear history</button>
         <button id="disconnect-btn" style="display:none" onclick="disconnect()">Disconnect</button>
       </div>
     </div>
@@ -1159,6 +1160,7 @@ function showWelcome() {
   document.getElementById('messages').style.display = 'none';
   document.getElementById('input-area').style.display = 'none';
   document.getElementById('disconnect-btn').style.display = 'none';
+  document.getElementById('clear-peer-history-btn').style.display = 'none';
   setLinkStatus('disconnected', 'Inactive');
   renderContacts(allContacts);
 }
@@ -1172,6 +1174,7 @@ function updatePeerHeader() {
     ? 'Encrypted · Connected'
     : 'Viewing history · not connected';
   document.getElementById('disconnect-btn').style.display = linked ? 'block' : 'none';
+  document.getElementById('clear-peer-history-btn').style.display = viewingPeer ? 'block' : 'none';
   setLinkStatus(linked ? 'connected' : 'disconnected', linked ? 'Active' : 'Inactive');
   document.getElementById('input-area').style.display = linked ? 'block' : 'none';
 }
@@ -1285,6 +1288,11 @@ function handleWSMessage(msg) {
   } else if (msg.type === 'connect_fail') {
     connectInFlight = false;
     toast('Connection failed: ' + (msg.error || 'peer not reachable'));
+  } else if (msg.type === 'peer_history_cleared') {
+    if (viewingPeer && peerKey(msg.data?.peer) === peerKey(viewingPeer)) {
+      document.getElementById('messages').innerHTML = '';
+    }
+    toast('Chat history cleared');
   } else if (msg.type === 'network_reset') {
     linkPeer = null;
     updatePeerHeader();
@@ -1557,6 +1565,11 @@ function doSaveContact() {
   });
 }
 
+function actionClearPeerHistory() {
+  if (ctxHash) clearPeerHistory(ctxHash);
+  toggleActionPanel();
+}
+
 function actionDelete() {
   if (ctxHash) {
     fetch('/api/contacts/' + ctxHash.replace(/:/g, ''), { method: 'DELETE' })
@@ -1566,6 +1579,27 @@ function actionDelete() {
       });
   }
   toggleActionPanel();
+}
+
+function clearPeerHistory(peerHash) {
+  const peer = (peerHash || '').replace(/:/g, '');
+  if (!peer) return;
+  const label = contactNameFor(peer) || truncateHash(peer);
+  if (!confirm('Delete all messages with ' + label + '?')) return;
+  fetch('/api/history/clear', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({peer})
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') {
+      if (viewingPeer && peerKey(viewingPeer) === peerKey(peer)) {
+        document.getElementById('messages').innerHTML = '';
+      }
+      toast('Chat history cleared');
+    } else {
+      toast('Failed to clear history');
+    }
+  }).catch(() => toast('Failed to clear history'));
 }
 
 function connectTo(hash, ip, port) {
@@ -1820,14 +1854,6 @@ function saveSettings() {
       toast('Failed to save: ' + (d.error || 'unknown error'));
     }
   }).catch(() => toast('Failed to save settings'));
-}
-
-function clearHistory() {
-  if (!confirm('Delete all chat history?')) return;
-  fetch('/api/history/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'}).then(() => {
-    document.getElementById('messages').innerHTML = '';
-    toast('History cleared');
-  });
 }
 
 function setLinkPeer(hash) {

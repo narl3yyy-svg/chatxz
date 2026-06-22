@@ -10,6 +10,16 @@ def normalize_hash(h):
     return (h or "").replace("<", "").replace(">", "").replace(":", "").strip().lower()
 
 
+def message_dest_hash_for_identity(ident):
+    if not ident or not getattr(ident, "hash", None):
+        return ""
+    try:
+        hash_input = ident.hash + APP_NAME.encode("utf-8") + b"messages"
+        return normalize_hash(RNS.hexrep(RNS.Identity.full_hash(hash_input)))
+    except Exception:
+        return ""
+
+
 class AnnounceHandler:
     aspect_filter = None
 
@@ -109,7 +119,7 @@ class PeerDiscovery:
         if not hash_hex or hash_hex == my_clean:
             return
         name = data.get("name", "") or hash_hex[:8]
-        self._store_peer({
+        peer = {
             "hash": hash_hex,
             "name": name,
             "app": APP_NAME,
@@ -117,7 +127,11 @@ class PeerDiscovery:
             "port": data.get("port", 8742),
             "last_seen": time.time(),
             "via": "beacon",
-        })
+        }
+        identity_hex = normalize_hash(data.get("identity_hash"))
+        if identity_hex and identity_hex != hash_hex:
+            peer["identity_hash"] = identity_hex
+        self._store_peer(peer)
         self._log_once(
             f"beacon:{hash_hex}",
             f"[discovery] Beacon peer discovered: {name} ({data.get('ip', '?')})",

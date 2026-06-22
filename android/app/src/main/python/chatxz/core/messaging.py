@@ -1,6 +1,7 @@
 import threading, RNS, json, time, os, tempfile, uuid
 from chatxz.utils.helpers import format_speed
-from chatxz.core.discovery import normalize_hash
+from chatxz.core.discovery import normalize_hash, message_dest_hash_for_identity
+from chatxz.utils.platform import is_android
 
 APP_NAME = "chatxz"
 LINK_CONNECT_TIMEOUT_S = 4
@@ -72,7 +73,7 @@ class MessagingBackend:
         self.on_link_established = on_link_established
         self.display_name = display_name
         self.auto_announce = auto_announce
-        self.announce_interval = 30
+        self.announce_interval = 15 if is_android() else 30
         self.destination = None
         self.links = {}
         self.active_link = None
@@ -271,18 +272,25 @@ class MessagingBackend:
                 pass
 
     def _dest_hash_from_identity(self, ident):
-        if not ident or not getattr(ident, "hash", None):
-            return ""
-        try:
-            hash_input = ident.hash + APP_NAME.encode("utf-8") + b"messages"
-            dest_hash = RNS.Identity.full_hash(hash_input)
-            dest = normalize_hash(RNS.hexrep(dest_hash))
+        dest = message_dest_hash_for_identity(ident)
+        if dest and ident and getattr(ident, "hash", None):
             ident_hex = normalize_hash(RNS.hexrep(ident.hash))
-            if dest and ident_hex and dest != ident_hex:
+            if ident_hex and ident_hex != dest:
                 self.register_peer_mapping(dest, ident_hex)
-            return dest
+        return dest
+
+    def _identity_for_hash(self, hash_hex):
+        clean = normalize_hash(hash_hex)
+        if len(clean) != 32:
+            return None
+        try:
+            raw = bytes.fromhex(clean)
         except Exception:
-            return ""
+            return None
+        ident = RNS.Identity.recall(raw)
+        if ident is None:
+            ident = RNS.Identity.recall(raw, from_identity_hash=True)
+        return ident
 
     def _resolve_remote_peer(self, link, fallback=None):
         ident_hex = ""
@@ -653,25 +661,19 @@ class MessagingBackend:
                 print(f"[connect] Already connected to {self.active_peer_hash[:16]}...")
                 return True
 
-            try:
-                dest_hash = bytes.fromhex(clean)
-            except Exception as e:
-                print(f"[connect] Invalid hash: {e}")
-                return False
-
             old_link = self.active_link if (
                 self.active_link and self.active_peer_hash
                 and not self.hashes_equivalent(clean, self.active_peer_hash)
             ) else None
 
-            known_identity = RNS.Identity.recall(dest_hash)
+            known_identity = self._identity_for_hash(clean)
             if known_identity is None:
-                known_identity = RNS.Identity.recall(dest_hash, from_identity_hash=True)
-            if known_identity is None:
-                print(f"[connect] No known identity for {RNS.hexrep(dest_hash)[:20]}...")
-                print("[connect] Make sure the peer has announced first, or try again later")
+                print(f"[connect] No known identity for {clean[:16]}...")
+                print("[connect] Peer must send an RNS announce (beacon alone is not enough).")
+                print("[connect] On the peer device: open chatxz, wait ~15s, or tap Announce.")
                 return False
 
+            ident_hex = normalize_hash(RNS.hexrep(known_identity.hash))
             try:
                 destination = RNS.Destination(
                     known_identity,
@@ -684,8 +686,11 @@ class MessagingBackend:
                 print(f"[connect] Destination creation failed: {e}")
                 return False
 
+            dest_hex = normalize_hash(RNS.hexrep(destination.hash))
+            self.register_peer_mapping(dest_hex, ident_hex)
+
             self._announce()
-            print(f"[connect] Connecting to {RNS.hexrep(dest_hash)[:20]}... (timeout {LINK_CONNECT_TIMEOUT_S}s)")
+            print(f"[connect] Connecting to {dest_hex[:16]}... (timeout {LINK_CONNECT_TIMEOUT_S}s)")
 
             link = None
             try:
@@ -708,15 +713,15 @@ class MessagingBackend:
                                 except Exception:
                                     pass
                             self._setup_link(link)
-                            self._cache_link_peer(link, clean)
-                            self._notify_link_established(link, clean)
+                            self._cache_link_peer(link, dest_hex)
+                            self._notify_link_established(link, dest_hex)
                             self._send_link = link
                             try:
                                 link.identify(self.identity)
                             except Exception:
                                 pass
                             print("[connect] Link established")
-                            self.drain_queue(link, clean)
+                            self.drain_queue(link, dest_hex)
                             return True
                         if link.status == RNS.Link.CLOSED:
                             break
