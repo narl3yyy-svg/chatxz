@@ -43,11 +43,11 @@ def main():
     port = 8742
     server = ChatWebServer(host=host, port=port, verbose=False, debug=False, force=False)
 
-    thread = threading.Thread(target=server.run, name="chatxz-server", daemon=True)
-    thread.start()
+    def _open_browser():
+        if wait_for_port("127.0.0.1", port):
+            webbrowser.open(f"http://127.0.0.1:{port}")
 
-    if wait_for_port("127.0.0.1", port):
-        webbrowser.open(f"http://127.0.0.1:{port}")
+    threading.Thread(target=_open_browser, name="chatxz-browser", daemon=True).start()
 
     print(f"chatxz v{app_version} (portable)")
     print(f"Web UI:  http://127.0.0.1:{port}")
@@ -55,11 +55,7 @@ def main():
     print(f"Data:    {os.path.join(root, 'chatxz-data')}")
     print("Press Ctrl+C to stop")
 
-    try:
-        while thread.is_alive():
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        print("\nStopping chatxz...")
+    server.run()
 
 
 if __name__ == "__main__":

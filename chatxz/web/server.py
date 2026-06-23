@@ -711,7 +711,7 @@ class ChatWebServer:
                 bootstrap_android_usb()
             except Exception as e:
                 print(f"[serial] Android USB bootstrap failed: {e}")
-        if self.embedded or is_android():
+        if self.embedded or is_android() or getattr(sys, "frozen", False):
             patch_embedded_signals()
         settings = self.load_settings()
         self._write_rns_config(settings)
