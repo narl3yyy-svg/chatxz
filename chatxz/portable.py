@@ -1,4 +1,4 @@
-"""Portable Windows/desktop launcher — double-click chatxz.exe to start."""
+"""Portable desktop launcher — double-click chatxz.exe (Windows) or chatxz.app (macOS)."""
 
 import os
 import socket
@@ -49,9 +49,10 @@ def main():
 
     threading.Thread(target=_open_browser, name="chatxz-browser", daemon=True).start()
 
+    ip_hint = "ifconfig" if sys.platform == "darwin" else "ipconfig"
     print(f"chatxz v{app_version} (portable)")
     print(f"Web UI:  http://127.0.0.1:{port}")
-    print(f"LAN UI:  http://<your-ip>:{port}  (see ipconfig)")
+    print(f"LAN UI:  http://<your-ip>:{port}  (see {ip_hint})")
     print(f"Data:    {os.path.join(root, 'chatxz-data')}")
     print("Press Ctrl+C to stop")
 

@@ -45,8 +45,10 @@ case "${1:-}" in
         echo
         echo "Examples:"
         echo "  ./run.sh web"
-        echo "  ./run.sh web --share"
+        echo "  ./run.sh web --share    # Linux / macOS LAN access"
         echo "  ./run.sh cli --daemon"
+        echo
+        echo "macOS portable: see GitHub Releases (.dmg) or: bash scripts/install-macos.sh"
         echo "  ./run.sh cli --connect <hash> --send hello"
         ;;
 esac
