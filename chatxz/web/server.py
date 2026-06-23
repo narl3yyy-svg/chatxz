@@ -5,6 +5,10 @@ from pathlib import Path
 from aiohttp import web
 import RNS
 
+if getattr(sys, "frozen", False):
+    from chatxz.utils.rns_frozen import ensure_rns_interfaces
+    ensure_rns_interfaces()
+
 from chatxz.core.identity import IdentityManager
 from chatxz.core.messaging import MessagingBackend
 from chatxz.core.voice import VoiceRecorder, VoicePlayer
@@ -725,6 +729,9 @@ class ChatWebServer:
             loglevel = RNS.LOG_DEBUG
         else:
             loglevel = RNS.LOG_NOTICE
+        if getattr(sys, "frozen", False):
+            from chatxz.utils.rns_frozen import ensure_rns_interfaces
+            ensure_rns_interfaces()
         try:
             RNS.Reticulum(self.config_dir, loglevel=loglevel)
         except OSError as e:

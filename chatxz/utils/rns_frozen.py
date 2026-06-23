@@ -50,10 +50,12 @@ def ensure_rns_interfaces():
         except Exception:
             return
 
-    if ret_mod is None or "Interface" in ret_mod.__dict__:
+    if ret_mod is None:
         return
 
     for name in _INTERFACE_MODULES:
+        if name in ret_mod.__dict__:
+            continue
         try:
             setattr(ret_mod, name, importlib.import_module(f"RNS.Interfaces.{name}"))
         except Exception:
