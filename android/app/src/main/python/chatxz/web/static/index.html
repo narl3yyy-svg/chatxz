@@ -500,7 +500,9 @@ body::before {
 #queue-count {
   background: var(--warning); color: #000; font-weight: 600;
   padding: 2px 8px; border-radius: 99px; font-size: 10px;
+  cursor: pointer; user-select: none;
 }
+#queue-count:hover { filter: brightness(1.08); }
 
 /* Main chat area */
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
@@ -1153,7 +1155,7 @@ body.sidebar-open #sidebar-backdrop { display: block; }
         <span class="status-pill"><span id="link-dot"></span><span id="link-label">Link</span></span>
       </span>
       <span id="peer-count">0 peers</span>
-      <span id="queue-count" style="display:none"></span>
+      <span id="queue-count" style="display:none" title="Click to clear queue" onclick="clearQueue()"></span>
     </div>
     <div id="transfer-dock">
       <div id="incoming-transfers"></div>
@@ -1219,6 +1221,7 @@ let viewingPeer = null;
 let linkPeer = null;
 let connectInFlight = false;
 let progressLastUpdate = 0;
+let lastLinkToastAt = 0;
 const LS_VIEWING_PEER = 'chatxz_viewing_peer';
 const LS_UNREAD = 'chatxz_unread_counts';
 let unreadCounts = {};
@@ -1617,15 +1620,29 @@ function handleWSMessage(msg) {
       const h = msg.data.hash;
       registerPeerAliases(h, viewingPeer, ...(msg.data.aliases || []));
       setLinkPeer(h);
-      if (viewingPeer && peersMatch(viewingPeer, h)) {
+      if (!msg.data.path_switch) {
+        openChat(h, false);
+      } else if (viewingPeer && peersMatch(viewingPeer, h)) {
         updatePeerHeader();
         loadHistoryForPeer(viewingPeer);
+      } else {
+        openChat(h, false);
       }
-      toast(msg.data.path_switch ? 'Switched to faster link' : 'Connected');
+      const now = Date.now();
+      if (!msg.data.path_switch) {
+        toast('Connected');
+        lastLinkToastAt = now;
+      } else if (now - lastLinkToastAt > 45000) {
+        toast('Switched to faster link');
+        lastLinkToastAt = now;
+      }
+      pollQueue();
     }
   } else if (msg.type === 'link_closed') {
     setLinkStatus('disconnected', 'Reconnecting…');
+    setLinkPeer(null);
     updatePeerHeader();
+    pollQueue();
   } else if (msg.type === 'connect_ok') {
     if (connectInFlight) {
       connectInFlight = false;
@@ -1639,6 +1656,11 @@ function handleWSMessage(msg) {
   } else if (msg.type === 'peer_history_cleared') {
     if (viewingPeer && peersMatch(msg.data?.peer, viewingPeer)) {
       document.getElementById('messages').innerHTML = '';
+    }
+  } else if (msg.type === 'queue_cleared' || msg.type === 'queue_drained') {
+    pollQueue();
+    if (msg.type === 'queue_drained' && msg.data?.sent) {
+      toast('Sent ' + msg.data.sent + ' queued item(s)');
     }
   } else if (msg.type === 'network_reset') {
     linkPeer = null;
@@ -1830,12 +1852,27 @@ function pollQueue() {
       var el = document.getElementById('queue-count');
       if (q.count > 0) {
         el.style.display = 'block';
-        el.textContent = 'Queue: ' + q.count + ' pending';
+        el.textContent = 'Queue: ' + q.count + ' pending (tap to clear)';
       } else {
         el.style.display = 'none';
       }
     })
     .catch(() => {});
+}
+
+function clearQueue() {
+  const peer = viewingPeer || '';
+  const body = peer ? JSON.stringify({peer}) : '{}';
+  fetch('/api/queue', {method: 'DELETE', headers: {'Content-Type': 'application/json'}, body})
+    .then(r => r.json())
+    .then(d => {
+      pollQueue();
+      document.querySelectorAll('.msg .receipt').forEach(el => {
+        if (el.textContent === '⏳') el.closest('.msg')?.remove();
+      });
+      toast(d.cleared ? ('Cleared ' + d.cleared + ' queued item(s)') : 'Queue cleared');
+    })
+    .catch(() => toast('Failed to clear queue'));
 }
 
 function renderContacts(contacts) {
@@ -2584,8 +2621,8 @@ function saveSettings() {
 }
 
 function setLinkPeer(hash) {
-  linkPeer = peerKey(hash);
-  if (viewingPeer) registerPeerAliases(linkPeer, viewingPeer);
+  linkPeer = hash ? peerKey(hash) : null;
+  if (viewingPeer && linkPeer) registerPeerAliases(linkPeer, viewingPeer);
   renderContacts(allContacts);
   renderDiscovered(window._discoveredPeers || []);
 }
@@ -2938,10 +2975,11 @@ function stopVoice() {
 }
 
 function uploadFiles(files) {
+  const peerQ = viewingPeer ? ('?peer=' + encodeURIComponent(viewingPeer)) : '';
   Array.from(files).forEach(file => {
     const formData = new FormData();
     formData.append('file', file);
-    fetch('/api/file', {method: 'POST', body: formData})
+    fetch('/api/file' + peerQ, {method: 'POST', body: formData})
       .then(r => r.json()).then(d => {
         if (d.status === 'ok') toast(`Sent ${d.name}`);
         else if (d.status === 'queued') toast(`Queued ${d.name} (${d.size})`);

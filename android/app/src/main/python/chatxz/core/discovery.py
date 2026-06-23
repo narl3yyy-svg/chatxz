@@ -84,15 +84,26 @@ class PeerDiscovery:
         self._handler = None
         self.on_peer_seen = on_peer_seen
         self._last_log = {}
+        self.accept_peers = False
 
     def start(self):
         self.running = True
         self._handler = AnnounceHandler(self)
         RNS.Transport.register_announce_handler(self._handler)
-        print("[discovery] Announce handler registered")
+        print("[discovery] Announce handler registered (passive until manual announce)")
 
     def stop(self):
         self.running = False
+
+    def enable_discovery(self, clear=False):
+        """Show LAN peers only after the user taps Announce."""
+        self.accept_peers = True
+        if clear:
+            self.clear_peers()
+
+    def disable_discovery(self):
+        self.accept_peers = False
+        self.clear_peers()
 
     def clear_peers(self):
         self.peers.clear()
@@ -125,7 +136,7 @@ class PeerDiscovery:
                 print(f"[discovery] on_peer_seen error: {e}")
 
     def _on_announce(self, destination_hash, app_data, announced_identity=None):
-        if not self.running:
+        if not self.running or not self.accept_peers:
             return
 
         hash_hex = normalize_hash(RNS.hexrep(destination_hash))
@@ -159,7 +170,7 @@ class PeerDiscovery:
         self._log_once(hash_hex, f"[discovery] RNS peer discovered: {name or hash_hex[:12]}...")
 
     def _on_beacon(self, data, my_hash):
-        if not self.running:
+        if not self.running or not self.accept_peers:
             return
         if data.get("app") != APP_NAME:
             return
@@ -215,6 +226,8 @@ class PeerDiscovery:
         return score
 
     def get_peers(self):
+        if not self.accept_peers:
+            return []
         now = time.time()
         stale = [h for h, p in self.peers.items() if now - p["last_seen"] > DISCOVERY_TIMEOUT]
         for h in stale:

@@ -1,9 +1,24 @@
 import os
+import sys
 
 from chatxz.utils.platform import is_android, storage_root
 
 
+def portable_data_root():
+    """When set, all config/data lives beside the portable app folder."""
+    env = os.environ.get("CHATXZ_PORTABLE")
+    if env:
+        return os.path.join(env, "chatxz-data")
+    if getattr(sys, "frozen", False):
+        return os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "chatxz-data")
+    return None
+
+
 def get_config_dir():
+    portable = portable_data_root()
+    if portable:
+        os.makedirs(portable, exist_ok=True)
+        return portable
     if is_android():
         return storage_root()
     xdg = os.environ.get("XDG_CONFIG_HOME")
@@ -13,6 +28,11 @@ def get_config_dir():
 
 
 def get_data_dir():
+    portable = portable_data_root()
+    if portable:
+        path = os.path.join(portable, "data")
+        os.makedirs(path, exist_ok=True)
+        return path
     if is_android():
         return os.path.join(storage_root(), "data")
     xdg = os.environ.get("XDG_DATA_HOME")

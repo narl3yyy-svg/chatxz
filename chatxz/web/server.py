@@ -769,7 +769,7 @@ class ChatWebServer:
             on_link_closed=self._on_link_closed,
             on_queue_sent=self._on_queue_sent,
             display_name=settings.get("name", ""),
-            auto_announce=is_android(),
+            auto_announce=False,
             receive_dir=received_dir,
             peer_resolver=self._resolve_incoming_peer,
         )
@@ -788,29 +788,23 @@ class ChatWebServer:
                 identity_pubkey = self.identity.get_public_key()
             except Exception:
                 identity_pubkey = None
-        android = is_android()
         self.lan_beacon = LanBeacon(
             self.discovery,
             my_dest_clean,
             display_name=settings.get("name", ""),
             ip=my_ip,
             port=self.port,
-            periodic=android,
+            periodic=False,
             identity_hash=self.identity_mgr.get_hex_hash(),
             identity_pubkey=identity_pubkey,
-            on_periodic=(self.messaging.announce if android else None),
+            on_periodic=None,
         )
         self.lan_beacon.start()
-        if android:
-            print("[network] Android: periodic beacon + RNS announce enabled")
-        else:
-            print("[network] Manual announce only — use Announce button or peer connect wake")
+        print("[network] Manual announce only — use Announce button or peer connect wake")
 
         serial_hot = ensure_runtime_serial(settings.get("rns_interfaces"))
         if serial_hot:
             print(f"[serial] Runtime serial interface active on {getattr(serial_hot, 'port', '?')}")
-            if self.messaging:
-                self.messaging.announce()
 
         return my_hash
 
@@ -858,11 +852,39 @@ class ChatWebServer:
             show_message_notification(name, preview)
 
     def _queue_target_hash(self):
+        viewing = self._ui_state.get("viewing_peer")
+        if viewing:
+            return self._peer_dest_hash(viewing)
         return (
             self._session_chat_peer()
             or self._peer_dest_hash(self.active_peer)
             or getattr(self.messaging, "_session_peer_hash", None)
         )
+
+    def _is_saved_contact(self, peer_hash):
+        for contact in list_contacts(self.config_dir):
+            if self._peers_equivalent(contact.get("hash"), peer_hash):
+                return True
+        return False
+
+    def _clear_queue_for_peer(self, peer_hash):
+        if not self.messaging:
+            return 0
+        before = self.messaging.queue_size()
+        self.messaging.clear_queue(self._peer_dest_hash(peer_hash))
+        return before - self.messaging.queue_size()
+
+    def _purge_ephemeral_peer(self, peer_hash):
+        peer = self._peer_dest_hash(peer_hash)
+        if not peer or self._is_saved_contact(peer):
+            return 0
+        removed = self._clear_history_for_peer(peer)
+        self._clear_queue_for_peer(peer)
+        return removed
+
+    def _enable_discovery(self, clear=False):
+        if self.discovery:
+            self.discovery.enable_discovery(clear=clear)
 
     def _contact_name_for(self, peer_hash):
         for contact in list_contacts(self.config_dir):
@@ -957,9 +979,21 @@ class ChatWebServer:
             return
         if self.messaging and self.messaging.active_link:
             return
+        peer = self._peer_dest_hash(peer_hash)
+        removed = 0
+        if peer and peer != "unknown":
+            removed = self._purge_ephemeral_peer(peer)
         if self.websockets and self._loop:
+            if removed:
+                asyncio.run_coroutine_threadsafe(
+                    self._broadcast({
+                        "type": "peer_history_cleared",
+                        "data": {"peer": peer, "removed": removed},
+                    }),
+                    self._loop,
+                )
             asyncio.run_coroutine_threadsafe(
-                self._broadcast({"type": "link_closed", "data": {}}),
+                self._broadcast({"type": "link_closed", "data": {"peer": peer}}),
                 self._loop
             )
 
@@ -1411,7 +1445,7 @@ class ChatWebServer:
             self.messaging._teardown_active_link()
         self.active_peer = None
         if self.discovery:
-            self.discovery.clear_peers()
+            self.discovery.disable_discovery()
         if self.lan_beacon:
             self.lan_beacon.reset_stats()
         if update_settings:
@@ -1628,6 +1662,7 @@ class ChatWebServer:
             return web.json_response({"error": err or "not ready"}, status=400)
         with self._announce_lock:
             try:
+                self._enable_discovery(clear=False)
                 await asyncio.to_thread(self.messaging.announce)
                 beacon_sent = 0
                 if self.lan_beacon:
@@ -1645,9 +1680,18 @@ class ChatWebServer:
                 return web.json_response({"error": str(e)}, status=400)
 
     async def handle_disconnect(self, request):
+        peer = self._peer_dest_hash(self.active_peer or "")
+        if peer:
+            self._purge_ephemeral_peer(peer)
         if self.messaging:
             self.messaging._teardown_active_link(clear_session=True)
         self.active_peer = None
+        if peer:
+            await self._broadcast({
+                "type": "peer_history_cleared",
+                "data": {"peer": peer, "removed": 1},
+            })
+        await self._broadcast({"type": "link_closed", "data": {"peer": peer}})
         return web.json_response({"status": "ok"})
 
     async def handle_settings_get(self, request):
@@ -1833,6 +1877,9 @@ class ChatWebServer:
     async def handle_file_upload(self, request):
         if not self.messaging:
             return web.json_response({"error": "not ready"}, status=400)
+        peer_hint = request.query.get("peer", "").strip()
+        if peer_hint:
+            self._ui_state["viewing_peer"] = self._peer_dest_hash(peer_hint)
         try:
             reader = await request.multipart()
             field = await reader.next()
@@ -1854,20 +1901,26 @@ class ChatWebServer:
                     size += len(chunk)
 
             queue_target = self._queue_target_hash()
-            if not self.messaging.active_link:
-                self.messaging.enqueue(msg_type, save_path,
-                                        target_hash=queue_target,
-                                        file_name=fname, file_size=size, file_path=save_path)
-                return web.json_response({"status": "queued", "name": fname, "size": size})
-            if self.messaging._has_active_transfer():
-                self.messaging.enqueue(msg_type, save_path,
-                                        target_hash=queue_target,
-                                        file_name=fname, file_size=size, file_path=save_path)
+            transfer_id = str(uuid.uuid4())[:12]
+            active_peer = self._peer_dest_hash(self.messaging.active_peer_hash or "")
+            linked_to_target = (
+                self.messaging.active_link
+                and queue_target
+                and self._peers_equivalent(active_peer, queue_target)
+            )
+            if not linked_to_target or self.messaging._has_active_transfer():
+                self.messaging.enqueue(
+                    msg_type, save_path,
+                    target_hash=queue_target,
+                    file_name=fname, file_size=size, file_path=save_path,
+                    msg_id=transfer_id,
+                )
                 return web.json_response({
                     "status": "queued",
                     "name": fname,
                     "size": size,
-                    "reason": "transfer in progress",
+                    "msg_id": transfer_id,
+                    "reason": None if not self.messaging.active_link else "transfer in progress",
                 })
             my_hash = self._my_sender_hash()
             ts = time.time()
@@ -1961,12 +2014,13 @@ class ChatWebServer:
             zsize = os.path.getsize(zip_path)
             print(f"[folder] Created {zip_name} ({zsize} bytes, {file_count} files)")
             queue_target = self._queue_target_hash()
-            if not self.messaging.active_link:
-                self.messaging.enqueue("file", zip_path,
-                                        target_hash=queue_target,
-                                        file_name=zip_name, file_size=zsize, file_path=zip_path)
-                return web.json_response({"status": "queued", "name": zip_name, "size": zsize})
-            if self.messaging._has_active_transfer():
+            active_peer = self._peer_dest_hash(self.messaging.active_peer_hash or "")
+            linked_to_target = (
+                self.messaging.active_link
+                and queue_target
+                and self._peers_equivalent(active_peer, queue_target)
+            )
+            if not linked_to_target or self.messaging._has_active_transfer():
                 self.messaging.enqueue("file", zip_path,
                                         target_hash=queue_target,
                                         file_name=zip_name, file_size=zsize, file_path=zip_path)
@@ -1974,7 +2028,7 @@ class ChatWebServer:
                     "status": "queued",
                     "name": zip_name,
                     "size": zsize,
-                    "reason": "transfer in progress",
+                    "reason": None if not linked_to_target else "transfer in progress",
                 })
             my_hash = self._my_sender_hash()
             ts = time.time()
@@ -2062,16 +2116,20 @@ class ChatWebServer:
                 f.write(audio_bytes)
 
             queue_target = self._queue_target_hash()
-            if not self.messaging.active_link:
+            active_peer = self._peer_dest_hash(self.messaging.active_peer_hash or "")
+            linked_to_target = (
+                self.messaging.active_link
+                and queue_target
+                and self._peers_equivalent(active_peer, queue_target)
+            )
+            if not linked_to_target or self.messaging._has_active_transfer():
                 self.messaging.enqueue("voice", voice_path, target_hash=queue_target,
                                         file_name=os.path.basename(voice_path),
                                         file_size=len(audio_bytes), file_path=voice_path)
-                return web.json_response({"status": "queued"})
-            if self.messaging._has_active_transfer():
-                self.messaging.enqueue("voice", voice_path, target_hash=queue_target,
-                                        file_name=os.path.basename(voice_path),
-                                        file_size=len(audio_bytes), file_path=voice_path)
-                return web.json_response({"status": "queued", "reason": "transfer in progress"})
+                return web.json_response({
+                    "status": "queued",
+                    "reason": None if not linked_to_target else "transfer in progress",
+                })
 
             my_hash = self._my_sender_hash()
             ts = time.time()
@@ -2170,10 +2228,30 @@ class ChatWebServer:
         })
 
     async def handle_queue_clear(self, request):
+        cleared = 0
         if self.messaging:
-            self.messaging.message_queue = []
-            self.messaging._save_queue()
-        return web.json_response({"status": "ok"})
+            peer = None
+            if request.can_read_body:
+                try:
+                    data = await request.json()
+                    peer = (data.get("peer") or "").strip() or None
+                except Exception:
+                    pass
+            if not peer:
+                peer = request.query.get("peer", "").strip() or None
+            before = self.messaging.queue_size()
+            if peer:
+                self.messaging.clear_queue(self._peer_dest_hash(peer))
+            else:
+                self.messaging.clear_queue()
+            cleared = before
+            if cleared:
+                self.message_history = [
+                    m for m in self.message_history if m.get("status") != "queued"
+                ]
+                self._save_history()
+        await self._broadcast({"type": "queue_cleared", "data": {"count": cleared}})
+        return web.json_response({"status": "ok", "cleared": cleared})
 
     def _clear_history_for_peer(self, peer_hash):
         peer = self._peer_dest_hash(peer_hash)
@@ -2309,7 +2387,21 @@ class ChatWebServer:
         if msg_type == "send":
             text = data.get("text", "")
             if text and self.messaging:
-                if self.messaging.active_link:
+                peer_hint = data.get("peer") or data.get("hash") or ""
+                if peer_hint:
+                    self._ui_state["viewing_peer"] = self._peer_dest_hash(peer_hint)
+                target_hash = self._peer_dest_hash(peer_hint) if peer_hint else (
+                    self._queue_target_hash()
+                )
+                if not target_hash and self.messaging._session_peer_hash:
+                    target_hash = self.messaging._session_peer_hash
+                active_peer = self._peer_dest_hash(self.messaging.active_peer_hash or "")
+                linked_to_target = (
+                    self.messaging.active_link
+                    and target_hash
+                    and self._peers_equivalent(active_peer, target_hash)
+                )
+                if linked_to_target:
                     def on_receipt(status, receipt):
                         if self._loop:
                             asyncio.run_coroutine_threadsafe(
@@ -2319,7 +2411,7 @@ class ChatWebServer:
                     result = self.messaging.send_message(text, receipt_callback=on_receipt)
                     if result:
                         my_hash = self._my_sender_hash()
-                        chat_peer = self._session_chat_peer() or self._peer_dest_hash(self.active_peer)
+                        chat_peer = target_hash or self._session_chat_peer() or self._peer_dest_hash(self.active_peer)
                         entry = self._enrich_message({
                             "type": result.msg_type,
                             "content": result.content,
@@ -2336,12 +2428,6 @@ class ChatWebServer:
                             print(f"[chat] send type={entry['type']} peer={chat_peer[:16]} msg_id={entry['msg_id'][:8]}")
                         await self._broadcast({"type": "message", "data": entry})
                 else:
-                    peer_hint = data.get("peer") or data.get("hash") or ""
-                    target_hash = self._peer_dest_hash(peer_hint) if peer_hint else (
-                        self._session_chat_peer() or self._peer_dest_hash(self.active_peer)
-                    )
-                    if not target_hash and self.messaging._session_peer_hash:
-                        target_hash = self.messaging._session_peer_hash
                     msg_id = str(uuid.uuid4())[:12]
                     self.messaging.enqueue("text", text, target_hash=target_hash, msg_id=msg_id)
                     my_hash = self._my_sender_hash()
@@ -2397,6 +2483,7 @@ class ChatWebServer:
             ok, err = await self._wait_for_rns(timeout=30.0)
             if ok:
                 with self._announce_lock:
+                    self._enable_discovery(clear=False)
                     await asyncio.to_thread(self.messaging.announce)
                     if self.lan_beacon:
                         await asyncio.to_thread(self.lan_beacon.send, 3, True)
@@ -2422,6 +2509,24 @@ class ChatWebServer:
         asyncio.create_task(self._history_maintenance_loop())
         asyncio.create_task(self._link_failover_loop())
         asyncio.create_task(self._serial_watchdog_loop())
+        asyncio.create_task(self._queue_retry_loop())
+
+    async def _queue_retry_loop(self):
+        while True:
+            await asyncio.sleep(5)
+            if self._shutting_down or not self.messaging:
+                continue
+            if not self.messaging.message_queue or not self.messaging.active_link:
+                continue
+            try:
+                sent = await asyncio.to_thread(self.messaging.retry_queue)
+                if sent and self.websockets:
+                    await self._broadcast({
+                        "type": "queue_drained",
+                        "data": {"sent": sent, "remaining": self.messaging.queue_size()},
+                    })
+            except Exception as e:
+                print(f"[queue] Server retry error: {e}")
 
     def _register_routes(self, app):
         app.router.add_get("/", self.handle_index)
@@ -2494,6 +2599,8 @@ class ChatWebServer:
             self._reset_connection_state()
             asyncio.create_task(self._discovery_broadcaster())
             asyncio.create_task(self._embedded_init_rns(app))
+            asyncio.create_task(self._queue_retry_loop())
+            asyncio.create_task(self._link_failover_loop())
             retention = self.load_settings().get("history_retention", "never")
             if retention == "on_restart":
                 self.message_history = []

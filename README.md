@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.56
+**Current version:** 0.3.57
 
 ## Download
 
@@ -20,7 +20,7 @@ Portable Windows and Android builds are published automatically on every `v*` ta
 
 ## Windows (portable)
 
-1. Download **`chatxz-0.3.56-windows-portable.zip`** from [Releases](https://github.com/narl3yyy-svg/chatxz/releases).
+1. Download **`chatxz-0.3.57-windows-portable.zip`** from [Releases](https://github.com/narl3yyy-svg/chatxz/releases).
 2. Unzip anywhere (e.g. `C:\Users\You\chatxz`).
 3. Open the `chatxz` folder and double-click **`chatxz.exe`**.
 4. Browser opens at **http://127.0.0.1:8742**. Allow Windows Firewall on **private** networks if prompted (UDP 4242, TCP 8742).
@@ -58,7 +58,7 @@ Open **http://localhost:8742** (or `http://<your-lan-ip>:8742` with `--share`).
 ## Using chatxz
 
 1. **Copy your identity hash** from the sidebar (click to copy).
-2. **Announce** (📡) or wait for LAN discovery.
+2. Tap **Announce** (📡) to discover peers on the LAN (manual only — no auto-broadcast).
 3. **Click a peer** or paste a hash in **Connect**.
 4. When **Link: Active** shows in the dock, chat, send files, images, voice notes, and folders.
 
@@ -118,6 +118,7 @@ cd android && ./gradlew assembleDebug
 
 ## Recent changes
 
+- **v0.3.57** — Manual announce on all platforms; ephemeral chats for non-contacts; queue retry/clear; peer switch UI; long-text and file-send fixes
 - **v0.3.56** — Fix multi-peer routing, reconnect storms, file queue retries, live transfer speed
 - **v0.3.55** — Windows portable: run server on main thread; UDP-only RNS config (no AutoInterface)
 - **v0.3.54** — Windows portable: apply RNS Interface fix right before Reticulum starts

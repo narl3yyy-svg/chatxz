@@ -37,10 +37,13 @@ INITIATOR_INBOUND_WAIT_S = 8
 ANDROID_INITIATOR_INBOUND_WAIT_S = 10
 QUICK_OUTBOUND_TIMEOUT_S = 6
 HTTP_WAKE_TIMEOUT_S = 1.5
-LINK_FAILOVER_GRACE_S = 12
+LINK_FAILOVER_GRACE_S = 30
 LINK_STALE_FAILOVER_IDLE_S = 90
+SESSION_RECONNECT_MIN_IDLE_S = 18
 RECEIPT_FAILOVER_TIMEOUT_S = 30
 RECEIPT_FAILOVER_MIN_PENDING = 2
+MAX_CONCURRENT_RECEIVES = 2
+QUEUE_RETRY_INTERVAL_S = 5
 _NO_COMPRESS_SUFFIXES = frozenset({
     ".apk", ".zip", ".gz", ".bz2", ".xz", ".7z", ".rar",
     ".mp4", ".mkv", ".webm", ".mov", ".m4v",
@@ -140,6 +143,7 @@ class MessagingBackend:
         self._current_transfer_id = None
         self._progress_last = {}
         self._progress_throttle_s = 0.25
+        self._transfer_bytes_state = {}
         self.my_dest_hash = None
         self.identity_to_dest = {}
         self.dest_to_identity = {}
@@ -149,11 +153,14 @@ class MessagingBackend:
         self._link_handoff = False
         self._last_handoff = False
         self._failover_last_attempt = 0
-        self._failover_cooldown_s = 8
+        self._failover_cooldown_s = 20
         self._failover_in_progress = False
         self._last_link_established_at = 0
+        self._last_link_lost_at = 0
         self._session_peer_hash = None
         self._pending_sends = {}
+        self._longtext_temp_paths = {}
+        self._queue_retry_thread = None
 
     def _is_self_hash(self, h):
         clean = normalize_hash(h)
@@ -402,10 +409,13 @@ class MessagingBackend:
             if self._interface_healthy(path_iface):
                 new_score = self._interface_path_score(path_iface)
                 old_score = self._interface_path_score(attached)
-                if path_fam != att_fam:
-                    if not in_grace or new_score > old_score:
+                # UDP-LAN: ignore path-table flaps while the current link is healthy.
+                if path_fam == att_fam == "udp" and self._link_interface_healthy(self.active_link):
+                    pass
+                elif path_fam != att_fam:
+                    if not in_grace and new_score > old_score + 10:
                         return True, f"path moved to {path_fam} (link on {att_fam})"
-                elif new_score > old_score + 15:
+                elif not in_grace and new_score > old_score + 25:
                     return True, f"better path on {type(path_iface).__name__}"
 
         if att_fam == "lan" and not lan_mesh_has_peer():
@@ -461,8 +471,9 @@ class MessagingBackend:
         if self.active_link:
             return self.link_needs_failover()
         if self._has_active_transfer():
-            for link_id in list(self._pending_files.keys()):
-                self._flush_pending_files_failed(link_id)
+            return False, ""
+        if self._last_link_lost_at and (time.time() - self._last_link_lost_at) < SESSION_RECONNECT_MIN_IDLE_S:
+            return False, ""
         if time.time() - self._failover_last_attempt < self._failover_cooldown_s:
             return False, ""
         return True, "link dropped — reconnecting"
@@ -550,8 +561,10 @@ class MessagingBackend:
         peer_hash = self.dest_hash_for(peer_hash)
         old = self.active_link
         old_id = old.link_id if old else None
+        old_score = self._link_path_score(old)
+        new_score = self._link_path_score(link)
         self._link_handoff = True
-        self._last_handoff = True
+        self._last_handoff = new_score > old_score + 8
         try:
             print(
                 f"[messaging] Path switch to {peer_hash[:16]} "
@@ -567,7 +580,7 @@ class MessagingBackend:
                     old.teardown()
                 except Exception:
                     pass
-            self.drain_queue(link, peer_hash)
+            self.drain_queue(link, peer_hash, include_files=False)
         finally:
             self._link_handoff = False
 
@@ -589,6 +602,11 @@ class MessagingBackend:
             pass
 
     def enqueue(self, msg_type, content, target_hash=None, file_name=None, file_size=None, file_path=None, msg_id=None):
+        msg_id = msg_id or str(uuid.uuid4())[:12]
+        for entry in self.message_queue:
+            if entry.get("msg_id") == msg_id:
+                print(f"[queue] Already queued {msg_type} ({msg_id[:8]})")
+                return
         entry = {
             "type": msg_type,
             "content": content,
@@ -596,24 +614,53 @@ class MessagingBackend:
             "file_name": file_name,
             "file_size": file_size,
             "file_path": file_path,
-            "msg_id": msg_id or str(uuid.uuid4())[:12],
+            "msg_id": msg_id,
             "timestamp": time.time(),
         }
         self.message_queue.append(entry)
         self._save_queue()
         print(f"[queue] Enqueued {msg_type} for target {target_hash[:16] if target_hash else 'any (next peer)'}")
 
-    def drain_queue(self, link, target_hash):
+    def _queue_matches_target(self, entry, target_hash):
+        tgt = entry.get("target_hash")
+        if not tgt or not target_hash:
+            return True
+        return self.hashes_equivalent(tgt, target_hash)
+
+    def drain_queue(self, link, target_hash, include_files=True):
+        if not link or not target_hash:
+            return 0
         remaining = []
         sent = 0
         for entry in self.message_queue:
-            tgt = entry.get("target_hash")
-            if tgt is None or tgt == "" or tgt == target_hash:
-                try:
-                    if entry["type"] in ("text", "emoji"):
-                        result = self.send_message(
-                            entry["content"],
-                            msg_id=entry.get("msg_id"),
+            if not self._queue_matches_target(entry, target_hash):
+                remaining.append(entry)
+                continue
+            try:
+                if entry["type"] in ("text", "emoji"):
+                    result = self.send_message(
+                        entry["content"],
+                        msg_id=entry.get("msg_id"),
+                    )
+                    if result:
+                        sent += 1
+                        if self.on_queue_sent:
+                            try:
+                                self.on_queue_sent(result, target_hash, entry)
+                            except Exception as e:
+                                print(f"[queue] on_queue_sent error: {e}")
+                    else:
+                        remaining.append(entry)
+                elif entry["type"] in ("file", "image", "video", "voice"):
+                    if not include_files:
+                        remaining.append(entry)
+                        continue
+                    fp = entry.get("file_path") or entry.get("content")
+                    if fp and os.path.exists(fp):
+                        result = self.send_file(
+                            fp,
+                            entry["type"],
+                            transfer_id=entry.get("msg_id"),
                         )
                         if result:
                             sent += 1
@@ -622,24 +669,40 @@ class MessagingBackend:
                                     self.on_queue_sent(result, target_hash, entry)
                                 except Exception as e:
                                     print(f"[queue] on_queue_sent error: {e}")
-                    elif entry["type"] in ("file", "image", "video", "voice"):
-                        fp = entry.get("file_path") or entry.get("content")
-                        if fp and os.path.exists(fp):
-                            result = self.send_file(fp, entry["type"])
-                            if result:
-                                sent += 1
                         else:
-                            print(f"[queue] File no longer exists: {fp}")
                             remaining.append(entry)
-                except Exception as e:
-                    print(f"[queue] Failed to send: {e}")
-                    remaining.append(entry)
-            else:
+                    else:
+                        print(f"[queue] File no longer exists: {fp}")
+            except Exception as e:
+                print(f"[queue] Failed to send: {e}")
                 remaining.append(entry)
         if sent:
             print(f"[queue] Drained {sent} queued items for {target_hash[:16] if target_hash else 'peer'}...")
         self.message_queue = remaining
         self._save_queue()
+        return sent
+
+    def clear_queue(self, target_hash=None):
+        if not target_hash:
+            self.message_queue = []
+        else:
+            self.message_queue = [
+                e for e in self.message_queue
+                if not self._queue_matches_target(e, target_hash)
+            ]
+        self._save_queue()
+
+    def retry_queue(self):
+        link = self._outgoing_link()
+        peer = self.dest_hash_for(self.active_peer_hash or "")
+        if not link or not peer or peer == "unknown" or not self.message_queue:
+            return 0
+        try:
+            if getattr(link, "status", None) != RNS.Link.ACTIVE:
+                return 0
+        except Exception:
+            return 0
+        return self.drain_queue(link, peer, include_files=True)
 
     def queue_size(self):
         return len(self.message_queue)
@@ -662,8 +725,22 @@ class MessagingBackend:
             self._announce_thread.start()
 
         self.running = True
+        self._queue_retry_thread = threading.Thread(target=self._queue_retry_loop, name="chatxz-queue-retry", daemon=True)
+        self._queue_retry_thread.start()
         print(f"[messaging] Started (auto_announce={self.auto_announce})")
         return self.destination
+
+    def _queue_retry_loop(self):
+        while self.running:
+            for _ in range(QUEUE_RETRY_INTERVAL_S):
+                if not self.running:
+                    return
+                time.sleep(1)
+            if self.message_queue and self.active_link:
+                try:
+                    self.retry_queue()
+                except Exception as e:
+                    print(f"[queue] Retry loop error: {e}")
 
     def announce(self):
         self._announce()
@@ -815,7 +892,7 @@ class MessagingBackend:
                         except Exception:
                             pass
                         print("[connect] Link established")
-                        self.drain_queue(link, dest_hex)
+                        self.drain_queue(link, dest_hex, include_files=not self._failover_in_progress)
                         return True
                     if link.status == RNS.Link.CLOSED:
                         break
@@ -1021,15 +1098,28 @@ class MessagingBackend:
             except Exception as e:
                 print(f"[messaging] on_link_established error: {e}")
 
-    def _resource_accept_callback(self, link):
-        def callback(resource_ad):
+    def _active_incoming_resources(self, link):
+        try:
+            incoming = getattr(link, "incoming_resources", None) or []
+        except Exception:
+            return []
+        active = []
+        for res in incoming:
             try:
-                incoming = getattr(link, "incoming_resources", None) or []
-                if len(incoming) > 0:
-                    print("[transfer] Deferring resource (transfer in progress)")
-                    return False
+                status = getattr(res, "status", None)
+                if status in (RNS.Resource.COMPLETE, RNS.Resource.FAILED):
+                    continue
             except Exception:
                 pass
+            active.append(res)
+        return active
+
+    def _resource_accept_callback(self, link):
+        def callback(resource_ad):
+            active = self._active_incoming_resources(link)
+            if len(active) >= MAX_CONCURRENT_RECEIVES:
+                print(f"[transfer] Deferring resource ({len(active)} receive(s) active)")
+                return False
             return True
         return callback
 
@@ -1137,6 +1227,7 @@ class MessagingBackend:
                         self._session_peer_hash = self.active_peer_hash
                     self.active_link = None
                     self.active_peer_hash = None
+                    self._last_link_lost_at = time.time()
             if self._send_link and self._send_link.link_id == link.link_id:
                 self._send_link = self.active_link
             if self.on_link_closed and not self._link_handoff:
@@ -1200,6 +1291,7 @@ class MessagingBackend:
                         transfer_id=chat_msg.msg_id,
                         status="active",
                     )
+                    self._start_receive_progress_watch(link, chat_msg)
                 elif self.on_message:
                     self.on_message(chat_msg, remote_hash)
 
@@ -1313,11 +1405,54 @@ class MessagingBackend:
                 print(f"[messaging] Resource concluded error: {e}")
         return callback
 
+    def _calc_transfer_speed(self, transfer_id, bytes_done):
+        key = transfer_id or "default"
+        now = time.time()
+        state = self._transfer_bytes_state.get(key, {})
+        last_bytes = state.get("bytes", 0)
+        last_ts = state.get("ts", now)
+        elapsed = max(now - last_ts, 0.001)
+        speed_bps = max(0, int((bytes_done - last_bytes) / elapsed))
+        if bytes_done > last_bytes or (now - last_ts) > 1.0:
+            self._transfer_bytes_state[key] = {"bytes": bytes_done, "ts": now, "speed": speed_bps}
+        return format_speed(self._transfer_bytes_state.get(key, {}).get("speed", speed_bps))
+
+    def _start_receive_progress_watch(self, link, chat_msg):
+        def watch():
+            deadline = time.time() + 7200
+            fname = chat_msg.file_name or "file"
+            tid = chat_msg.msg_id
+            fsize = chat_msg.file_size or 0
+            while time.time() < deadline:
+                if link.link_id not in self.links:
+                    return
+                try:
+                    incoming = getattr(link, "incoming_resources", None) or []
+                    if not incoming:
+                        time.sleep(0.35)
+                        continue
+                    for res in incoming:
+                        pct = int(float(res.get_progress()) * 100)
+                        transferred = int(float(res.get_progress()) * fsize) if fsize else 0
+                        speed = self._calc_transfer_speed(tid, transferred)
+                        self._emit_progress(
+                            fname, pct, fsize, speed=speed,
+                            direction="receive", transfer_id=tid, status="active",
+                        )
+                        if getattr(res, "status", None) == RNS.Resource.COMPLETE:
+                            return
+                except Exception:
+                    pass
+                time.sleep(0.35)
+
+        threading.Thread(target=watch, name=f"recv-progress-{chat_msg.msg_id[:8]}", daemon=True).start()
+
     def _emit_progress(self, file_name, progress, total_size=0, speed="", direction="receive", transfer_id=None, status="active"):
         if transfer_id and transfer_id in self._cancelled_transfers and status == "active":
             return
         if status in ("complete", "cancelled", "failed"):
             self._progress_last.pop(transfer_id or file_name, None)
+            self._transfer_bytes_state.pop(transfer_id or file_name, None)
         elif status == "active":
             key = transfer_id or file_name or "default"
             now = time.time()
@@ -1480,6 +1615,12 @@ class MessagingBackend:
                 if prefer == "serial":
                     print("[connect] Serial failover blocked — plug in USB serial and ensure port is configured")
                 return False
+            if peer_ip and self._lan_transport_ready():
+                inbound_wait = INITIATOR_INBOUND_WAIT_S
+                print(f"[connect] Failover waiting for inbound link ({inbound_wait}s)...")
+                if self._wait_for_peer_link(peer, timeout_s=inbound_wait):
+                    print("[connect] Failover complete (inbound)")
+                    return True
             return self.connect_to(
                 peer,
                 peer_ip,
@@ -1529,7 +1670,12 @@ class MessagingBackend:
                 self.active_link and self.active_peer_hash
                 and not self.hashes_equivalent(clean, self.active_peer_hash)
             ):
-                old_link = self.active_link
+                print(
+                    f"[connect] Switching peer {self.active_peer_hash[:16]}... "
+                    f"-> {clean[:16]}..."
+                )
+                self._teardown_active_link(preserve_peer=False, handoff=False)
+                old_link = None
 
             known_identity = self._identity_for_hash(clean)
             if known_identity is None:
@@ -1693,31 +1839,70 @@ class MessagingBackend:
     def _send_long_text(self, msg, text, data, receipt_callback, link=None):
         link = link or self._outgoing_link()
         import tempfile as _tf
-        tmp = _tf.NamedTemporaryFile(delete=False, suffix=".txt", mode="w")
+        tmp = _tf.NamedTemporaryFile(delete=False, suffix=".txt", mode="w", encoding="utf-8")
         tmp.write(text)
         tmp_path = tmp.name
         tmp.close()
-        meta = ChatMessage(MESSAGE_TYPE_LONGTEXT, json.dumps({"msg_id": msg.msg_id, "file_name": "longtext.txt"}))
+        fsize = len(data)
+        meta = ChatMessage(
+            MESSAGE_TYPE_LONGTEXT,
+            json.dumps({"msg_id": msg.msg_id, "file_name": "longtext.txt"}),
+            msg_id=msg.msg_id,
+            file_name="longtext.txt",
+            file_size=fsize,
+        )
         try:
             packet = RNS.Packet(link, meta.to_json().encode("utf-8"))
             packet.send()
         except Exception as e:
             print(f"[messaging] Long text metadata send failed: {e}")
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
             return False
         try:
+            if not self._wait_for_send_slot(timeout_s=120):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+                return False
             f = open(tmp_path, "rb")
-            RNS.Resource(f, link, callback=self._resource_send_callback("longtext"),
-                         progress_callback=None, auto_compress=True)
-            print(f"[messaging] Sent long text: {text[:50]}... ({len(data)} bytes as resource)")
+            self._file_handles[msg.msg_id] = f
+            self._longtext_temp_paths[msg.msg_id] = tmp_path
+            self._current_transfer_id = msg.msg_id
+
+            def longtext_done(resource):
+                tmp_cleanup = self._longtext_temp_paths.pop(msg.msg_id, None)
+                if tmp_cleanup:
+                    try:
+                        os.unlink(tmp_cleanup)
+                    except Exception:
+                        pass
+                self._resource_send_callback("longtext.txt", msg.msg_id, fsize)(resource)
+
+            resource = RNS.Resource(
+                f, link,
+                callback=longtext_done,
+                progress_callback=None,
+                auto_compress=True,
+            )
+            self._active_resources[msg.msg_id] = resource
+            print(f"[messaging] Sent long text: {text[:50]}... ({fsize} bytes as resource)")
             self._sent_messages[msg.msg_id] = msg
+            self._pending_sends[msg.msg_id] = time.time()
             if receipt_callback:
                 self._receipt_callbacks[msg.msg_id] = receipt_callback
-            os.unlink(tmp_path)
             return msg
         except Exception as e:
             print(f"[messaging] Long text resource send failed: {e}")
-            os.unlink(tmp_path)
+            self._longtext_temp_paths.pop(msg.msg_id, None)
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            self._cleanup_transfer(msg.msg_id)
             return False
 
     def _wait_for_send_slot(self, timeout_s=180):
@@ -1770,7 +1955,12 @@ class MessagingBackend:
                         progress_callback(resource)
                     try:
                         pct = int(resource.get_progress() * 100)
-                        self._emit_progress(fname, pct, fsize, direction="send", transfer_id=transfer_id)
+                        transferred = int(float(resource.get_progress()) * fsize) if fsize else 0
+                        speed = self._calc_transfer_speed(transfer_id, transferred)
+                        self._emit_progress(
+                            fname, pct, fsize, speed=speed,
+                            direction="send", transfer_id=transfer_id,
+                        )
                     except Exception:
                         pass
 

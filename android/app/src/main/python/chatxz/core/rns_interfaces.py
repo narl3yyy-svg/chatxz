@@ -3,6 +3,7 @@
 import copy
 import glob
 import os
+import sys
 import time
 import uuid
 
@@ -589,7 +590,8 @@ def render_rns_config(interfaces, broadcast_ip=None, android=False, log=print):
             if iface.get("ifac_size"):
                 lines.append(f"    ifac_size = {iface.get('ifac_size')}")
         lines.append("")
-    if not android:
+    # AutoInterface uses multicast and is unreliable on Windows (firewall / virtual adapters).
+    if not android and sys.platform != "win32":
         lines.extend([
             "  [[Default Interface]]",
             "    type = AutoInterface",
