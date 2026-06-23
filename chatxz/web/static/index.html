@@ -1219,6 +1219,7 @@ let viewingPeer = null;
 let linkPeer = null;
 let connectInFlight = false;
 let progressLastUpdate = 0;
+let lastLinkToastAt = 0;
 const LS_VIEWING_PEER = 'chatxz_viewing_peer';
 const LS_UNREAD = 'chatxz_unread_counts';
 let unreadCounts = {};
@@ -1621,7 +1622,14 @@ function handleWSMessage(msg) {
         updatePeerHeader();
         loadHistoryForPeer(viewingPeer);
       }
-      toast(msg.data.path_switch ? 'Switched to faster link' : 'Connected');
+      const now = Date.now();
+      if (!msg.data.path_switch) {
+        toast('Connected');
+        lastLinkToastAt = now;
+      } else if (now - lastLinkToastAt > 45000) {
+        toast('Switched to faster link');
+        lastLinkToastAt = now;
+      }
     }
   } else if (msg.type === 'link_closed') {
     setLinkStatus('disconnected', 'Reconnecting…');

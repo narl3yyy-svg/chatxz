@@ -1117,27 +1117,41 @@ class ChatWebServer:
         if not self.discovery:
             return None
         clean = normalize_hash(hash_hex)
+        by_hash = None
+        by_rns = None
         by_ip = None
         for p in self.discovery.get_peers():
+            ph = normalize_hash(p.get("hash"))
+            ih = normalize_hash(p.get("identity_hash"))
             if peer_ip and p.get("ip") == peer_ip:
                 by_ip = p
-            if clean and normalize_hash(p.get("hash")) == clean:
+            if clean and (ph == clean or ih == clean):
+                by_hash = p
                 if p.get("via") == "rns":
-                    return p
+                    by_rns = p
+        if by_rns:
+            return by_rns
+        if by_hash:
+            return by_hash
+        if clean:
+            return None
         return by_ip
 
     def _resolve_connect_target(self, peer_hash, peer_ip=None):
-        from chatxz.core.discovery import normalize_hash
         resolved = self._resolve_peer_hash(peer_hash)
         if not self.discovery:
             return resolved
-        if peer_ip:
+        from chatxz.core.discovery import normalize_hash
+        clean = normalize_hash(resolved)
+        for p in self.discovery.get_peers():
+            ph = normalize_hash(p.get("hash"))
+            ih = normalize_hash(p.get("identity_hash"))
+            if clean and (ph == clean or ih == clean):
+                return self._resolve_peer_hash(p.get("hash"))
+        if peer_ip and not clean:
             for p in self.discovery.get_peers():
                 if p.get("ip") == peer_ip:
-                    ph = self._resolve_peer_hash(p.get("hash"))
-                    if p.get("via") == "rns":
-                        return ph
-                    return ph or resolved
+                    return self._resolve_peer_hash(p.get("hash"))
         return resolved
 
     async def handle_connect(self, request):
@@ -1505,7 +1519,7 @@ class ChatWebServer:
     async def _link_failover_loop(self):
         """Detect dead or migrated RNS paths and reconnect without server restart."""
         while True:
-            await asyncio.sleep(3)
+            await asyncio.sleep(8)
             if self._shutting_down or not self.messaging:
                 continue
             peer = self._peer_dest_hash(
@@ -2231,7 +2245,11 @@ class ChatWebServer:
             )
             if peer and not self.messaging.active_link:
                 now = time.time()
-                if now - self._session_resume_last >= 8.0:
+                if (
+                    now - self._session_resume_last >= 45.0
+                    and not getattr(self.messaging, "_failover_in_progress", False)
+                    and (now - getattr(self.messaging, "_failover_last_attempt", 0)) >= 20.0
+                ):
                     self._session_resume_last = now
                     peer_ip, peer_port = self._peer_connect_meta(peer)
                     asyncio.create_task(self._resume_session_task(peer, peer_ip, peer_port))
