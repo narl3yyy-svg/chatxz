@@ -94,7 +94,7 @@ def start_server():
     debug_mode = os.environ.get("CHATXZ_DEBUG") == "1"
     _startup_log(f"debug_mode={debug_mode}")
 
-    def _enable_debug_capture():
+    if debug_mode:
         try:
             from chatxz.utils.debug_log import start_debug_capture
             path = start_debug_capture()
@@ -139,9 +139,6 @@ def start_server():
             return "None", err
         _startup_log("failed: port timeout")
         return "None", f"Server timeout — port 8742 did not open in {port_timeout}s"
-
-    if debug_mode:
-        threading.Thread(target=_enable_debug_capture, name="chatxz-debug-log", daemon=True).start()
 
     _startup_log("server ready")
     return WEB_HOST, str(PORT)
