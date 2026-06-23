@@ -355,11 +355,11 @@ class ChatWebServer:
                 return True, None
             await asyncio.sleep(0.5)
         if self.embedded and not self.rns_init_error:
-            return False, "Network stack still starting — wait a few seconds and try again"
+            return False, "Network stack still starting - wait a few seconds and try again"
         return False, "not ready"
 
     def _reset_connection_state(self):
-        """Clear peer session on server start — UI reconnects explicitly."""
+        """Clear peer session on server start - UI reconnects explicitly."""
         if self.messaging and self.messaging.active_link:
             try:
                 self.messaging.active_link.teardown()
@@ -668,7 +668,7 @@ class ChatWebServer:
                 )
                 if needs_udp and (
                     is_android()
-                    or sys.platform == "win32"
+                    or sys.platform in ("win32", "darwin")
                     or os.environ.get("CHATXZ_PORTABLE")
                     or getattr(sys, "frozen", False)
                 ):
@@ -830,7 +830,7 @@ class ChatWebServer:
         except OSError as e:
             err = str(e)
             if "reinitialise" in err and self.messaging and self.messaging.destination:
-                print("[RNS] Already running — reusing existing instance")
+                print("[RNS] Already running - reusing existing instance")
                 return RNS.hexrep(self.messaging.destination.hash)
             print(f"[RNS] Bind error: {e}")
             if is_android():
@@ -893,7 +893,7 @@ class ChatWebServer:
             on_periodic=None,
         )
         self.lan_beacon.start()
-        print("[network] Manual announce only — use Announce button or peer connect wake")
+        print("[network] Manual announce only - use Announce button or peer connect wake")
 
         serial_hot = ensure_runtime_serial(settings.get("rns_interfaces"))
         if serial_hot:
@@ -1348,7 +1348,7 @@ class ChatWebServer:
             peer_ip, peer_port = self._resolve_peer_connect_ip(resolved_hash, peer_ip, peer_port)
             caller_ip = detect_lan_ip() or (self.host if self.host not in ("127.0.0.1", "0.0.0.0") else "")
             if is_android() and not caller_ip:
-                print("[connect] Warning: could not detect Android LAN IP — reverse connect may fail")
+                print("[connect] Warning: could not detect Android LAN IP - reverse connect may fail")
             ok = await self._run_blocking(
                 self.messaging.connect_to,
                 resolved_hash,
@@ -1857,7 +1857,7 @@ class ChatWebServer:
         })
 
     async def handle_path_wake(self, request):
-        """Silent RNS path refresh for connect wake — no discovery or beacon."""
+        """Silent RNS path refresh for connect wake - no discovery or beacon."""
         ok, err = await self._wait_for_rns()
         if not ok:
             return web.json_response({"error": err or "not ready"}, status=400)
@@ -2772,7 +2772,7 @@ class ChatWebServer:
                 hub_role = settings.get("hub_role", "off")
                 if hub_send:
                     if hub_role == "off":
-                        await ws.send_str(json.dumps({"type": "info", "data": "Hub mode is off — enable in Network settings"}))
+                        await ws.send_str(json.dumps({"type": "info", "data": "Hub mode is off - enable in Network settings"}))
                         return
                     def on_receipt(status, receipt):
                         if self._loop:
