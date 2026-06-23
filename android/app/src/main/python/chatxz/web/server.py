@@ -106,15 +106,20 @@ def _patch_rns_forward_ip(config_text, broadcast_ip):
 def detect_lan_ip():
     if is_android():
         return platform_lan_ip()
+    s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.5)
         s.connect(("10.255.255.255", 1))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        return s.getsockname()[0]
     except OSError:
         return None
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
 
 def cleanup_rns_stale():
     if is_android():

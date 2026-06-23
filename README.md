@@ -60,7 +60,7 @@ Reinstalling the Android app generates a **new identity** — saved contacts poi
 - **Manual announce** — broadcast presence when you choose
 - **Dual-path failover** — USB serial + LAN (UDP / AutoInterface) run together; chat auto-reconnects on the other path when one drops (no server restart)
 - **Serial hot-add** — plug USB serial mid-session on desktop; watchdog adds it to RNS when the port appears
-- **Fast connect** — outgoing links succeed or fail within ~10s (22s during failover)
+- **Fast connect** — outgoing links succeed or fail within ~6–12s (16s during failover)
 - **Reset network** — Settings → Network clears discovered peers, disconnects links, and zeros beacon counters (identity unchanged)
 - **Weekly auto-reset** — beacon/discovery counters optionally reset after 7 days (toggle in Settings)
 - **Contacts** — save peers with display names and LAN IP; tap/click to message (no manual Announce required when IP is saved)
@@ -238,6 +238,12 @@ chatxz --daemon
 ```
 
 ## Changelog (recent)
+
+### v0.3.48
+- **Serial connect** — quick outbound when serial RNS path is known; triple announce burst after USB hot-add
+- **Faster reconnect** — parallel HTTP wake+announce, tighter connect timeouts (6s quick outbound)
+- **Transfer stability** — ACCEPT_APP resource gating: one incoming file at a time (prevents overlapping resource ads)
+- **Socket hygiene** — fix unclosed socket warnings on Android startup
 
 ### v0.3.47
 - **Android serial fix** — complete usb4a `UsbConstants` shim (fixes hot-add `UsbConstants` error in logs)

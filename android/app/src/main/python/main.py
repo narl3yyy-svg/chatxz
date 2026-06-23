@@ -35,14 +35,20 @@ def _wait_for_port(host, port, timeout=90):
     while time.time() < deadline:
         if _server_error:
             return False
+        s = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(0.5)
             s.connect((host, port))
-            s.close()
             return True
         except OSError:
             time.sleep(0.25)
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
     return False
 
 

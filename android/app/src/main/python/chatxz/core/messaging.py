@@ -12,6 +12,7 @@ from chatxz.core.lan_rns import (
     lan_mesh_has_peer,
     online_interfaces,
     peer_path_entry,
+    peer_path_on_family,
     request_path_for_hash,
     request_paths_for_hash,
     scrub_peer_path,
@@ -24,18 +25,18 @@ from chatxz.utils.platform import is_android
 from chatxz.core.rns_interfaces import prune_dead_serial_interfaces
 
 APP_NAME = "chatxz"
-LINK_CONNECT_TIMEOUT_S = 14
-ANDROID_LINK_CONNECT_TIMEOUT_S = 16
-FAILOVER_CONNECT_TIMEOUT_S = 18
+LINK_CONNECT_TIMEOUT_S = 12
+ANDROID_LINK_CONNECT_TIMEOUT_S = 14
+FAILOVER_CONNECT_TIMEOUT_S = 16
 LINK_CONNECT_POLL_S = 0.05
-IDENTITY_WAIT_TIMEOUT_S = 14
-ANDROID_IDENTITY_WAIT_TIMEOUT_S = 18
-REVERSE_CONNECT_WAIT_S = 12
-ANDROID_REVERSE_CONNECT_WAIT_S = 16
-INITIATOR_INBOUND_WAIT_S = 12
-ANDROID_INITIATOR_INBOUND_WAIT_S = 16
-QUICK_OUTBOUND_TIMEOUT_S = 8
-HTTP_WAKE_TIMEOUT_S = 2.0
+IDENTITY_WAIT_TIMEOUT_S = 12
+ANDROID_IDENTITY_WAIT_TIMEOUT_S = 16
+REVERSE_CONNECT_WAIT_S = 10
+ANDROID_REVERSE_CONNECT_WAIT_S = 12
+INITIATOR_INBOUND_WAIT_S = 8
+ANDROID_INITIATOR_INBOUND_WAIT_S = 10
+QUICK_OUTBOUND_TIMEOUT_S = 6
+HTTP_WAKE_TIMEOUT_S = 1.5
 LINK_FAILOVER_GRACE_S = 12
 LINK_STALE_FAILOVER_IDLE_S = 90
 RECEIPT_FAILOVER_TIMEOUT_S = 10
@@ -144,6 +145,7 @@ class MessagingBackend:
         self._last_link_established_at = 0
         self._session_peer_hash = None
         self._pending_sends = {}
+        self._incoming_receive_busy = False
 
     def _is_self_hash(self, h):
         clean = normalize_hash(h)
@@ -254,6 +256,12 @@ class MessagingBackend:
         scrub_peer_path(clean)
         _, path_iface = peer_path_entry(clean)
         return bool(path_iface and self._interface_healthy(path_iface))
+
+    def _peer_has_path_on_family(self, dest_hash, family):
+        clean = normalize_hash(dest_hash)
+        if len(clean) != 32:
+            return False
+        return peer_path_on_family(clean, family) is not None
 
     def _peer_path_interface(self, dest_hash):
         scrub_peer_path(dest_hash)
@@ -661,12 +669,24 @@ class MessagingBackend:
         if not peer_ip:
             return False
         register_udp_peer_ip(peer_ip)
-        ok = self._request_peer_connect(
-            peer_ip, peer_port, my_hash,
-            caller_ip=caller_ip, caller_port=caller_port,
-        )
-        self._request_peer_announce(peer_ip, peer_port)
-        return ok
+        results = {"connect": False, "announce": False}
+
+        def _connect():
+            results["connect"] = self._request_peer_connect(
+                peer_ip, peer_port, my_hash,
+                caller_ip=caller_ip, caller_port=caller_port,
+            )
+
+        def _announce():
+            results["announce"] = self._request_peer_announce(peer_ip, peer_port)
+
+        t_connect = threading.Thread(target=_connect, daemon=True)
+        t_announce = threading.Thread(target=_announce, daemon=True)
+        t_connect.start()
+        t_announce.start()
+        t_connect.join(timeout=HTTP_WAKE_TIMEOUT_S + 0.5)
+        t_announce.join(timeout=HTTP_WAKE_TIMEOUT_S + 0.5)
+        return results["connect"] or results["announce"]
 
     def _prime_udp_path(self, dest_hex, peer_ip=None, timeout_s=None):
         """Establish a UDP RNS path before opening a link (required for Android peers)."""
@@ -933,14 +953,29 @@ class MessagingBackend:
             except Exception as e:
                 print(f"[messaging] on_link_established error: {e}")
 
+    def _resource_accept_callback(self, link):
+        def callback(resource_ad):
+            try:
+                incoming = getattr(link, "incoming_resources", None) or []
+                if incoming or self._incoming_receive_busy:
+                    print("[transfer] Deferring resource (receive slot busy)")
+                    return False
+                if not link.ready_for_new_resource():
+                    return False
+            except Exception:
+                pass
+            return True
+        return callback
+
     def _setup_link(self, link):
         self.links[link.link_id] = link
         link.set_link_closed_callback(self._link_closed(link))
         link.set_packet_callback(self._packet_callback(link))
         try:
-            link.set_resource_strategy(RNS.Link.ACCEPT_ALL)
+            link.set_resource_strategy(RNS.Link.ACCEPT_APP)
+            link.set_resource_callback(self._resource_accept_callback(link))
             link.set_resource_concluded_callback(self._resource_concluded(link))
-            print(f"[messaging] Resource strategy set to ACCEPT_ALL for link {link.link_id.hex()[:12]}")
+            print(f"[messaging] Resource strategy ACCEPT_APP for link {link.link_id.hex()[:12]}")
         except Exception as e:
             print(f"[messaging] Failed to set resource strategy: {e}")
 
@@ -1081,6 +1116,7 @@ class MessagingBackend:
                     with self._pending_lock:
                         queue = self._pending_files.setdefault(link.link_id, [])
                         queue.append(chat_msg)
+                    self._incoming_receive_busy = True
                     print(f"[messaging] Waiting for resource data for {chat_msg.file_name}...")
                     self._emit_progress(
                         chat_msg.file_name or "file",
@@ -1131,6 +1167,11 @@ class MessagingBackend:
             msg_type = media_type_for_filename(fname)
         return ChatMessage(msg_type, "", file_name=fname or f"file_{int(time.time())}")
 
+    def _clear_incoming_receive_busy(self, link):
+        with self._pending_lock:
+            queue = self._pending_files.get(link.link_id, [])
+            self._incoming_receive_busy = bool(queue)
+
     def _resource_concluded(self, link):
         def callback(resource):
             try:
@@ -1156,6 +1197,7 @@ class MessagingBackend:
                         print(f"[messaging] File copied from storage to {save_path}")
                     else:
                         print(f"[messaging] No data available in resource")
+                        self._clear_incoming_receive_busy(link)
                         return
 
                     if chat_msg.msg_type == MESSAGE_TYPE_LONGTEXT:
@@ -1201,6 +1243,8 @@ class MessagingBackend:
                         )
             except Exception as e:
                 print(f"[messaging] Resource concluded error: {e}")
+            finally:
+                self._clear_incoming_receive_busy(link)
         return callback
 
     def _emit_progress(self, file_name, progress, total_size=0, speed="", direction="receive", transfer_id=None, status="active"):
@@ -1469,8 +1513,23 @@ class MessagingBackend:
                 print("[connect] Serial-only mode (no LAN) — skipping HTTP wake")
                 peer_ip = None
                 self._prime_serial_path(dest_hex)
+                if self._peer_has_path_on_family(dest_hex, "serial"):
+                    print(f"[connect] Serial path known — quick outbound ({QUICK_OUTBOUND_TIMEOUT_S}s)")
+                    if self._establish_outbound_link(
+                        destination, dest_hex, clean, old_link=old_link,
+                        timeout_s=QUICK_OUTBOUND_TIMEOUT_S,
+                    ):
+                        return True
+            elif serial_ready and self._peer_has_path_on_family(dest_hex, "serial"):
+                self._prime_serial_path(dest_hex, timeout_s=8.0)
+                print(f"[connect] Serial path available — quick outbound ({QUICK_OUTBOUND_TIMEOUT_S}s)")
+                if self._establish_outbound_link(
+                    destination, dest_hex, clean, old_link=old_link,
+                    timeout_s=QUICK_OUTBOUND_TIMEOUT_S,
+                ):
+                    return True
             elif peer_ip and not respond_to_wake and lan_ready:
-                self._prime_udp_path(dest_hex, peer_ip=peer_ip, timeout_s=3.0)
+                self._prime_udp_path(dest_hex, peer_ip=peer_ip, timeout_s=2.5)
                 if self._peer_has_path(dest_hex):
                     print(f"[connect] Path known — quick outbound attempt ({QUICK_OUTBOUND_TIMEOUT_S}s)")
                     if self._establish_outbound_link(

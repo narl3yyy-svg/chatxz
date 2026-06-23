@@ -192,6 +192,16 @@ def peer_path_entry(hash_hex):
     return None, None
 
 
+def peer_path_on_family(hash_hex, family):
+    """Return path interface for peer when it uses the given transport family."""
+    scrub_peer_path(hash_hex)
+    _, path_iface = peer_path_entry(hash_hex)
+    if path_iface and interface_is_healthy(path_iface):
+        if family is None or interface_family(path_iface) == family:
+            return path_iface
+    return None
+
+
 def clear_peer_path(hash_hex):
     dest_bytes = _dest_bytes_for_hash(hash_hex)
     if dest_bytes is None:
