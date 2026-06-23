@@ -223,6 +223,12 @@ chatxz --daemon
 
 ## Changelog (recent)
 
+### v0.3.42
+- **Connect race fix** — wait for inbound link before outbound (avoids Android↔desktop dual-outbound deadlock)
+- **Inbound detection** — outbound connect loop recognizes peer-initiated links (fixes missed established sessions)
+- **Timeouts** — desktop connect raised to 20s (RNS establishment is 12s; 10s was too short per Arch logs)
+- **Reverse wake** — responder skips wake-back ping-pong; dedupes rapid `/api/request_connect` bursts
+
 ### v0.3.41
 - **Android RNS connect** — periodic beacon + auto RNS announce; UDP path priming before link; wake peer with `/api/announce`; longer connect timeouts
 - **Beacon identity** — register identity hash correctly from LAN beacon pubkey (fixes "no known identity" on connect)

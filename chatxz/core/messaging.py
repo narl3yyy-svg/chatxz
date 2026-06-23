@@ -23,14 +23,17 @@ from chatxz.utils.platform import is_android
 from chatxz.core.rns_interfaces import prune_dead_serial_interfaces
 
 APP_NAME = "chatxz"
-LINK_CONNECT_TIMEOUT_S = 10
-ANDROID_LINK_CONNECT_TIMEOUT_S = 20
-FAILOVER_CONNECT_TIMEOUT_S = 22
+LINK_CONNECT_TIMEOUT_S = 20
+ANDROID_LINK_CONNECT_TIMEOUT_S = 24
+FAILOVER_CONNECT_TIMEOUT_S = 26
 LINK_CONNECT_POLL_S = 0.1
 IDENTITY_WAIT_TIMEOUT_S = 18
 ANDROID_IDENTITY_WAIT_TIMEOUT_S = 24
-REVERSE_CONNECT_WAIT_S = 15
+REVERSE_CONNECT_WAIT_S = 22
 ANDROID_REVERSE_CONNECT_WAIT_S = 35
+INBOUND_WAIT_AFTER_WAKE_S = 6
+ANDROID_INBOUND_WAIT_AFTER_WAKE_S = 14
+REVERSE_RESPOND_INBOUND_WAIT_S = 5
 LINK_FAILOVER_GRACE_S = 12
 RECEIPT_FAILOVER_TIMEOUT_S = 10
 
@@ -661,18 +664,38 @@ class MessagingBackend:
             return True
         return False
 
-    def _wait_for_reverse_link(self, dest_hex, alt_hex=None, timeout_s=REVERSE_CONNECT_WAIT_S):
+    def _peer_link_active(self, dest_hex, alt_hex=None):
+        if not self.active_link or not self.active_peer_hash:
+            return False
+        if self.hashes_equivalent(dest_hex, self.active_peer_hash):
+            return True
+        if alt_hex and self.hashes_equivalent(alt_hex, self.active_peer_hash):
+            return True
+        return False
+
+    def _wait_for_peer_link(self, dest_hex, alt_hex=None, timeout_s=REVERSE_CONNECT_WAIT_S):
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             if self._interrupted():
                 return False
-            if self.active_link and self.active_peer_hash:
-                if self.hashes_equivalent(dest_hex, self.active_peer_hash):
-                    return True
-                if alt_hex and self.hashes_equivalent(alt_hex, self.active_peer_hash):
-                    return True
+            if self._peer_link_active(dest_hex, alt_hex):
+                return True
             time.sleep(LINK_CONNECT_POLL_S)
         return False
+
+    def _wait_for_reverse_link(self, dest_hex, alt_hex=None, timeout_s=REVERSE_CONNECT_WAIT_S):
+        return self._wait_for_peer_link(dest_hex, alt_hex=alt_hex, timeout_s=timeout_s)
+
+    def _teardown_outbound_attempt(self, link):
+        if not link:
+            return
+        try:
+            if link.status != RNS.Link.ACTIVE:
+                link.teardown()
+        except Exception:
+            pass
+        if link.link_id in self.links:
+            del self.links[link.link_id]
 
     def _announce_loop(self):
         while self.running:
@@ -1277,7 +1300,8 @@ class MessagingBackend:
         return self.shutdown_requested or not self.running
 
     def connect_to(self, destination_hash_hex, peer_ip=None, peer_port=None, peer_lookup=None,
-                   caller_ip=None, caller_port=8742, replace=False, failover=False):
+                   caller_ip=None, caller_port=8742, replace=False, failover=False,
+                   respond_to_wake=False):
         with self._connect_lock:
             if self._interrupted():
                 return False
@@ -1344,13 +1368,31 @@ class MessagingBackend:
             self.register_peer_mapping(dest_hex, ident_hex)
 
             my_hash = normalize_hash(self.my_dest_hash or dest_hex)
-            if peer_ip:
+            if self._peer_link_active(dest_hex, clean):
+                print(f"[connect] Already linked to {dest_hex[:16]}... (inbound)")
+                return True
+
+            if peer_ip and not respond_to_wake:
                 print(f"[connect] Waking peer at {peer_ip}:{peer_port or 8742}")
                 self._wake_peer(
                     peer_ip, peer_port, my_hash,
                     caller_ip=caller_ip, caller_port=caller_port,
                 )
-                time.sleep(0.5 if is_android() else 0.3)
+                inbound_wait = (
+                    ANDROID_INBOUND_WAIT_AFTER_WAKE_S if is_android()
+                    else INBOUND_WAIT_AFTER_WAKE_S
+                )
+                print(f"[connect] Waiting for peer inbound link ({inbound_wait}s)...")
+                if self._wait_for_peer_link(dest_hex, alt_hex=clean, timeout_s=inbound_wait):
+                    print("[connect] Link established (inbound after wake)")
+                    return True
+            elif peer_ip and respond_to_wake:
+                print(f"[connect] Reverse-connect to {peer_ip}:{peer_port or 8742} (no wake-back)")
+                if self._wait_for_peer_link(
+                    dest_hex, alt_hex=clean, timeout_s=REVERSE_RESPOND_INBOUND_WAIT_S
+                ):
+                    print("[connect] Link established (inbound before reverse outbound)")
+                    return True
             scrub_peer_path(dest_hex)
             if peer_ip or is_android():
                 self._prime_udp_path(dest_hex, peer_ip=peer_ip)
@@ -1364,18 +1406,22 @@ class MessagingBackend:
             print(f"[connect] Connecting to {dest_hex[:16]}... (timeout {connect_timeout}s)")
 
             link = None
+            link_established = False
             try:
                 link = RNS.Link(destination)
                 deadline = time.time() + connect_timeout
                 while time.time() < deadline:
                     if self._interrupted():
                         print("[connect] Aborted (shutdown)")
-                        try:
-                            link.teardown()
-                        except Exception:
-                            pass
+                        self._teardown_outbound_attempt(link)
                         return False
                     time.sleep(LINK_CONNECT_POLL_S)
+                    if self._peer_link_active(dest_hex, clean):
+                        print("[connect] Link established (inbound during outbound wait)")
+                        self._teardown_outbound_attempt(link)
+                        link = None
+                        link_established = True
+                        return True
                     try:
                         if link.status == RNS.Link.ACTIVE:
                             if old_link and old_link.link_id != link.link_id:
@@ -1397,6 +1443,7 @@ class MessagingBackend:
                                 pass
                             print("[connect] Link established")
                             self.drain_queue(link, dest_hex)
+                            link_established = True
                             return True
                         if link.status == RNS.Link.CLOSED:
                             break
@@ -1404,26 +1451,26 @@ class MessagingBackend:
                         pass
                     if self.active_link and link and self.active_link.link_id == link.link_id:
                         print("[connect] Link established")
+                        link_established = True
                         return True
             except Exception as e:
                 print(f"[connect] Link failed: {e}")
             finally:
-                if link:
-                    try:
-                        if link.status != RNS.Link.ACTIVE:
-                            link.teardown()
-                    except Exception:
-                        pass
-                    if link.link_id in self.links:
-                        del self.links[link.link_id]
+                if not link_established:
+                    self._teardown_outbound_attempt(link)
+
+            if self._peer_link_active(dest_hex, clean):
+                print("[connect] Link established (inbound after outbound attempt)")
+                return True
 
             if peer_ip:
                 reverse_wait = ANDROID_REVERSE_CONNECT_WAIT_S if is_android() else REVERSE_CONNECT_WAIT_S
                 print(f"[connect] Outbound link timed out — waiting for reverse connect ({reverse_wait}s)...")
-                self._wake_peer(
-                    peer_ip, peer_port, my_hash,
-                    caller_ip=caller_ip, caller_port=caller_port,
-                )
+                if not respond_to_wake:
+                    self._wake_peer(
+                        peer_ip, peer_port, my_hash,
+                        caller_ip=caller_ip, caller_port=caller_port,
+                    )
                 if self._wait_for_reverse_link(dest_hex, alt_hex=clean, timeout_s=reverse_wait):
                     print("[connect] Reverse connect established")
                     return True

@@ -275,6 +275,7 @@ class ChatWebServer:
         self._loop = None
         self.rns_init_error = None
         self._announce_lock = threading.Lock()
+        self._reverse_connect_last = {}
         self._shutting_down = False
         self._progress_last = {}
         self._progress_throttle_ms = 250
@@ -1077,6 +1078,9 @@ class ChatWebServer:
                 self._discovery_peer_for_connect,
                 caller_ip,
                 caller_port,
+                False,
+                False,
+                True,
             )
             if self._shutting_down or result is None:
                 return
@@ -1108,6 +1112,14 @@ class ChatWebServer:
             peer_port = data.get("port") or 8742
             caller_ip = detect_lan_ip() or (self.host if self.host not in ("127.0.0.1", "0.0.0.0") else "")
             resolved = self._resolve_connect_target(peer_hash, peer_ip)
+            if self.messaging and self.messaging.active_link:
+                if self._peers_equivalent(resolved, self.messaging.active_peer_hash):
+                    return web.json_response({"status": "ok", "connected": True})
+            dedupe_key = f"{peer_ip or 'unknown'}:{resolved[:16]}"
+            now = time.time()
+            if now - self._reverse_connect_last.get(dedupe_key, 0) < 3.0:
+                return web.json_response({"status": "ok", "connecting": True, "deduped": True})
+            self._reverse_connect_last[dedupe_key] = now
             print(f"[connect] Reverse-connect request from {peer_ip or 'unknown'} for {resolved[:16]}...")
             asyncio.create_task(
                 self._reverse_connect_task(resolved, peer_ip, peer_port, caller_ip, self.port)
