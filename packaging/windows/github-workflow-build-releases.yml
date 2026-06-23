@@ -69,10 +69,10 @@ jobs:
           echo "apk=${APK}" >> "$GITHUB_OUTPUT"
 
       - name: Build APK
-        run: cd android && chmod +x gradlew && ./gradlew assembleDebug --no-daemon
+        run: cd android && chmod +x gradlew && ./gradlew assembleRelease --no-daemon
 
       - name: Rename APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk "${{ steps.version.outputs.apk }}"
+        run: cp android/app/build/outputs/apk/release/app-release.apk "${{ steps.version.outputs.apk }}"
 
       - uses: actions/upload-artifact@v7
         with:
