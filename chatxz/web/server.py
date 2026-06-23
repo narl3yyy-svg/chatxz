@@ -184,7 +184,7 @@ def _is_port_in_use(port, sock_type=socket.SOCK_DGRAM, host="0.0.0.0"):
 
 def stop_stale_chatxz_servers(exclude_pid=None):
     """Stop other chatxz server/cli processes holding RNS ports."""
-    if is_android():
+    if is_android() or sys.platform == "win32":
         return 0
     exclude_pid = exclude_pid or os.getpid()
     targets = set()
@@ -1015,11 +1015,16 @@ class ChatWebServer:
                 pass
 
     def _static_dir(self):
-        candidates = [
+        candidates = []
+        if getattr(sys, "frozen", False):
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass:
+                candidates.append(Path(meipass) / "chatxz" / "web" / "static")
+        candidates.extend([
             Path(__file__).parent / "static",
             Path.cwd() / "chatxz" / "web" / "static",
             Path.cwd() / "static",
-        ]
+        ])
         if is_android():
             candidates.append(Path(__file__).resolve().parent / "static")
         for p in candidates:

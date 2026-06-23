@@ -74,7 +74,19 @@ Reinstalling the Android app generates a **new identity** — saved contacts poi
 |----------|--------|
 | Arch Linux | Supported |
 | Ubuntu / Debian | Supported |
+| Windows 11 | Supported (portable zip — no installer) |
 | Android (APK) | Supported (WebView + embedded Python) |
+
+## Quick Start (Windows 11 — portable)
+
+1. Download **`chatxz-X.Y.Z-windows-portable.zip`** from [Releases](https://github.com/narl3yyy-svg/chatxz/releases).
+2. Unzip to any folder (e.g. `C:\Users\You\chatxz`).
+3. Double-click **`chatxz.exe`** inside the unzipped folder.
+4. Your browser opens to **http://127.0.0.1:8742**. Allow Windows Firewall on private networks if prompted.
+
+All data (identity, chats, received files) stays in **`chatxz-data\`** next to the exe — move or back up the whole folder to relocate.
+
+To build the zip yourself on Windows: `powershell -File packaging\windows\build-portable.ps1`
 
 ## Quick Start (Linux)
 
@@ -238,6 +250,9 @@ chatxz --daemon
 ```
 
 ## Changelog (recent)
+
+### v0.3.51
+- **Windows portable** — zip release with `chatxz.exe` (no installer); unzip and run; data in `chatxz-data/` beside the exe
 
 ### v0.3.50
 - **Emoji picker** — stays open while selecting; closes on Send or click outside
