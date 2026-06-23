@@ -501,6 +501,10 @@ def hot_add_serial_interface(port, speed=SERIAL_DEFAULT_BAUD, ifac_size=16):
         _finalize_rns_interface(iface, ifac_size=ifac_size)
         RNS.Transport.add_interface(iface)
         print(f"[serial] Hot-added RNS SerialInterface on {port}")
+        try:
+            RNS.Transport.identity.announce()
+        except Exception:
+            pass
         return iface
     except Exception as exc:
         print(f"[serial] Hot-add failed for {port}: {exc}")

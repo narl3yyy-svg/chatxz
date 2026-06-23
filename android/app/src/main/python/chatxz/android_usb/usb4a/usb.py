@@ -10,6 +10,25 @@ USB_RECIPIENT_OTHER = 0x03
 ACTION_USB_PERMISSION = "com.chatxz.android.USB_PERMISSION"
 
 
+def _usb_const(name, fallback):
+    try:
+        J = jclass("android.hardware.usb.UsbConstants")
+        return int(getattr(J, name))
+    except Exception:
+        return fallback
+
+
+class UsbConstants:
+    """Mirror android.hardware.usb.UsbConstants for usbserial4a."""
+
+    USB_DIR_IN = _usb_const("USB_DIR_IN", 128)
+    USB_DIR_OUT = _usb_const("USB_DIR_OUT", 0)
+    USB_ENDPOINT_XFER_BULK = _usb_const("USB_ENDPOINT_XFER_BULK", 2)
+    USB_ENDPOINT_XFER_INT = _usb_const("USB_ENDPOINT_XFER_INT", 3)
+    USB_CLASS_COMM = _usb_const("USB_CLASS_COMM", 2)
+    USB_CLASS_CDC_DATA = _usb_const("USB_CLASS_CDC_DATA", 10)
+
+
 class USBError(IOError):
     pass
 

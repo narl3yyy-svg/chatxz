@@ -794,6 +794,8 @@ class ChatWebServer:
         serial_hot = ensure_runtime_serial(settings.get("rns_interfaces"))
         if serial_hot:
             print(f"[serial] Runtime serial interface active on {getattr(serial_hot, 'port', '?')}")
+            if self.messaging:
+                self.messaging.announce()
 
         return my_hash
 
@@ -1258,10 +1260,11 @@ class ChatWebServer:
             self.save_settings(settings)
             self._write_rns_config(settings)
             serial_hot = None
-            if is_android():
-                serial_hot = await self._run_blocking(
-                    ensure_runtime_serial, settings.get("rns_interfaces")
-                )
+            serial_hot = await self._run_blocking(
+                ensure_runtime_serial, settings.get("rns_interfaces")
+            )
+            if serial_hot and self.messaging:
+                await self._run_blocking(self.messaging.announce)
             msg = "Interface updated."
             if is_android():
                 msg = (

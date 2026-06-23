@@ -24,16 +24,18 @@ from chatxz.utils.platform import is_android
 from chatxz.core.rns_interfaces import prune_dead_serial_interfaces
 
 APP_NAME = "chatxz"
-LINK_CONNECT_TIMEOUT_S = 20
-ANDROID_LINK_CONNECT_TIMEOUT_S = 24
-FAILOVER_CONNECT_TIMEOUT_S = 26
-LINK_CONNECT_POLL_S = 0.1
-IDENTITY_WAIT_TIMEOUT_S = 18
-ANDROID_IDENTITY_WAIT_TIMEOUT_S = 24
-REVERSE_CONNECT_WAIT_S = 22
-ANDROID_REVERSE_CONNECT_WAIT_S = 35
-INITIATOR_INBOUND_WAIT_S = 28
-ANDROID_INITIATOR_INBOUND_WAIT_S = 32
+LINK_CONNECT_TIMEOUT_S = 14
+ANDROID_LINK_CONNECT_TIMEOUT_S = 16
+FAILOVER_CONNECT_TIMEOUT_S = 18
+LINK_CONNECT_POLL_S = 0.05
+IDENTITY_WAIT_TIMEOUT_S = 14
+ANDROID_IDENTITY_WAIT_TIMEOUT_S = 18
+REVERSE_CONNECT_WAIT_S = 12
+ANDROID_REVERSE_CONNECT_WAIT_S = 16
+INITIATOR_INBOUND_WAIT_S = 12
+ANDROID_INITIATOR_INBOUND_WAIT_S = 16
+QUICK_OUTBOUND_TIMEOUT_S = 8
+HTTP_WAKE_TIMEOUT_S = 2.0
 LINK_FAILOVER_GRACE_S = 12
 LINK_STALE_FAILOVER_IDLE_S = 90
 RECEIPT_FAILOVER_TIMEOUT_S = 10
@@ -237,7 +239,7 @@ class MessagingBackend:
         if fam == "lan":
             return 100
         if fam == "serial":
-            return 20
+            return 60 if not self._lan_transport_ready() else 25
         if fam == "udp":
             return 80
         return 50
@@ -312,7 +314,7 @@ class MessagingBackend:
         self._announce(peer_ip=peer_ip, unicast_subnet=peer_ip is None and is_android())
         request_paths_for_hash(peer, family=prefer_family)
         if prefer_family:
-            wait_s = 20.0 if prefer_family in ("lan", "udp") else 12.0
+            wait_s = 12.0 if prefer_family in ("lan", "udp") else 18.0
             path_iface = wait_for_peer_path(peer, family=prefer_family, timeout_s=wait_s)
             if path_iface:
                 print(f"[connect] Path ready on {type(path_iface).__name__} ({prefer_family})")
@@ -616,7 +618,13 @@ class MessagingBackend:
                 return
         print(f"[messaging] Announced on LAN (name={self.display_name or 'none'})")
 
-    def _http_peer_post(self, peer_ip, peer_port, path, payload=None, timeout=3.0):
+    def _lan_transport_ready(self):
+        return lan_mesh_has_peer() or bool(online_interfaces(family="udp"))
+
+    def _serial_transport_ready(self):
+        return serial_interface_online() is not None
+
+    def _http_peer_post(self, peer_ip, peer_port, path, payload=None, timeout=HTTP_WAKE_TIMEOUT_S):
         if not peer_ip:
             return False
         port = int(peer_port or 8742)
@@ -636,7 +644,7 @@ class MessagingBackend:
 
     def _request_peer_announce(self, peer_ip, peer_port):
         """Ask peer to send RNS + beacon announces (helps Android UDP path discovery)."""
-        return self._http_peer_post(peer_ip, peer_port, "/api/announce", payload={}, timeout=4.0)
+        return self._http_peer_post(peer_ip, peer_port, "/api/announce", payload={})
 
     def _request_peer_connect(self, peer_ip, peer_port, my_hash, caller_ip=None, caller_port=8742):
         """Ask peer to open outbound RNS link back to us (we wait inbound)."""
@@ -663,7 +671,7 @@ class MessagingBackend:
     def _prime_udp_path(self, dest_hex, peer_ip=None, timeout_s=None):
         """Establish a UDP RNS path before opening a link (required for Android peers)."""
         if timeout_s is None:
-            timeout_s = 10.0 if is_android() else 6.0
+            timeout_s = 6.0 if is_android() else 4.0
         self._announce(peer_ip=peer_ip, unicast_subnet=peer_ip is None and is_android())
         request_paths_for_hash(dest_hex, family="udp")
         path_iface = wait_for_peer_path(dest_hex, family="udp", timeout_s=timeout_s)
@@ -671,6 +679,69 @@ class MessagingBackend:
             print(f"[connect] UDP path ready via {type(path_iface).__name__}")
             return True
         return False
+
+    def _prime_serial_path(self, dest_hex, timeout_s=18.0):
+        """Establish an RNS path over USB serial (no LAN/HTTP wake required)."""
+        if not self._serial_transport_ready():
+            return False
+        print("[connect] Priming serial RNS path...")
+        self._announce()
+        request_paths_for_hash(dest_hex, family="serial")
+        path_iface = wait_for_peer_path(dest_hex, family="serial", timeout_s=timeout_s)
+        if path_iface:
+            print(f"[connect] Serial path ready via {type(path_iface).__name__}")
+            return True
+        print("[connect] Serial path not ready yet — ensure both ends have USB serial configured")
+        return False
+
+    def _establish_outbound_link(self, destination, dest_hex, clean, old_link=None,
+                                 timeout_s=LINK_CONNECT_TIMEOUT_S):
+        """Try to open an outbound RNS link within timeout_s."""
+        link = None
+        try:
+            link = RNS.Link(destination)
+            deadline = time.time() + timeout_s
+            while time.time() < deadline:
+                if self._interrupted():
+                    self._teardown_outbound_attempt(link)
+                    return False
+                time.sleep(LINK_CONNECT_POLL_S)
+                if self._peer_link_active(dest_hex, clean):
+                    self._teardown_outbound_attempt(link)
+                    return True
+                try:
+                    if link.status == RNS.Link.ACTIVE:
+                        if old_link and old_link.link_id != link.link_id:
+                            self._link_handoff = True
+                            try:
+                                old_link.teardown()
+                            except Exception:
+                                pass
+                            finally:
+                                self._link_handoff = False
+                        self._last_handoff = bool(old_link)
+                        self._setup_link(link)
+                        self._cache_link_peer(link, dest_hex)
+                        self._notify_link_established(link, dest_hex)
+                        self._send_link = link
+                        try:
+                            link.identify(self.identity)
+                        except Exception:
+                            pass
+                        print("[connect] Link established")
+                        self.drain_queue(link, dest_hex)
+                        return True
+                    if link.status == RNS.Link.CLOSED:
+                        break
+                except Exception:
+                    pass
+                if self.active_link and link and self.active_link.link_id == link.link_id:
+                    return True
+        except Exception as e:
+            print(f"[connect] Link failed: {e}")
+        finally:
+            self._teardown_outbound_attempt(link)
+        return self._peer_link_active(dest_hex, clean)
 
     def _peer_link_active(self, dest_hex, alt_hex=None):
         if not self.active_link or not self.active_peer_hash:
@@ -1390,7 +1461,23 @@ class MessagingBackend:
                 print(f"[connect] Already linked to {dest_hex[:16]}... (inbound)")
                 return True
 
-            if peer_ip and not respond_to_wake:
+            lan_ready = self._lan_transport_ready()
+            serial_ready = self._serial_transport_ready()
+            serial_only = serial_ready and not lan_ready
+
+            if serial_only:
+                print("[connect] Serial-only mode (no LAN) — skipping HTTP wake")
+                peer_ip = None
+                self._prime_serial_path(dest_hex)
+            elif peer_ip and not respond_to_wake and lan_ready:
+                self._prime_udp_path(dest_hex, peer_ip=peer_ip, timeout_s=3.0)
+                if self._peer_has_path(dest_hex):
+                    print(f"[connect] Path known — quick outbound attempt ({QUICK_OUTBOUND_TIMEOUT_S}s)")
+                    if self._establish_outbound_link(
+                        destination, dest_hex, clean, old_link=old_link,
+                        timeout_s=QUICK_OUTBOUND_TIMEOUT_S,
+                    ):
+                        return True
                 print(f"[connect] Waking peer at {peer_ip}:{peer_port or 8742}")
                 self._wake_peer(
                     peer_ip, peer_port, my_hash,
@@ -1400,6 +1487,9 @@ class MessagingBackend:
                     ANDROID_INITIATOR_INBOUND_WAIT_S if is_android()
                     else INITIATOR_INBOUND_WAIT_S
                 )
+                if self._wait_for_peer_link(dest_hex, alt_hex=clean, timeout_s=1.5):
+                    print("[connect] Link established (inbound after wake)")
+                    return True
                 print(f"[connect] Waiting for peer outbound link ({inbound_wait}s)...")
                 if self._wait_for_peer_link(dest_hex, alt_hex=clean, timeout_s=inbound_wait):
                     print("[connect] Link established (inbound after wake)")
@@ -1410,79 +1500,36 @@ class MessagingBackend:
                     f"[connect] Outbound to caller at {peer_ip}:{peer_port or 8742} "
                     f"({dest_hex[:16]}...)"
                 )
+            elif serial_ready and not peer_ip:
+                self._prime_serial_path(dest_hex, timeout_s=12.0)
+
             scrub_peer_path(dest_hex)
-            if peer_ip or is_android():
+            if serial_only or (serial_ready and not lan_ready):
+                request_paths_for_hash(dest_hex, family="serial")
+            elif peer_ip or is_android():
                 self._prime_udp_path(dest_hex, peer_ip=peer_ip)
             else:
                 request_paths_for_hash(dest_hex)
-            if is_android() and not peer_ip:
+            if is_android() and not peer_ip and not serial_ready:
                 print("[connect] Android: no peer IP — connect from Discovered list or add contact with LAN IP")
             connect_timeout = FAILOVER_CONNECT_TIMEOUT_S if failover else (
                 ANDROID_LINK_CONNECT_TIMEOUT_S if is_android() else LINK_CONNECT_TIMEOUT_S
             )
             print(f"[connect] Connecting to {dest_hex[:16]}... (timeout {connect_timeout}s)")
 
-            link = None
-            link_established = False
-            try:
-                link = RNS.Link(destination)
-                deadline = time.time() + connect_timeout
-                while time.time() < deadline:
-                    if self._interrupted():
-                        print("[connect] Aborted (shutdown)")
-                        self._teardown_outbound_attempt(link)
-                        return False
-                    time.sleep(LINK_CONNECT_POLL_S)
-                    if self._peer_link_active(dest_hex, clean):
-                        print("[connect] Link established (inbound during outbound wait)")
-                        self._teardown_outbound_attempt(link)
-                        link = None
-                        link_established = True
-                        return True
-                    try:
-                        if link.status == RNS.Link.ACTIVE:
-                            if old_link and old_link.link_id != link.link_id:
-                                self._link_handoff = True
-                                try:
-                                    old_link.teardown()
-                                except Exception:
-                                    pass
-                                finally:
-                                    self._link_handoff = False
-                            self._last_handoff = bool(old_link)
-                            self._setup_link(link)
-                            self._cache_link_peer(link, dest_hex)
-                            self._notify_link_established(link, dest_hex)
-                            self._send_link = link
-                            try:
-                                link.identify(self.identity)
-                            except Exception:
-                                pass
-                            print("[connect] Link established")
-                            self.drain_queue(link, dest_hex)
-                            link_established = True
-                            return True
-                        if link.status == RNS.Link.CLOSED:
-                            break
-                    except Exception:
-                        pass
-                    if self.active_link and link and self.active_link.link_id == link.link_id:
-                        print("[connect] Link established")
-                        link_established = True
-                        return True
-            except Exception as e:
-                print(f"[connect] Link failed: {e}")
-            finally:
-                if not link_established:
-                    self._teardown_outbound_attempt(link)
+            if self._establish_outbound_link(
+                destination, dest_hex, clean, old_link=old_link,
+                timeout_s=connect_timeout,
+            ):
+                return True
 
             if self._peer_link_active(dest_hex, clean):
                 print("[connect] Link established (inbound after outbound attempt)")
                 return True
 
-            if peer_ip:
+            if peer_ip and lan_ready:
                 reverse_wait = ANDROID_REVERSE_CONNECT_WAIT_S if is_android() else REVERSE_CONNECT_WAIT_S
-                print(f"[connect] Outbound link timed out — waiting for reverse connect ({reverse_wait}s)...")
+                print(f"[connect] Outbound timed out — waiting for reverse connect ({reverse_wait}s)...")
                 if not respond_to_wake:
                     self._wake_peer(
                         peer_ip, peer_port, my_hash,
@@ -1548,11 +1595,22 @@ class MessagingBackend:
             os.unlink(tmp_path)
             return False
 
+    def _wait_for_send_slot(self, timeout_s=180):
+        deadline = time.time() + timeout_s
+        while self._current_transfer_id or self._active_resources:
+            if time.time() > deadline:
+                print("[transfer] Timed out waiting for previous transfer to finish")
+                return False
+            time.sleep(0.15)
+        return True
+
     def send_file(self, file_path, msg_type=MESSAGE_TYPE_FILE, progress_callback=None, transfer_id=None):
         link = self._outgoing_link()
         if not link or not os.path.exists(file_path):
             return False
         with self._file_send_lock:
+            if not self._wait_for_send_slot():
+                return False
             fname = os.path.basename(file_path)
             fsize = os.path.getsize(file_path)
             chat_msg = ChatMessage(msg_type, str(time.time()), file_name=fname, file_size=fsize, msg_id=transfer_id)
@@ -1586,10 +1644,14 @@ class MessagingBackend:
 
                 f = open(file_path, "rb")
                 self._file_handles[transfer_id] = f
+                compress = (
+                    msg_type not in (MESSAGE_TYPE_IMAGE, MESSAGE_TYPE_VIDEO)
+                    and fsize > 65536
+                )
                 resource = RNS.Resource(f, link,
                              callback=self._resource_send_callback(fname, transfer_id, fsize),
                              progress_callback=wrapped_progress,
-                             auto_compress=False)
+                             auto_compress=compress)
                 resource_holder["resource"] = resource
                 self._active_resources[transfer_id] = resource
                 print(f"[messaging] Sent file: {fname} ({fsize} bytes)")

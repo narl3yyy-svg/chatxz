@@ -144,10 +144,12 @@ Use these flags when diagnosing issues:
 5. Check `GET /api/debug` — beacon counters, active peer, message count.
 6. Browser devtools console shows WebSocket events (`[ws] Message type: ...`).
 
-### Serial + LAN failover (desktop)
+### Serial + LAN failover
 
-1. **Settings → Network** — add **UDP LAN** (default) and **Serial**; pick `/dev/ttyUSB0` (or your port), baud **57600**, click **Apply**, restart chatxz (or plug USB and wait ~5s for hot-add).
-2. Confirm **Serial in RNS: yes** in Network status on **both** machines before expecting LAN↔serial failover.
+1. **Settings → Network** — add **UDP LAN** (default) and **Serial**; pick your port (`/dev/ttyUSB0` on desktop, `/dev/bus/usb/...` on Android OTG), baud **57600**, click **Apply**.
+2. Confirm **Serial in RNS: yes** on **both** ends. Android logs should show `[serial] Hot-added RNS SerialInterface` (not `UsbConstants` errors).
+3. **Serial-only** (no WiFi): connect USB-TTL adapters back-to-back; chatxz skips HTTP wake and uses RNS over serial automatically when LAN is down.
+4. Tap **Announce** once on each side after plugging serial so RNS learns the peer over the serial interface.
 3. Connect to peer over LAN; unplug Ethernet or USB to test — logs should show `[connect] Failover triggered` without clicking Connect again.
 4. **VPN disconnect ≠ LAN dead** if your physical NIC (`enp2s0`, `wlan0`) still has `10.10.x` — AutoInterface keeps working on the physical LAN.
 5. Use `./run.sh web --share` on Arch so the process has `dialout` group access for serial.
@@ -236,6 +238,13 @@ chatxz --daemon
 ```
 
 ## Changelog (recent)
+
+### v0.3.47
+- **Android serial fix** — complete usb4a `UsbConstants` shim (fixes hot-add `UsbConstants` error in logs)
+- **Serial-only connect** — when LAN is down but USB serial is up, skip HTTP wake and prime serial RNS path
+- **Faster connect** — shorter timeouts, quick outbound when path known, 2s HTTP wake timeout
+- **Image zoom** — pinch-zoom on Android, wheel/drag/double-tap on desktop in chat image viewer
+- **File transfers** — serialize sends (one at a time); auto-compress large non-media files
 
 ### v0.3.46
 - **Messaging UX** — tap saved contact to connect and chat; unread badges per contact; notifications (Web + Android)
