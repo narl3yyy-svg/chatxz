@@ -262,6 +262,11 @@ public class MainActivity extends AppCompatActivity {
                 != PackageManager.PERMISSION_GRANTED) {
             needed.add(Manifest.permission.POST_NOTIFICATIONS);
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES)
+                != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.NEARBY_WIFI_DEVICES);
+        }
 
         if (needed.isEmpty()) {
             startPythonServer();
@@ -581,9 +586,6 @@ public class MainActivity extends AppCompatActivity {
                 unregisterReceiver(usbPermissionReceiver);
             } catch (Exception ignored) {}
             usbPermissionReceiver = null;
-        }
-        if (multicastLock != null && multicastLock.isHeld()) {
-            multicastLock.release();
         }
         super.onDestroy();
     }

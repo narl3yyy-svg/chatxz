@@ -71,6 +71,40 @@ def storage_root():
     return os.path.join(os.path.expanduser("~"), ".config", "chatxz")
 
 
+def _android_connectivity_ip():
+    """Best-effort LAN IP via Android ConnectivityManager."""
+    try:
+        from java import jclass
+        Python = jclass("com.chaquo.python.Python")
+        ctx = Python.getPlatform().getApplication()
+        connectivity = jclass("android.net.ConnectivityManager")
+        cm = ctx.getSystemService(connectivity.CONNECTIVITY_SERVICE)
+        if cm is None:
+            return None
+        network = cm.getActiveNetwork()
+        if network is None:
+            return None
+        props = cm.getLinkProperties(network)
+        if props is None:
+            return None
+        addrs = props.getLinkAddresses()
+        if addrs is None:
+            return None
+        it = addrs.iterator()
+        while it.hasNext():
+            la = it.next()
+            addr = la.getAddress()
+            if addr is None:
+                continue
+            host = str(addr.getHostAddress())
+            if ":" in host or host.startswith("127.") or host.startswith("169.254."):
+                continue
+            return host
+    except Exception:
+        pass
+    return None
+
+
 def _java_lan_addresses():
     """Enumerate IPv4 LAN addresses via Android/Java network APIs."""
     try:
@@ -104,7 +138,10 @@ def lan_ip():
     if is_android():
         for host, _ in _java_lan_addresses():
             return host
-        for probe in ("192.168.1.1", "10.0.0.1", "192.168.0.1"):
+        connectivity_ip = _android_connectivity_ip()
+        if connectivity_ip:
+            return connectivity_ip
+        for probe in ("10.10.100.1", "192.168.1.1", "10.0.0.1", "192.168.0.1"):
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 s.settimeout(0.4)

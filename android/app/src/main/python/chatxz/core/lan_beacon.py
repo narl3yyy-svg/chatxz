@@ -137,13 +137,9 @@ class LanBeacon:
             return 0
         packet = MAGIC + self._payload()
         sent = 0
-        for _ in range(count):
-            for addr in self._broadcast_targets():
-                try:
-                    self._tx_sock.sendto(packet, (addr, BEACON_PORT))
-                    sent += 1
-                except OSError as exc:
-                    print(f"[beacon] broadcast to {addr}:{BEACON_PORT} failed: {exc}")
+        android = is_android()
+        if subnet_probe is False and android:
+            subnet_probe = True
 
         if subnet_probe:
             probed = 0
@@ -156,6 +152,16 @@ class LanBeacon:
                     pass
             self.last_subnet_probes = probed
             print(f"[beacon] Subnet probe sent to {probed} host(s)")
+
+        if not android or sent == 0:
+            for _ in range(count):
+                for addr in self._broadcast_targets():
+                    try:
+                        self._tx_sock.sendto(packet, (addr, BEACON_PORT))
+                        sent += 1
+                    except OSError as exc:
+                        if not android:
+                            print(f"[beacon] broadcast to {addr}:{BEACON_PORT} failed: {exc}")
 
         self.packets_sent += sent
         if sent:

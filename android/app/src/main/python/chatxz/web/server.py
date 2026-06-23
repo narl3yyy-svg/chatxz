@@ -10,7 +10,7 @@ from chatxz.core.messaging import MessagingBackend
 from chatxz.core.voice import VoiceRecorder, VoicePlayer
 from chatxz.core.discovery import PeerDiscovery
 from chatxz.core.lan_beacon import LanBeacon, BEACON_PORT
-from chatxz.core.lan_rns import serial_interface_online
+from chatxz.core.lan_rns import patch_udp_interface_unicast, serial_interface_online
 from chatxz.core.rns_interfaces import (
     INTERFACE_PRESETS,
     SERIAL_BAUD_RATES,
@@ -724,6 +724,7 @@ class ChatWebServer:
             if self.embedded:
                 raise RuntimeError(f"RNS init failed: {e}") from e
             raise
+        patch_udp_interface_unicast()
         self.identity = self.identity_mgr.load_or_create()
         settings = self.load_settings()
         my_ip = detect_lan_ip()

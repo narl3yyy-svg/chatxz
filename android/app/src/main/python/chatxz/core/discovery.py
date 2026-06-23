@@ -3,6 +3,8 @@ import json
 import time
 import RNS
 
+from chatxz.core.lan_rns import register_udp_peer_ip
+
 DISCOVERY_TIMEOUT = 60
 APP_NAME = "chatxz"
 PUBKEY_SIZE = RNS.Identity.KEYSIZE // 8
@@ -114,6 +116,8 @@ class PeerDiscovery:
             peer = existing
         else:
             self.peers[hash_hex] = peer
+        if peer.get("ip"):
+            register_udp_peer_ip(peer["ip"])
         if self.on_peer_seen:
             try:
                 self.on_peer_seen(peer)

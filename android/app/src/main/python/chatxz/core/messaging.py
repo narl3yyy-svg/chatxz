@@ -16,6 +16,7 @@ from chatxz.core.lan_rns import (
     request_paths_for_hash,
     scrub_peer_path,
     serial_interface_online,
+    register_udp_peer_ip,
     unicast_announce_packet,
     wait_for_peer_path,
 )
@@ -645,6 +646,7 @@ class MessagingBackend:
         """Wake peer for reverse RNS connect and refresh its LAN announces."""
         if not peer_ip:
             return False
+        register_udp_peer_ip(peer_ip)
         ok = self._request_peer_connect(
             peer_ip, peer_port, my_hash,
             caller_ip=caller_ip, caller_port=caller_port,
@@ -1310,6 +1312,8 @@ class MessagingBackend:
             if len(clean) != 32:
                 print(f"[connect] Invalid hash length ({len(clean)} chars, expected 32)")
                 return False
+            if peer_ip:
+                register_udp_peer_ip(peer_ip)
 
             old_link = None
             if self.active_link and self.active_peer_hash and self.hashes_equivalent(clean, self.active_peer_hash):

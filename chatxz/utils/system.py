@@ -5,6 +5,8 @@ import json
 import time
 import subprocess
 
+from chatxz.utils.platform import is_android
+
 
 def _read_sysfs_millicelsius(path):
     try:
@@ -17,11 +19,18 @@ def _read_sysfs_millicelsius(path):
 
 def _collect_hwmon_temps():
     readings = []
+    if is_android():
+        return readings
     hwmon_root = "/sys/class/hwmon"
     if not os.path.isdir(hwmon_root):
         return readings
 
-    for name in sorted(os.listdir(hwmon_root)):
+    try:
+        names = sorted(os.listdir(hwmon_root))
+    except (OSError, PermissionError):
+        return readings
+
+    for name in names:
         hpath = os.path.join(hwmon_root, name)
         if not os.path.isdir(hpath):
             continue
@@ -58,7 +67,11 @@ def _collect_thermal_zone_temps():
     for base in ("/sys/class/thermal", "/sys/devices/virtual/thermal"):
         if not os.path.isdir(base):
             continue
-        for name in os.listdir(base):
+        try:
+            zone_names = os.listdir(base)
+        except (OSError, PermissionError):
+            continue
+        for name in zone_names:
             if not name.startswith("thermal_zone"):
                 continue
             tpath = os.path.join(base, name, "temp")
@@ -111,7 +124,10 @@ def _collect_sensors_temps():
 
 def get_avg_cpu_temperature():
     """Return average CPU temperature in °C across detected cores, or None."""
-    readings = _collect_hwmon_temps()
+    if is_android():
+        readings = _collect_thermal_zone_temps()
+    else:
+        readings = _collect_hwmon_temps()
     if not readings:
         readings = _collect_thermal_zone_temps()
     if not readings:

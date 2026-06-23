@@ -273,3 +273,113 @@ def udp_interface_targets():
         if candidate not in targets:
             targets.append(candidate)
     return targets
+
+
+_udp_patched = False
+_known_peer_ips = set()
+
+
+def register_udp_peer_ip(ip):
+    """Remember a peer LAN IP for Android UDP unicast fan-out."""
+    host = (ip or "").strip()
+    if not host or host.startswith("127.") or host.startswith("169.254."):
+        return
+    _known_peer_ips.add(host)
+
+
+def register_udp_peer_ips_from_discovery(peers):
+    for peer in peers or []:
+        register_udp_peer_ip(peer.get("ip"))
+
+
+def _udp_unicast_targets(peer_ip=None, subnet_scan=None):
+    targets = []
+    if peer_ip:
+        register_udp_peer_ip(peer_ip)
+    for host in sorted(_known_peer_ips):
+        if host not in targets:
+            targets.append(host)
+    if subnet_scan is None:
+        subnet_scan = is_android()
+    if subnet_scan:
+        for host in _subnet_unicast_targets(peer_ip):
+            if host not in targets:
+                targets.append(host)
+    return targets
+
+
+def patch_udp_interface_unicast(force=False):
+    """Replace RNS UDPInterface broadcast transmit with subnet unicast on Android."""
+    global _udp_patched
+    if _udp_patched and not force:
+        return True
+    try:
+        from RNS.Interfaces.UDPInterface import UDPInterface
+    except Exception:
+        return False
+
+    original = UDPInterface.process_outgoing
+
+    def process_outgoing(self, data):
+        use_unicast = is_android()
+        port = int(getattr(self, "forward_port", None) or RNS_PORT)
+        targets = _udp_unicast_targets() if use_unicast else []
+
+        if not use_unicast:
+            try:
+                original(self, data)
+                return
+            except Exception:
+                use_unicast = True
+                targets = _udp_unicast_targets()
+
+        if not targets:
+            try:
+                original(self, data)
+            except Exception as exc:
+                RNS.log(
+                    "Could not transmit on " + str(self)
+                    + ". The contained exception was: " + str(exc),
+                    RNS.LOG_ERROR,
+                )
+            return
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        except OSError:
+            pass
+
+        sent_any = False
+        for host in targets:
+            try:
+                sock.sendto(data, (host, port))
+                sent_any = True
+            except OSError:
+                pass
+
+        if not sent_any:
+            forward_ip = getattr(self, "forward_ip", None)
+            if forward_ip:
+                try:
+                    sock.sendto(data, (forward_ip, port))
+                    sent_any = True
+                except OSError as exc:
+                    RNS.log(
+                        "Could not transmit on " + str(self)
+                        + ". The contained exception was: " + str(exc),
+                        RNS.LOG_ERROR,
+                    )
+
+        if sent_any:
+            self.txb += len(data)
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    UDPInterface.process_outgoing = process_outgoing
+    _udp_patched = True
+    if is_android():
+        print("[network] Android UDP unicast patch installed (RNS port %d)" % RNS_PORT)
+    return True
