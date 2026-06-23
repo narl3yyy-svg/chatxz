@@ -115,6 +115,11 @@ ANDROID_DEFAULT_INTERFACE_LIST = [
 ]
 
 
+def standalone_needs_udp(interfaces, hub_role="off"):
+    """True when only a loopback TCP client is configured with no hub — LAN cannot work."""
+    return android_standalone_needs_udp(interfaces, hub_role)
+
+
 def default_interface_list():
     try:
         from chatxz.utils.platform import is_android
@@ -122,6 +127,12 @@ def default_interface_list():
             return copy.deepcopy(ANDROID_DEFAULT_INTERFACE_LIST)
     except Exception:
         pass
+    if (
+        sys.platform == "win32"
+        or os.environ.get("CHATXZ_PORTABLE")
+        or getattr(sys, "frozen", False)
+    ):
+        return copy.deepcopy(ANDROID_DEFAULT_INTERFACE_LIST)
     return copy.deepcopy(DEFAULT_INTERFACE_LIST)
 
 
