@@ -70,3 +70,30 @@ def media_type_for_filename(filename):
     if ext in VIDEO_EXTENSIONS:
         return "video"
     return "file"
+
+
+def safe_basename(filename, default="file"):
+    """Strip path components from an untrusted filename."""
+    raw = (filename or "").replace("\\", "/")
+    base = os.path.basename(raw)
+    if not base or base in (".", ".."):
+        return default
+    return base
+
+
+def safe_path_under(base_dir, *parts):
+    """Join path parts and ensure the result stays under base_dir."""
+    base = os.path.normpath(base_dir)
+    joined = os.path.normpath(os.path.join(base, *parts))
+    if joined != base and not joined.startswith(base + os.sep):
+        return None
+    return joined
+
+
+def safe_rel_path_under(base_dir, rel_path, default_name):
+    """Resolve a relative multipart path safely under base_dir."""
+    raw = (rel_path or default_name).replace("\\", "/").lstrip("/")
+    parts = [p for p in raw.split("/") if p and p not in (".", "..")]
+    if not parts:
+        parts = [default_name]
+    return safe_path_under(base_dir, *parts)

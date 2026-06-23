@@ -549,7 +549,7 @@ class MessagingBackend:
         peer = self.dest_hash_for(self.active_peer_hash or self._session_peer_hash or "")
         if not peer or peer == "unknown":
             return False, ""
-        if self._link_for_peer(peer):
+        if self._peer_link_active(peer):
             if self.active_link and self._link_interface_healthy(self.active_link):
                 return self.link_needs_failover()
             return False, ""
@@ -718,8 +718,10 @@ class MessagingBackend:
 
     def _queue_matches_target(self, entry, target_hash):
         tgt = entry.get("target_hash")
-        if not tgt or not target_hash:
-            return True
+        if not tgt:
+            return not target_hash
+        if not target_hash:
+            return False
         return self.hashes_equivalent(tgt, target_hash)
 
     def drain_queue(self, link, target_hash, include_files=True):
@@ -1501,9 +1503,14 @@ class MessagingBackend:
                 if resource.status == RNS.Resource.COMPLETE:
                     chat_msg = self._dequeue_pending_file(link.link_id, resource)
 
+                    from chatxz.utils.helpers import safe_basename, safe_path_under
                     os.makedirs(self.receive_dir, exist_ok=True)
-                    fname = chat_msg.file_name or f"file_{int(time.time())}"
-                    save_path = os.path.join(self.receive_dir, fname)
+                    raw_name = chat_msg.file_name or f"file_{int(time.time())}"
+                    fname = safe_basename(raw_name, default=f"file_{int(time.time())}")
+                    save_path = safe_path_under(self.receive_dir, fname)
+                    if not save_path:
+                        print(f"[messaging] Rejected unsafe filename: {raw_name!r}")
+                        return
 
                     if hasattr(resource, 'data') and resource.data is not None:
                         if hasattr(resource.data, 'read'):

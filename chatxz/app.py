@@ -117,8 +117,11 @@ class ChatxzApp:
 
     def connect(self, peer_hash):
         if self.messaging:
-            self.messaging.connect_to(peer_hash)
-            self.connected_hash = peer_hash
+            ok = self.messaging.connect_to(peer_hash, user_initiated=True)
+            if ok:
+                self.connected_hash = peer_hash
+            return ok
+        return False
 
     def send_text(self, text):
         if self.messaging:

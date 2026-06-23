@@ -1897,7 +1897,7 @@ function renderContacts(contacts) {
     const unread = unreadForPeer(c.hash);
     const ipHint = c.ip ? ` · ${escapeHtml(c.ip)}` : '';
     div.className = 'contact-item' + (active ? ' active' : '');
-    div.innerHTML = `<div class="contact-avatar contact-avatar-saved">${name.charAt(0).toUpperCase()}</div>
+    div.innerHTML = `<div class="contact-avatar contact-avatar-saved">${escapeHtml(name).charAt(0).toUpperCase()}</div>
       <div class="contact-info">
         <div class="contact-name">${escapeHtml(name)}${linked ? ' <span style="color:var(--success);font-size:10px">●</span>' : ''}</div>
         <div class="contact-hash">${truncateHash(c.hash)}${ipHint}</div>
@@ -3001,7 +3001,7 @@ function startVoice(skipPermissionCheck) {
           fetch('/api/voice', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({audio: b64})
+            body: JSON.stringify({audio: b64, peer: viewingPeer || ''})
           }).then(r => r.json()).then(d => {
             if (d.status === 'ok') toast('Voice sent');
             else toast('Voice send failed');
@@ -3048,7 +3048,8 @@ function uploadFolder(files) {
     formData.append('file', file, path);
   });
   showProgress({stage: 'zipping', file_name: folderName + '.zip', progress: 0, direction: 'send', status: 'active', current: 0, total: total});
-  fetch('/api/folder?name=' + encodeURIComponent(folderName), {method: 'POST', body: formData})
+  const peerQ = viewingPeer ? ('?peer=' + encodeURIComponent(viewingPeer) + '&') : '?';
+  fetch('/api/folder' + peerQ + 'name=' + encodeURIComponent(folderName), {method: 'POST', body: formData})
     .then(r => r.json())
     .then(d => {
       if (d.status === 'ok') toast(`Sent ${d.name} (${formatSize(d.size)})`);

@@ -45,6 +45,9 @@ EOF
 sed -i "s/val releaseVersionNameForCi = \"[^\"]*\"/val releaseVersionNameForCi = \"$NEW_NAME\"/" "$GRADLE"
 sed -i "s/val releaseVersionCodeForCi = [0-9]\\+/val releaseVersionCodeForCi = $NEW_CODE/" "$GRADLE"
 
+sed -i "s/^version = \"[^\"]*\"/version = \"$NEW_NAME\"/" "$ROOT/pyproject.toml"
+sed -i "s/^    version=\"[^\"]*\"/    version=\"$NEW_NAME\"/" "$ROOT/setup.py"
+
 echo "Bumped to $NEW_NAME (versionCode $NEW_CODE)"
 echo "  version.properties  -> Gradle versionName/versionCode"
 echo "  chatxz/_version.py -> server APP_VERSION"

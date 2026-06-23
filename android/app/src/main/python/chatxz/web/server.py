@@ -42,7 +42,15 @@ from chatxz.core.rns_interfaces import (
     update_interface,
     user_has_serial_group_access,
 )
-from chatxz.utils.helpers import get_config_dir, get_data_dir, format_speed, media_type_for_filename
+from chatxz.utils.helpers import (
+    get_config_dir,
+    get_data_dir,
+    format_speed,
+    media_type_for_filename,
+    safe_basename,
+    safe_path_under,
+    safe_rel_path_under,
+)
 from chatxz.utils.debug_log import debug_log_path
 from chatxz.utils.android_notify import show_message_notification
 from chatxz.utils.platform import (
@@ -1960,12 +1968,14 @@ class ChatWebServer:
             field = await reader.next()
             if not field:
                 return web.json_response({"error": "no file"}, status=400)
-            fname = field.filename or f"file_{int(time.time())}"
+            fname = safe_basename(field.filename, default=f"file_{int(time.time())}")
             msg_type = media_type_for_filename(fname)
 
             sent_dir = os.path.join(self.config_dir, "sent")
-            save_path = os.path.join(sent_dir, fname)
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            os.makedirs(sent_dir, exist_ok=True)
+            save_path = safe_path_under(sent_dir, fname)
+            if not save_path:
+                return web.json_response({"error": "invalid filename"}, status=400)
             size = 0
             with open(save_path, "wb") as f:
                 while True:
@@ -2029,8 +2039,14 @@ class ChatWebServer:
     async def handle_folder_upload(self, request):
         if not self.messaging:
             return web.json_response({"error": "not ready"}, status=400)
+        peer_hint = request.query.get("peer", "").strip()
+        if peer_hint:
+            self._ui_state["viewing_peer"] = self._peer_dest_hash(peer_hint)
         try:
-            folder_name = request.query.get("name", f"folder_{int(time.time())}")
+            folder_name = safe_basename(
+                request.query.get("name", f"folder_{int(time.time())}"),
+                default=f"folder_{int(time.time())}",
+            )
             reader = await request.multipart()
             tmpdir = tempfile.mkdtemp(prefix="chatxz_folder_")
             total_size = 0
@@ -2039,8 +2055,13 @@ class ChatWebServer:
                 field = await reader.next()
                 if not field:
                     break
-                fname = field.filename or f"file_{file_count}"
-                fpath = os.path.join(tmpdir, fname)
+                fpath = safe_rel_path_under(
+                    tmpdir,
+                    field.filename,
+                    default_name=f"file_{file_count}",
+                )
+                if not fpath:
+                    continue
                 os.makedirs(os.path.dirname(fpath), exist_ok=True)
                 with open(fpath, "wb") as f:
                     while True:
@@ -2180,6 +2201,9 @@ class ChatWebServer:
             return web.json_response({"error": "not ready"}, status=400)
         try:
             data = await request.json()
+            peer_hint = (data.get("peer") or "").strip()
+            if peer_hint:
+                self._ui_state["viewing_peer"] = self._peer_dest_hash(peer_hint)
             audio_b64 = data.get("audio", "")
             if not audio_b64:
                 return web.json_response({"error": "no audio data"}, status=400)
@@ -2240,8 +2264,17 @@ class ChatWebServer:
         try:
             data = await request.json()
             path = data.get("path", "")
-            if os.path.exists(path):
-                VoicePlayer.play(path)
+            received_dir = self._received_dir()
+            sent_dir = self._sent_dir()
+            allowed = None
+            if path:
+                norm = os.path.normpath(path)
+                if norm.startswith(received_dir + os.sep) or norm == received_dir:
+                    allowed = norm
+                elif norm.startswith(sent_dir + os.sep) or norm == sent_dir:
+                    allowed = norm
+            if allowed and os.path.isfile(allowed):
+                VoicePlayer.play(allowed)
                 return web.json_response({"status": "ok"})
             return web.json_response({"error": "file not found"}, status=404)
         except Exception as e:
@@ -2268,7 +2301,7 @@ class ChatWebServer:
         if not allowed:
             return web.Response(text="Forbidden", status=403)
         if not os.path.exists(full_path) or not os.path.isfile(full_path):
-            return web.Response(text="Not found: " + full_path, status=404)
+            return web.Response(text="Not found", status=404)
         ct, _ = mimetypes.guess_type(full_path)
         if not ct:
             ext = os.path.splitext(full_path)[1].lower().lstrip(".")
@@ -2571,8 +2604,12 @@ class ChatWebServer:
                 await ws.send_str(json.dumps({"type": "info", "data": "Announce failed: " + err}))
         elif msg_type == "read_receipt":
             msg_id = data.get("msg_id", "")
-            if msg_id and self.messaging and self.messaging.active_link:
-                self.messaging.send_read_receipt(self.messaging.active_link, msg_id)
+            if msg_id and self.messaging:
+                target = self._queue_target_hash() or self._peer_dest_hash(self.active_peer)
+                link = self.messaging._link_for_peer(target) if target else None
+                link = link or self.messaging.active_link
+                if link:
+                    self.messaging.send_read_receipt(link, msg_id)
 
     async def _on_startup(self, app):
         self._loop = asyncio.get_running_loop()
