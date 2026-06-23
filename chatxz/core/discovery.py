@@ -98,15 +98,10 @@ class PeerDiscovery:
 
     def start(self):
         self.running = True
+        self.accept_peers = True
         self._handler = AnnounceHandler(self)
         RNS.Transport.register_announce_handler(self._handler)
-        try:
-            from chatxz.utils.platform import is_android
-            if is_android():
-                self.accept_peers = True
-        except Exception:
-            pass
-        print("[discovery] Announce handler registered (passive until manual announce)")
+        print("[discovery] Announce handler registered (listening for LAN peers)")
 
     def stop(self):
         self.running = False
@@ -185,15 +180,19 @@ class PeerDiscovery:
         self._store_peer(peer)
         self._log_once(hash_hex, f"[discovery] RNS peer discovered: {name or hash_hex[:12]}...")
 
-    def _on_beacon(self, data, my_hash):
+    def _on_beacon(self, data, my_dest_hash, my_identity_hash=None):
         if not self.running or not self.accept_peers:
-            return
+            return False
         if data.get("app") != APP_NAME:
-            return
+            return False
         hash_hex = normalize_hash(data.get("hash"))
-        my_clean = normalize_hash(my_hash)
-        if not hash_hex or hash_hex == my_clean:
-            return
+        my_dest = normalize_hash(my_dest_hash)
+        my_ident = normalize_hash(my_identity_hash or my_dest_hash)
+        identity_hex = normalize_hash(data.get("identity_hash"))
+        if identity_hex and (identity_hex == my_ident or identity_hex == my_dest):
+            return False
+        if not hash_hex or hash_hex == my_dest or hash_hex == my_ident:
+            return False
         name = data.get("name", "") or hash_hex[:8]
         peer = {
             "hash": hash_hex,
@@ -204,7 +203,6 @@ class PeerDiscovery:
             "last_seen": time.time(),
             "via": "beacon",
         }
-        identity_hex = normalize_hash(data.get("identity_hash"))
         if identity_hex and identity_hex != hash_hex:
             peer["identity_hash"] = identity_hex
         if data.get("pubkey"):
@@ -220,6 +218,7 @@ class PeerDiscovery:
             f"beacon:{hash_hex}",
             f"[discovery] Beacon peer discovered: {name} ({data.get('ip', '?')})",
         )
+        return True
 
     def _log_once(self, key, message, interval=30):
         now = time.time()

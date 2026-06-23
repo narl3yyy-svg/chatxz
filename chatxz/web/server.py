@@ -300,6 +300,7 @@ class ChatWebServer:
         self._loop = None
         self.rns_init_error = None
         self._announce_lock = threading.Lock()
+        self._last_announce_at = 0.0
         self._reverse_connect_last = {}
         self._session_resume_last = 0.0
         self._shutting_down = False
@@ -1787,35 +1788,64 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
-    async def handle_announce(self, request):
+    ANNOUNCE_DEBOUNCE_SEC = 1.5
+
+    async def _perform_announce(self):
         ok, err = await self._wait_for_rns()
         if not ok:
-            return web.json_response({"error": err or "not ready"}, status=400)
-        with self._announce_lock:
-            try:
-                self._enable_discovery(clear=False)
-                await asyncio.to_thread(self.messaging.announce)
-                beacon_sent = 0
-                if self.lan_beacon:
-                    beacon_sent = await asyncio.to_thread(
-                        self.lan_beacon.send, 3, True
-                    )
-                peers = self.discovery.get_peers() if self.discovery else []
-                if peers:
-                    await self._broadcast({"type": "peers", "data": peers})
-                return web.json_response({
-                    "status": "ok",
-                    "broadcast": lan_broadcast(),
-                    "beacon_port": BEACON_PORT,
-                    "beacon_sent": beacon_sent,
-                    "beacon_session_total": (
-                        self.lan_beacon.packets_sent if self.lan_beacon else 0
-                    ),
-                    "lan_ip": detect_lan_ip(),
-                    "discovered_count": len(peers),
-                })
-            except Exception as e:
-                return web.json_response({"error": str(e)}, status=400)
+            return {"ok": False, "error": err or "not ready"}
+
+        now = time.time()
+        debounced = False
+        beacon_sent = 0
+        try:
+            with self._announce_lock:
+                if now - self._last_announce_at < self.ANNOUNCE_DEBOUNCE_SEC:
+                    debounced = True
+                else:
+                    self._last_announce_at = now
+                    self._enable_discovery(clear=False)
+                    await asyncio.to_thread(self.messaging.announce)
+                    if self.lan_beacon:
+                        beacon_sent = await asyncio.to_thread(
+                            self.lan_beacon.send, 3, is_android()
+                        )
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        peers = self.discovery.get_peers() if self.discovery else []
+        await self._broadcast({"type": "peers", "data": peers})
+        if debounced and self.lan_beacon:
+            beacon_sent = self.lan_beacon.last_announce_sent
+        return {
+            "ok": True,
+            "debounced": debounced,
+            "broadcast": lan_broadcast(),
+            "beacon_port": BEACON_PORT,
+            "beacon_sent": beacon_sent,
+            "beacon_session_total": (
+                self.lan_beacon.packets_sent if self.lan_beacon else 0
+            ),
+            "lan_ip": detect_lan_ip(),
+            "discovered_count": len(peers),
+        }
+
+    async def handle_announce(self, request):
+        result = await self._perform_announce()
+        if not result.get("ok"):
+            return web.json_response(
+                {"error": result.get("error") or "not ready"}, status=400
+            )
+        return web.json_response({
+            "status": "ok",
+            "debounced": result.get("debounced", False),
+            "broadcast": result.get("broadcast"),
+            "beacon_port": result.get("beacon_port"),
+            "beacon_sent": result.get("beacon_sent", 0),
+            "beacon_session_total": result.get("beacon_session_total", 0),
+            "lan_ip": result.get("lan_ip"),
+            "discovered_count": result.get("discovered_count", 0),
+        })
 
     async def handle_disconnect(self, request):
         peer = ""
@@ -2742,14 +2772,16 @@ class ChatWebServer:
         elif msg_type == "visibility":
             self._ui_state["hidden"] = bool(data.get("hidden"))
         elif msg_type == "announce":
-            ok, err = await self._wait_for_rns(timeout=30.0)
-            if ok:
-                with self._announce_lock:
-                    self._enable_discovery(clear=False)
-                    await asyncio.to_thread(self.messaging.announce)
-                    if self.lan_beacon:
-                        await asyncio.to_thread(self.lan_beacon.send, 3, True)
-            elif err:
+            result = await self._perform_announce()
+            if result.get("ok"):
+                await ws.send_str(json.dumps({
+                    "type": "announce_ok",
+                    "debounced": result.get("debounced", False),
+                    "discovered_count": result.get("discovered_count", 0),
+                    "beacon_sent": result.get("beacon_sent", 0),
+                }))
+            else:
+                err = result.get("error") or "not ready"
                 await ws.send_str(json.dumps({"type": "info", "data": "Announce failed: " + err}))
         elif msg_type == "read_receipt":
             msg_id = data.get("msg_id", "")

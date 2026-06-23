@@ -34,6 +34,7 @@ class LanBeacon:
         self._periodic_thread = None
         self.last_send_targets = []
         self.last_subnet_probes = 0
+        self.last_announce_sent = 0
         self.packets_sent = 0
         self.packets_received = 0
         self._interval = 45 if is_android() else 30
@@ -163,6 +164,7 @@ class LanBeacon:
                         if not android:
                             print(f"[beacon] broadcast to {addr}:{BEACON_PORT} failed: {exc}")
 
+        self.last_announce_sent = sent
         self.packets_sent += sent
         if sent:
             print(f"[beacon] Sent {sent} packet(s); broadcast targets={self.last_send_targets}")
@@ -184,8 +186,8 @@ class LanBeacon:
                 continue
             if not payload.get("ip"):
                 payload["ip"] = addr[0]
-            self.packets_received += 1
-            self.discovery._on_beacon(payload, self.dest_hash)
+            if self.discovery._on_beacon(payload, self.dest_hash, self.identity_hash):
+                self.packets_received += 1
 
     def _periodic(self):
         time.sleep(4)
@@ -204,6 +206,7 @@ class LanBeacon:
     def reset_stats(self):
         self.packets_sent = 0
         self.packets_received = 0
+        self.last_announce_sent = 0
         self.last_subnet_probes = 0
         self.last_send_targets = []
 
@@ -215,6 +218,7 @@ class LanBeacon:
             "lan_ip": self.ip or lan_ip(),
             "broadcast_targets": self.last_send_targets,
             "last_subnet_probes": self.last_subnet_probes,
+            "last_announce_sent": self.last_announce_sent,
             "packets_sent": self.packets_sent,
             "packets_received": self.packets_received,
             "interval_sec": self._interval if self.periodic else 0,
