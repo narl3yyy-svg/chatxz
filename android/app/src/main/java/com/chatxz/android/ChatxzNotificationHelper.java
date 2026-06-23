@@ -11,8 +11,6 @@ import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
 
-import com.chaquo.python.Python;
-
 public final class ChatxzNotificationHelper {
     private static final String MSG_CHANNEL_ID = "chatxz_messages";
     private static int notificationId = 2000;
@@ -20,7 +18,7 @@ public final class ChatxzNotificationHelper {
     private ChatxzNotificationHelper() {}
 
     public static void show(String title, String body) {
-        Context ctx = Python.getPlatform().getApplication();
+        Context ctx = ChatxzApplication.getInstance();
         if (ctx == null) {
             return;
         }
