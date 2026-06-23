@@ -1762,6 +1762,15 @@ class ChatWebServer:
                 self.messaging.enqueue(msg_type, save_path,
                                         file_name=fname, file_size=size, file_path=save_path)
                 return web.json_response({"status": "queued", "name": fname, "size": size})
+            if self.messaging._has_active_transfer():
+                self.messaging.enqueue(msg_type, save_path,
+                                        file_name=fname, file_size=size, file_path=save_path)
+                return web.json_response({
+                    "status": "queued",
+                    "name": fname,
+                    "size": size,
+                    "reason": "transfer in progress",
+                })
             my_hash = self._my_sender_hash()
             ts = time.time()
             chat_peer = self._session_chat_peer() or self._peer_dest_hash(self.active_peer)
@@ -1857,6 +1866,15 @@ class ChatWebServer:
                 self.messaging.enqueue("file", zip_path,
                                         file_name=zip_name, file_size=zsize, file_path=zip_path)
                 return web.json_response({"status": "queued", "name": zip_name, "size": zsize})
+            if self.messaging._has_active_transfer():
+                self.messaging.enqueue("file", zip_path,
+                                        file_name=zip_name, file_size=zsize, file_path=zip_path)
+                return web.json_response({
+                    "status": "queued",
+                    "name": zip_name,
+                    "size": zsize,
+                    "reason": "transfer in progress",
+                })
             my_hash = self._my_sender_hash()
             ts = time.time()
             chat_peer = self._session_chat_peer() or self._peer_dest_hash(self.active_peer)
@@ -1946,6 +1964,10 @@ class ChatWebServer:
                 self.messaging.enqueue("voice", voice_path, file_name=os.path.basename(voice_path),
                                         file_size=len(audio_bytes), file_path=voice_path)
                 return web.json_response({"status": "queued"})
+            if self.messaging._has_active_transfer():
+                self.messaging.enqueue("voice", voice_path, file_name=os.path.basename(voice_path),
+                                        file_size=len(audio_bytes), file_path=voice_path)
+                return web.json_response({"status": "queued", "reason": "transfer in progress"})
 
             my_hash = self._my_sender_hash()
             ts = time.time()

@@ -140,12 +140,11 @@ class MessagingBackend:
         self._link_handoff = False
         self._last_handoff = False
         self._failover_last_attempt = 0
-        self._failover_cooldown_s = 4
+        self._failover_cooldown_s = 8
         self._failover_in_progress = False
         self._last_link_established_at = 0
         self._session_peer_hash = None
         self._pending_sends = {}
-        self._incoming_receive_busy = False
 
     def _is_self_hash(self, h):
         clean = normalize_hash(h)
@@ -230,6 +229,43 @@ class MessagingBackend:
         if not link:
             return None
         return getattr(link, "attached_interface", None)
+
+    def _has_active_transfer(self):
+        """True while a file send or receive is in progress on any link."""
+        if self._current_transfer_id or self._active_resources:
+            return True
+        with self._pending_lock:
+            for queue in self._pending_files.values():
+                if queue:
+                    return True
+        for link in self.links.values():
+            incoming = getattr(link, "incoming_resources", None) or []
+            if incoming:
+                return True
+        return False
+
+    def _migrate_pending_files(self, old_link_id, new_link_id):
+        if not old_link_id or old_link_id == new_link_id:
+            return
+        with self._pending_lock:
+            queue = self._pending_files.pop(old_link_id, [])
+            if queue:
+                self._pending_files.setdefault(new_link_id, []).extend(queue)
+                print(f"[transfer] Migrated {len(queue)} pending receive(s) to new link")
+
+    def _flush_pending_files_failed(self, link_id):
+        with self._pending_lock:
+            queue = self._pending_files.pop(link_id, [])
+        for chat_msg in queue:
+            print(f"[transfer] Dropped pending receive: {chat_msg.file_name}")
+            self._emit_progress(
+                chat_msg.file_name or "file",
+                0,
+                total_size=chat_msg.file_size or 0,
+                direction="receive",
+                transfer_id=chat_msg.msg_id,
+                status="failed",
+            )
 
     def _interface_healthy(self, iface):
         return interface_is_healthy(iface)
@@ -337,7 +373,7 @@ class MessagingBackend:
     def link_needs_failover(self):
         if not self.active_link or not self.active_peer_hash:
             return False, ""
-        if self._active_resources or self._current_transfer_id:
+        if self._has_active_transfer():
             return False, ""
         peer = self.dest_hash_for(self.active_peer_hash)
         if not peer or peer == "unknown":
@@ -409,6 +445,9 @@ class MessagingBackend:
             return False, ""
         if self.active_link:
             return self.link_needs_failover()
+        if self._has_active_transfer():
+            for link_id in list(self._pending_files.keys()):
+                self._flush_pending_files_failed(link_id)
         if time.time() - self._failover_last_attempt < self._failover_cooldown_s:
             return False, ""
         return True, "link dropped — reconnecting"
@@ -495,6 +534,7 @@ class MessagingBackend:
     def _handoff_to_link(self, link, peer_hash):
         peer_hash = self.dest_hash_for(peer_hash)
         old = self.active_link
+        old_id = old.link_id if old else None
         self._link_handoff = True
         self._last_handoff = True
         try:
@@ -506,6 +546,7 @@ class MessagingBackend:
             self._cache_link_peer(link, peer_hash)
             self._notify_link_established(link, peer_hash)
             self._send_link = link
+            self._migrate_pending_files(old_id, link.link_id)
             if old and old.link_id != link.link_id:
                 try:
                     old.teardown()
@@ -957,10 +998,8 @@ class MessagingBackend:
         def callback(resource_ad):
             try:
                 incoming = getattr(link, "incoming_resources", None) or []
-                if incoming or self._incoming_receive_busy:
-                    print("[transfer] Deferring resource (receive slot busy)")
-                    return False
-                if not link.ready_for_new_resource():
+                if len(incoming) > 0:
+                    print("[transfer] Deferring resource (transfer in progress)")
                     return False
             except Exception:
                 pass
@@ -1017,6 +1056,13 @@ class MessagingBackend:
                     except Exception:
                         pass
                     return
+                if self._has_active_transfer():
+                    print(f"[messaging] Keeping current link during active transfer ({peer_hash[:16]}...)")
+                    try:
+                        link.teardown()
+                    except Exception:
+                        pass
+                    return
                 if self._link_path_score(link) >= self._link_path_score(self.active_link):
                     self._handoff_to_link(link, peer_hash)
                 else:
@@ -1053,6 +1099,8 @@ class MessagingBackend:
             if link.link_id in self.links:
                 del self.links[link.link_id]
             self._link_peer_hashes.pop(link.link_id, None)
+            if not self._link_handoff:
+                self._flush_pending_files_failed(link.link_id)
             closing_active = self.active_link and self.active_link.link_id == link.link_id
             if closing_active:
                 if self._link_handoff:
@@ -1116,7 +1164,6 @@ class MessagingBackend:
                     with self._pending_lock:
                         queue = self._pending_files.setdefault(link.link_id, [])
                         queue.append(chat_msg)
-                    self._incoming_receive_busy = True
                     print(f"[messaging] Waiting for resource data for {chat_msg.file_name}...")
                     self._emit_progress(
                         chat_msg.file_name or "file",
@@ -1167,11 +1214,6 @@ class MessagingBackend:
             msg_type = media_type_for_filename(fname)
         return ChatMessage(msg_type, "", file_name=fname or f"file_{int(time.time())}")
 
-    def _clear_incoming_receive_busy(self, link):
-        with self._pending_lock:
-            queue = self._pending_files.get(link.link_id, [])
-            self._incoming_receive_busy = bool(queue)
-
     def _resource_concluded(self, link):
         def callback(resource):
             try:
@@ -1197,7 +1239,6 @@ class MessagingBackend:
                         print(f"[messaging] File copied from storage to {save_path}")
                     else:
                         print(f"[messaging] No data available in resource")
-                        self._clear_incoming_receive_busy(link)
                         return
 
                     if chat_msg.msg_type == MESSAGE_TYPE_LONGTEXT:
@@ -1243,8 +1284,6 @@ class MessagingBackend:
                         )
             except Exception as e:
                 print(f"[messaging] Resource concluded error: {e}")
-            finally:
-                self._clear_incoming_receive_busy(link)
         return callback
 
     def _emit_progress(self, file_name, progress, total_size=0, speed="", direction="receive", transfer_id=None, status="active"):
@@ -1666,9 +1705,16 @@ class MessagingBackend:
     def send_file(self, file_path, msg_type=MESSAGE_TYPE_FILE, progress_callback=None, transfer_id=None):
         link = self._outgoing_link()
         if not link or not os.path.exists(file_path):
+            print("[messaging] send_file: no active link or missing file")
             return False
+        try:
+            if getattr(link, "status", None) != RNS.Link.ACTIVE:
+                print("[messaging] send_file: link not active")
+                return False
+        except Exception:
+            pass
         with self._file_send_lock:
-            if not self._wait_for_send_slot():
+            if not self._wait_for_send_slot(timeout_s=300):
                 return False
             fname = os.path.basename(file_path)
             fsize = os.path.getsize(file_path)

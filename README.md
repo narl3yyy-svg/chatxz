@@ -239,6 +239,12 @@ chatxz --daemon
 
 ## Changelog (recent)
 
+### v0.3.49
+- **File transfer fix** — remove broken receive-busy flag that rejected all incoming resources (v0.3.48 regression)
+- **Transfer stability** — block link handoff and failover during active send/receive; migrate pending receives on path switch
+- **Upload queue** — server queues file uploads while another transfer is in progress instead of failing silently
+- **Reconnect** — clear orphaned pending receives before failover; longer failover cooldown to reduce reconnect spam
+
 ### v0.3.48
 - **Serial connect** — quick outbound when serial RNS path is known; triple announce burst after USB hot-add
 - **Faster reconnect** — parallel HTTP wake+announce, tighter connect timeouts (6s quick outbound)
