@@ -29,6 +29,7 @@ from chatxz.core.lan_rns import (
 )
 from chatxz.utils.platform import is_android
 from chatxz.core.rns_interfaces import (
+    configured_serial_enabled,
     lan_discovery_configured,
     load_settings_interfaces,
     prune_dead_serial_interfaces,
@@ -41,6 +42,11 @@ FAILOVER_CONNECT_TIMEOUT_S = 16
 LINK_CONNECT_POLL_S = 0.05
 IDENTITY_WAIT_TIMEOUT_S = 12
 ANDROID_IDENTITY_WAIT_TIMEOUT_S = 16
+SERIAL_IDENTITY_WAIT_TIMEOUT_S = 35
+SERIAL_PATH_PRIME_TIMEOUT_S = 28
+SERIAL_ANNOUNCE_BURST_COUNT = 5
+SERIAL_ANNOUNCE_BURST_INTERVAL_S = 0.4
+SERIAL_LINK_CONNECT_TIMEOUT_S = 22
 REVERSE_CONNECT_WAIT_S = 10
 ANDROID_REVERSE_CONNECT_WAIT_S = 12
 INITIATOR_INBOUND_WAIT_S = 8
@@ -907,9 +913,42 @@ class MessagingBackend:
     def announce(self):
         self._announce()
 
+    def _serial_mode_active(self):
+        return (
+            configured_serial_enabled(load_settings_interfaces(self.config_dir))
+            and not lan_discovery_configured(load_settings_interfaces(self.config_dir))
+        )
+
+    def _burst_serial_announce(self, count=None, interval=None):
+        """Send several RNS announces on serial — slow links need repeats."""
+        if not self.destination or not self._serial_transport_ready():
+            return 0
+        prune_dead_serial_interfaces()
+        burst = count or SERIAL_ANNOUNCE_BURST_COUNT
+        gap = interval if interval is not None else SERIAL_ANNOUNCE_BURST_INTERVAL_S
+        announce_data = json.dumps({
+            "app": APP_NAME,
+            "name": self.display_name or ""
+        }).encode("utf-8")
+        for attempt in range(burst):
+            self.destination.announce(app_data=announce_data)
+            try:
+                RNS.Transport.identity.announce()
+            except Exception:
+                pass
+            if attempt < burst - 1 and gap > 0:
+                time.sleep(gap)
+        iface = serial_interface_online()
+        port = getattr(iface, "port", "?") if iface else "?"
+        print(f"[serial] Burst {burst} RNS announce(s) on {port}")
+        return burst
+
     def _silent_announce(self, peer_ip=None):
         """RNS path refresh only — no subnet beacon probe."""
         if not self.destination:
+            return
+        if self._serial_mode_active() and self._serial_transport_ready() and not peer_ip:
+            self._burst_serial_announce(count=3, interval=0.3)
             return
         prune_dead_serial_interfaces()
         announce_data = json.dumps({
@@ -917,6 +956,10 @@ class MessagingBackend:
             "name": self.display_name or ""
         }).encode("utf-8")
         self.destination.announce(app_data=announce_data)
+        try:
+            RNS.Transport.identity.announce()
+        except Exception:
+            pass
         if peer_ip:
             packet = build_announce_packet(self.destination, announce_data)
             unicast_announce_packet(packet, peer_ip=peer_ip, subnet_probe=False)
@@ -1032,18 +1075,32 @@ class MessagingBackend:
             return True
         return False
 
-    def _prime_serial_path(self, dest_hex, timeout_s=18.0):
+    def _prime_serial_path(self, dest_hex, timeout_s=None):
         """Establish an RNS path over USB serial (no LAN/HTTP wake required)."""
         if not self._serial_transport_ready():
+            print("[connect] Serial path blocked — Serial in RNS: no")
             return False
-        print("[connect] Priming serial RNS path...")
-        self._silent_announce()
-        request_paths_for_hash(dest_hex, family="serial")
-        path_iface = wait_for_peer_path(dest_hex, family="serial", timeout_s=timeout_s)
-        if path_iface:
-            print(f"[connect] Serial path ready via {type(path_iface).__name__}")
-            return True
-        print("[connect] Serial path not ready yet — ensure both ends have USB serial configured")
+        if timeout_s is None:
+            timeout_s = SERIAL_PATH_PRIME_TIMEOUT_S
+        print(f"[connect] Priming serial RNS path ({timeout_s:.0f}s)...")
+        deadline = time.time() + timeout_s
+        last_burst = 0.0
+        while time.time() < deadline:
+            now = time.time()
+            if now - last_burst >= 1.2:
+                self._burst_serial_announce(count=3, interval=0.25)
+                request_paths_for_hash(dest_hex, family="serial")
+                last_burst = now
+            path_iface = wait_for_peer_path(
+                dest_hex, family="serial", timeout_s=2.0, poll_s=0.2,
+            )
+            if path_iface:
+                print(f"[connect] Serial path ready via {type(path_iface).__name__}")
+                return True
+        print(
+            "[connect] Serial path not ready — both ends need Serial in RNS: yes, "
+            "same baud, tap Announce on each, then Connect"
+        )
         return False
 
     def _establish_outbound_link(self, destination, dest_hex, clean, old_link=None,
@@ -1234,9 +1291,19 @@ class MessagingBackend:
     def _wait_for_identity(self, hash_hex, peer_ip=None, peer_port=None, peer_lookup=None,
                           caller_ip=None, caller_port=8742):
         clean = normalize_hash(hash_hex)
-        wait_s = ANDROID_IDENTITY_WAIT_TIMEOUT_S if is_android() else IDENTITY_WAIT_TIMEOUT_S
+        serial_wait = (
+            not lan_discovery_configured(load_settings_interfaces(self.config_dir))
+            and self._serial_transport_ready()
+        )
+        if serial_wait:
+            wait_s = SERIAL_IDENTITY_WAIT_TIMEOUT_S
+        elif is_android():
+            wait_s = ANDROID_IDENTITY_WAIT_TIMEOUT_S
+        else:
+            wait_s = IDENTITY_WAIT_TIMEOUT_S
         deadline = time.time() + wait_s
         last_log = 0
+        last_burst = 0.0
         while time.time() < deadline:
             ident = self._identity_for_hash(clean)
             if ident:
@@ -1275,9 +1342,15 @@ class MessagingBackend:
             now = time.time()
             if now - last_log >= 3:
                 remaining = int(deadline - now)
-                print(f"[connect] Waiting for peer identity ({remaining}s left)...")
+                hint = " (serial — tap Announce on peer too)" if serial_wait else ""
+                print(f"[connect] Waiting for peer identity ({remaining}s left){hint}...")
                 last_log = now
-            if not lan_discovery_configured(load_settings_interfaces(self.config_dir)):
+            if serial_wait:
+                if now - last_burst >= 1.5:
+                    self._burst_serial_announce(count=2, interval=0.25)
+                    request_paths_for_hash(clean, family="serial")
+                    last_burst = now
+            elif not lan_discovery_configured(load_settings_interfaces(self.config_dir)):
                 self._silent_announce()
                 request_paths_for_hash(clean, family="serial")
             else:
@@ -2069,10 +2142,16 @@ class MessagingBackend:
                 request_paths_for_hash(dest_hex)
             if is_android() and not peer_ip and not serial_ready:
                 print("[connect] Android: no peer IP — connect from Discovered list or add contact with LAN IP")
-            connect_timeout = FAILOVER_CONNECT_TIMEOUT_S if failover else (
-                ANDROID_LINK_CONNECT_TIMEOUT_S if is_android() else LINK_CONNECT_TIMEOUT_S
-            )
-            print(f"[connect] Connecting to {dest_hex[:16]}... (timeout {connect_timeout}s)")
+            if serial_only or (serial_ready and not lan_ready):
+                connect_timeout = SERIAL_LINK_CONNECT_TIMEOUT_S
+            elif failover:
+                connect_timeout = FAILOVER_CONNECT_TIMEOUT_S
+            elif is_android():
+                connect_timeout = ANDROID_LINK_CONNECT_TIMEOUT_S
+            else:
+                connect_timeout = LINK_CONNECT_TIMEOUT_S
+            path_hint = "serial" if (serial_only or (serial_ready and not lan_ready)) else "auto"
+            print(f"[connect] Connecting to {dest_hex[:16]}... ({path_hint}, timeout {connect_timeout}s)")
 
             if self._establish_outbound_link(
                 destination, dest_hex, clean, old_link=old_link,

@@ -847,8 +847,10 @@ class ChatWebServer:
             print("[network] UDP LAN not configured — skipping LAN beacon/unicast helpers")
         self.identity = self.identity_mgr.load_or_create()
         my_ip = detect_lan_ip()
-        if my_ip:
+        if my_ip and lan_discovery_configured(interfaces):
             print(f"[network] Detected LAN IP: {my_ip}")
+        elif configured_serial_enabled(interfaces) and not lan_discovery_configured(interfaces):
+            print("[network] Serial-only transport — LAN IP detection skipped")
         received_dir = settings.get("received_dir", os.path.join(self.config_dir, "received"))
         self.messaging = MessagingBackend(
             self.identity, self.config_dir,
@@ -909,7 +911,10 @@ class ChatWebServer:
         try:
             from chatxz.core.lan_rns import prune_stale_lan_paths
             prune_stale_lan_paths()
-            self.messaging._silent_announce()
+            if configured_serial_enabled(interfaces) and not lan_discovery_configured(interfaces):
+                self.messaging._burst_serial_announce()
+            else:
+                self.messaging._silent_announce()
             if (
                 lan_discovery_configured(interfaces)
                 and lan_ip_reachable()
@@ -917,7 +922,7 @@ class ChatWebServer:
             ):
                 self.lan_beacon.send(1, subnet_probe=False)
             elif configured_serial_enabled(interfaces):
-                print("[network] Startup RNS announce on configured serial path")
+                print("[network] Startup RNS announce burst on serial")
             print("[network] Startup announce sent once (tap Announce for more)")
         except Exception as exc:
             print(f"[network] Startup announce failed: {exc}")
@@ -1372,6 +1377,14 @@ class ChatWebServer:
             peer_ip = (data.get("ip") or "").strip() or None
             peer_port = data.get("port") or 8742
             self._enable_discovery(clear=False)
+            settings = self.load_settings()
+            configured = settings.get("rns_interfaces")
+            if (
+                self.messaging
+                and configured_serial_enabled(configured)
+                and not lan_discovery_configured(configured)
+            ):
+                await self._run_blocking(self.messaging._burst_serial_announce, 4, 0.3)
             resolved_hash = self._resolve_connect_target(peer_hash, peer_ip)
             peer_info = self._discovery_peer_for_connect(peer_ip, resolved_hash)
             if not peer_info:
@@ -1985,9 +1998,13 @@ class ChatWebServer:
                 else:
                     self._last_announce_at = now
                     self._enable_discovery(clear=False)
-                    await asyncio.to_thread(self.messaging._silent_announce)
                     settings = self.load_settings()
                     configured = settings.get("rns_interfaces")
+                    if configured_serial_enabled(configured) and not lan_discovery_configured(configured):
+                        await asyncio.to_thread(self.messaging._burst_serial_announce)
+                        print("[network] RNS announce burst on serial (no LAN beacon)")
+                    else:
+                        await asyncio.to_thread(self.messaging._silent_announce)
                     if (
                         lan_discovery_configured(configured)
                         and lan_ip_reachable()
@@ -1996,8 +2013,8 @@ class ChatWebServer:
                         beacon_sent = await asyncio.to_thread(
                             self.lan_beacon.send, 3, True
                         )
-                    elif configured_serial_enabled(configured):
-                        print("[network] RNS announce on configured serial (no LAN beacon)")
+                    elif configured_serial_enabled(configured) and lan_discovery_configured(configured):
+                        print("[network] RNS announce on serial + LAN paths")
                     elif not lan_discovery_configured(configured):
                         print("[network] No UDP LAN configured — RNS announce on active paths only")
                     elif not lan_ip_reachable():

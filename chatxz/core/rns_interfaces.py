@@ -655,7 +655,18 @@ def render_rns_config(interfaces, broadcast_ip=None, android=False, log=print):
         i.get("type") == "TCPServerInterface" and i.get("enabled", True)
         for i in normalized
     )
-    enable_transport = "Yes" if (not android or has_tcp_server) else "No"
+    has_serial = any(
+        i.get("type") == "SerialInterface" and i.get("enabled", True)
+        for i in normalized
+    )
+    has_udp = any(
+        i.get("type") == "UDPInterface" and i.get("enabled", True)
+        for i in normalized
+    )
+    # Android needs transport enabled for serial/UDP path discovery (not only TCP hub).
+    enable_transport = "Yes" if (
+        not android or has_tcp_server or has_serial or has_udp
+    ) else "No"
     lines = [
         "[reticulum]",
         f"enable_transport = {enable_transport}",

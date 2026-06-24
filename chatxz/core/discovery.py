@@ -189,7 +189,11 @@ class PeerDiscovery:
         if identity_hex and identity_hex != hash_hex:
             peer["identity_hash"] = identity_hex
         self._store_peer(peer)
-        self._log_once(hash_hex, f"[discovery] RNS peer discovered: {name or hash_hex[:12]}...")
+        via = peer.get("via", "rns")
+        self._log_once(
+            hash_hex,
+            f"[discovery] RNS peer discovered ({via}): {name or hash_hex[:12]}...",
+        )
 
     def _on_beacon(self, data, my_dest_hash, my_identity_hash=None):
         if not self.running or not self.accept_peers:

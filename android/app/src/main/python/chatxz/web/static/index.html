@@ -2743,6 +2743,9 @@ function refreshNetworkStatus(silent) {
       if (d.serial_configured_port) {
         html += row('Serial port', d.serial_configured_port, !!d.serial_in_rns);
         html += row('Serial in RNS', d.serial_in_rns ? 'yes — failover ready' : 'no — plug USB & restart or wait for hot-add', d.serial_in_rns);
+        if (d.serial_only_mode) {
+          html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45">Serial-only: tap <strong>Announce</strong> on <em>both</em> devices within a few seconds, then <strong>Connect</strong>. USB OTG + matching baud (57600). Android needs USB permission + Serial in RNS: yes.</div>';
+        }
       }
       if (!d.link_active && d.session_peer) {
         html += row('Session peer', truncateHash(d.session_peer) + ' (reconnecting)', false);
