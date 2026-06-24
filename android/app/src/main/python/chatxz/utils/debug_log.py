@@ -133,12 +133,12 @@ def debug_log_path():
     return _log_path
 
 
-def debug_log_tail(max_bytes=32000):
-    """Return the tail of the active debug log for in-app viewing."""
-    path = _log_path
-    if not path or not os.path.isfile(path):
-        return None
+def _startup_log_tail(max_bytes=8000):
     try:
+        base = os.environ.get("CHATXZ_FILES_DIR") or "."
+        path = os.path.join(base, "chatxz-startup.log")
+        if not os.path.isfile(path):
+            return None
         size = os.path.getsize(path)
         with open(path, "rb") as fh:
             if size > max_bytes:
@@ -147,6 +147,28 @@ def debug_log_tail(max_bytes=32000):
         return data.decode("utf-8", errors="replace")
     except OSError:
         return None
+
+
+def debug_log_tail(max_bytes=32000):
+    """Return the tail of the active debug log for in-app viewing."""
+    chunks = []
+    startup = _startup_log_tail(max_bytes=8000)
+    if startup:
+        chunks.append("--- startup log ---\n" + startup)
+    path = _log_path
+    if path and os.path.isfile(path):
+        try:
+            size = os.path.getsize(path)
+            with open(path, "rb") as fh:
+                if size > max_bytes:
+                    fh.seek(size - max_bytes)
+                data = fh.read()
+            chunks.append(data.decode("utf-8", errors="replace"))
+        except OSError:
+            pass
+    if not chunks:
+        return None
+    return "\n".join(chunks)
 
 
 def start_debug_capture():
@@ -182,6 +204,15 @@ def start_debug_capture():
         pass
 
     print(f"[debug-log] Capturing logs to {path} ({label})")
+    startup = _startup_log_tail(max_bytes=16000)
+    if startup:
+        try:
+            with open(path, "a", encoding="utf-8", errors="replace") as fh:
+                fh.write("\n--- chatxz-startup.log (prefixed) ---\n")
+                fh.write(startup)
+                fh.write("\n")
+        except OSError:
+            pass
     atexit.register(stop_debug_capture)
     return path
 

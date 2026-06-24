@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.70
+**Current version:** 0.3.71
 
 ## Download
 
@@ -141,6 +141,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.71** — Fix multi-peer chat routing (messages no longer leak into wrong peer thread); keep chat history when links drop; persist all peer threads to disk; Android notification tap opens the correct chat
 - **v0.3.70** — macOS portable `.dmg` + `.app` (CI build); `scripts/install-macos.sh`; source workflow `./run.sh web --share` on Mac
 - **v0.3.69** — Android: back button minimizes app (keeps server running) instead of restarting; skip Normal/Debug prompt when server already up; chat history only persists for saved contacts; fix queued file messages showing filename "file"
 - **v0.3.68** — Fix Windows↔Android connect: register peer identity from beacon pubkey before connect; Windows portable defaults to UDP LAN (not loopback TCP); Android resolves peer IP from discovery server-side; debug log includes startup log tail

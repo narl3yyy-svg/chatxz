@@ -2,7 +2,11 @@ import threading, RNS, json, time, os, tempfile, uuid
 from urllib import request as urlrequest
 
 from chatxz.utils.helpers import format_speed
-from chatxz.core.discovery import normalize_hash, message_dest_hash_for_identity
+from chatxz.core.discovery import (
+    normalize_hash,
+    message_dest_hash_for_identity,
+    register_identity_from_peer,
+)
 from chatxz.core.lan_rns import (
     build_announce_packet,
     clear_peer_path,
@@ -273,15 +277,17 @@ class MessagingBackend:
         if cached and not self._is_self_hash(cached):
             return self.dest_hash_for(cached)
         resolved = self._resolve_remote_peer(link, fallback=fallback)
-        if self._is_self_hash(resolved):
-            if self.active_peer_hash and not self._is_self_hash(self.active_peer_hash):
-                return self.active_peer_hash
-            if cached:
-                return self.dest_hash_for(cached)
-            return "unknown"
-        if resolved and resolved != "unknown":
+        if resolved and resolved != "unknown" and not self._is_self_hash(resolved):
             self._cache_link_peer(link, resolved)
-        return resolved
+            return resolved
+        if fallback and not self._is_self_hash(fallback):
+            mapped = self.dest_hash_for(fallback)
+            if mapped and mapped != "unknown":
+                self._cache_link_peer(link, mapped)
+                return mapped
+        if cached and not self._is_self_hash(cached):
+            return self.dest_hash_for(cached)
+        return "unknown"
 
     def register_peer_mapping(self, dest_hash, identity_hash=None):
         dest = normalize_hash(dest_hash)
@@ -648,7 +654,7 @@ class MessagingBackend:
                     return True
         except Exception:
             pass
-        return link.link_id != self.active_link.link_id
+        return False
 
     def _handoff_to_link(self, link, peer_hash):
         peer_hash = self.dest_hash_for(peer_hash)
@@ -886,7 +892,7 @@ class MessagingBackend:
         }).encode("utf-8")
         self.destination.announce(app_data=announce_data)
         if unicast_subnet is None:
-            unicast_subnet = is_android()
+            unicast_subnet = True
         if peer_ip or unicast_subnet:
             packet = build_announce_packet(self.destination, announce_data)
             sent = unicast_announce_packet(
@@ -1116,18 +1122,47 @@ class MessagingBackend:
                 self.register_peer_mapping(dest, ident_hex)
         return dest
 
-    def _identity_for_hash(self, hash_hex):
-        clean = normalize_hash(hash_hex)
-        if len(clean) != 32:
-            return None
-        try:
-            raw = bytes.fromhex(clean)
-        except Exception:
+    def _recall_identity_bytes(self, raw):
+        if not raw:
             return None
         ident = RNS.Identity.recall(raw)
         if ident is None:
             ident = RNS.Identity.recall(raw, from_identity_hash=True)
         return ident
+
+    def _identity_hash_candidates(self, hash_hex):
+        clean = normalize_hash(hash_hex)
+        if len(clean) != 32:
+            return []
+        candidates = [clean]
+        mapped_dest = self.dest_hash_for(clean)
+        if mapped_dest and mapped_dest not in candidates:
+            candidates.append(mapped_dest)
+        ident_hex = self.dest_to_identity.get(clean)
+        if ident_hex and ident_hex not in candidates:
+            candidates.append(ident_hex)
+        for ih, dest in self.identity_to_dest.items():
+            if ih == clean or dest == clean:
+                for h in (ih, dest):
+                    if h and h not in candidates:
+                        candidates.append(h)
+        return candidates
+
+    def _identity_for_hash(self, hash_hex):
+        for candidate in self._identity_hash_candidates(hash_hex):
+            try:
+                raw = bytes.fromhex(candidate)
+            except Exception:
+                continue
+            ident = self._recall_identity_bytes(raw)
+            if ident:
+                dest = message_dest_hash_for_identity(ident)
+                if dest:
+                    self.register_peer_mapping(
+                        dest, normalize_hash(RNS.hexrep(ident.hash))
+                    )
+                return ident
+        return None
 
     def _hash_from_peer_info(self, peer_info):
         if not peer_info:
@@ -1158,6 +1193,16 @@ class MessagingBackend:
             if peer_lookup:
                 peer = peer_lookup(peer_ip, clean)
                 if peer:
+                    if register_identity_from_peer(peer):
+                        for candidate in self._identity_hash_candidates(clean):
+                            ident = self._identity_for_hash(candidate)
+                            if ident:
+                                resolved = self._hash_from_peer_info(peer) or candidate
+                                print(
+                                    f"[connect] Identity registered from beacon "
+                                    f"({peer.get('ip', '?')}): {resolved[:16]}..."
+                                )
+                                return ident, resolved
                     alt = self._hash_from_peer_info(peer)
                     if alt and alt != clean:
                         clean = alt
@@ -1165,13 +1210,15 @@ class MessagingBackend:
                         if ident:
                             print(f"[connect] Resolved peer via discovery: {clean[:16]}...")
                             return ident, clean
-                    if peer.get("via") == "rns":
-                        alt = normalize_hash(peer.get("hash"))
-                        if alt:
-                            clean = alt
-                            ident = self._identity_for_hash(clean)
-                            if ident:
-                                return ident, clean
+                    for key in ("hash", "identity_hash"):
+                        alt = normalize_hash(peer.get(key))
+                        if not alt or alt == clean:
+                            continue
+                        ident = self._identity_for_hash(alt)
+                        if ident:
+                            resolved = self._hash_from_peer_info(peer) or alt
+                            print(f"[connect] Resolved peer via discovery: {resolved[:16]}...")
+                            return ident, resolved
 
             now = time.time()
             if now - last_log >= 3:

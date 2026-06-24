@@ -1349,7 +1349,9 @@ function showMessageNotification(peerHash, preview) {
   const viewingThis = viewingPeer && peersMatch(viewingPeer, peerHash);
   if (viewingThis && !document.hidden) return;
   if (window.chatxzAndroid?.showNotification && appPlatform === 'android') {
-    window.chatxzAndroid.showNotification(name, body);
+    const peer = peerKey(peerHash);
+    if (peer) window.chatxzAndroid.showNotification(name, body, peer);
+    else window.chatxzAndroid.showNotification(name, body);
     return;
   }
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
@@ -1358,6 +1360,11 @@ function showMessageNotification(peerHash, preview) {
     n.onclick = () => { window.focus(); openChat(peerHash, false); n.close(); };
   } catch (_) {}
 }
+
+window.onChatxzOpenPeer = function(hash) {
+  if (!hash) return;
+  openChat(String(hash).replace(/:/g, ''), false);
+};
 
 function init() {
   loadUnreadCounts();

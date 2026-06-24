@@ -427,12 +427,6 @@ class ChatWebServer:
         if clean_fallback and not self._is_self_hash(clean_fallback):
             return self._peer_dest_hash(clean_fallback)
 
-        if self.active_peer and ident_hex and self._peers_equivalent(ident_hex, self.active_peer):
-            return self._peer_dest_hash(self.active_peer)
-
-        if self.active_peer and computed_dest and self._peers_equivalent(computed_dest, self.active_peer):
-            return self._peer_dest_hash(self.active_peer)
-
         if ident_hex and not self._is_self_hash(ident_hex) and self.discovery:
             for p in self.discovery.get_peers():
                 ph = normalize_hash(p.get("hash"))
@@ -453,8 +447,6 @@ class ChatWebServer:
 
         if ident_hex and not self._is_self_hash(ident_hex):
             return self._peer_dest_hash(computed_dest or ident_hex)
-        if self.active_peer:
-            return self._peer_dest_hash(self.active_peer)
         return ""
 
     def _resolve_peer_hash(self, peer_hash):
@@ -694,9 +686,7 @@ class ChatWebServer:
         peer = self._peer_dest_hash(peer_hash)
         if not peer or peer == "unknown":
             return False
-        if peer == HUB_GROUP_PEER:
-            return True
-        return self._is_saved_contact(peer)
+        return True
 
     def _persisted_history_entries(self):
         return [
@@ -946,7 +936,7 @@ class ChatWebServer:
                 name = "Group chat"
             else:
                 name = self._contact_name_for(chat_peer) or chat_peer[:8]
-            show_message_notification(name, preview)
+            show_message_notification(name, preview, notify_peer)
 
     def _queue_target_hash(self):
         viewing = self._ui_state.get("viewing_peer")
@@ -1087,8 +1077,6 @@ class ChatWebServer:
         peer = self._peer_dest_hash(peer_hash)
         still_linked = bool(self.messaging and peer and self.messaging._peer_link_active(peer))
         removed = 0
-        if peer and peer != "unknown" and not still_linked:
-            removed = self._purge_ephemeral_peer(peer)
         if (
             peer
             and self.active_peer

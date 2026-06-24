@@ -3,7 +3,7 @@
 from chatxz.utils.platform import is_android
 
 
-def show_message_notification(title, body):
+def show_message_notification(title, body, peer_hash=None):
     if not is_android():
         return
     try:
@@ -11,6 +11,7 @@ def show_message_notification(title, body):
         jclass("com.chatxz.android.ChatxzNotificationHelper").show(
             title or "chatxz",
             body or "New message",
+            peer_hash or "",
         )
     except Exception as e:
         print(f"[notify] Android notification failed: {e}")

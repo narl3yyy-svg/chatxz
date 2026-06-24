@@ -277,15 +277,17 @@ class MessagingBackend:
         if cached and not self._is_self_hash(cached):
             return self.dest_hash_for(cached)
         resolved = self._resolve_remote_peer(link, fallback=fallback)
-        if self._is_self_hash(resolved):
-            if self.active_peer_hash and not self._is_self_hash(self.active_peer_hash):
-                return self.active_peer_hash
-            if cached:
-                return self.dest_hash_for(cached)
-            return "unknown"
-        if resolved and resolved != "unknown":
+        if resolved and resolved != "unknown" and not self._is_self_hash(resolved):
             self._cache_link_peer(link, resolved)
-        return resolved
+            return resolved
+        if fallback and not self._is_self_hash(fallback):
+            mapped = self.dest_hash_for(fallback)
+            if mapped and mapped != "unknown":
+                self._cache_link_peer(link, mapped)
+                return mapped
+        if cached and not self._is_self_hash(cached):
+            return self.dest_hash_for(cached)
+        return "unknown"
 
     def register_peer_mapping(self, dest_hash, identity_hash=None):
         dest = normalize_hash(dest_hash)
@@ -652,7 +654,7 @@ class MessagingBackend:
                     return True
         except Exception:
             pass
-        return link.link_id != self.active_link.link_id
+        return False
 
     def _handoff_to_link(self, link, peer_hash):
         peer_hash = self.dest_hash_for(peer_hash)

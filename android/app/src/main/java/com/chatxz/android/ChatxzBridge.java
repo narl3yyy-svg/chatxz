@@ -58,4 +58,9 @@ public class ChatxzBridge {
     public void showNotification(String title, String body) {
         activity.runOnUiThread(() -> activity.showMessageNotification(title, body));
     }
+
+    @JavascriptInterface
+    public void showNotification(String title, String body, String peerHash) {
+        activity.runOnUiThread(() -> activity.showMessageNotification(title, body, peerHash));
+    }
 }

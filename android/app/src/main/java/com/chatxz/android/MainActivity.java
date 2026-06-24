@@ -70,6 +70,7 @@ public class MainActivity extends AppCompatActivity {
     private WifiManager.MulticastLock multicastLock;
     private UsbPermissionReceiver usbPermissionReceiver;
     private String serverUrl = "http://127.0.0.1:8742";
+    private String pendingOpenPeer = null;
     private static boolean serverStarted = false;
     private static boolean webViewLoaded = false;
     private static boolean debugMode = false;
@@ -94,6 +95,7 @@ public class MainActivity extends AppCompatActivity {
         acquireMulticastLock();
         registerUsbPermissionReceiver();
         handleAttachedUsbDevice(getIntent());
+        captureNotificationPeer(getIntent());
 
         webView = new WebView(this);
         setContentView(webView);
@@ -132,40 +134,33 @@ public class MainActivity extends AppCompatActivity {
     }
 
     public void showMessageNotification(String title, String body) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED) {
-            return;
-        }
-        ensureMessageNotificationChannel();
-        String safeTitle = title != null && !title.isEmpty() ? title : "chatxz";
-        String safeBody = body != null ? body : "New message";
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, MSG_CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.stat_notify_chat)
-                .setContentTitle(safeTitle)
-                .setContentText(safeBody)
-                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                .setAutoCancel(true);
-        try {
-            NotificationManagerCompat.from(this).notify(notificationId++, builder.build());
-        } catch (SecurityException ignored) {}
+        showMessageNotification(title, body, "");
     }
 
-    private void ensureMessageNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+    public void showMessageNotification(String title, String body, String peerHash) {
+        ChatxzNotificationHelper.show(title, body, peerHash);
+    }
+
+    private void captureNotificationPeer(Intent intent) {
+        if (intent == null) {
             return;
         }
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager == null) {
+        String peer = intent.getStringExtra(ChatxzNotificationHelper.EXTRA_OPEN_PEER);
+        if (peer != null && !peer.isEmpty()) {
+            pendingOpenPeer = peer.replace(":", "");
+            intent.removeExtra(ChatxzNotificationHelper.EXTRA_OPEN_PEER);
+        }
+    }
+
+    private void deliverPendingOpenPeer() {
+        if (pendingOpenPeer == null || pendingOpenPeer.isEmpty() || webView == null || !webViewLoaded) {
             return;
         }
-        NotificationChannel channel = new NotificationChannel(
-                MSG_CHANNEL_ID,
-                "Messages",
-                NotificationManager.IMPORTANCE_DEFAULT
-        );
-        channel.setDescription("Incoming chat messages");
-        manager.createNotificationChannel(channel);
+        final String peer = pendingOpenPeer;
+        pendingOpenPeer = null;
+        String js = "window.onChatxzOpenPeer && window.onChatxzOpenPeer("
+                + org.json.JSONObject.quote(peer) + ")";
+        webView.post(() -> webView.evaluateJavascript(js, null));
     }
 
     @Override
@@ -173,6 +168,8 @@ public class MainActivity extends AppCompatActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         handleAttachedUsbDevice(intent);
+        captureNotificationPeer(intent);
+        deliverPendingOpenPeer();
     }
 
     private void acquireMulticastLock() {
@@ -207,6 +204,7 @@ public class MainActivity extends AppCompatActivity {
             public void onPageFinished(WebView view, String url) {
                 if (url != null && url.startsWith(serverUrl)) {
                     webViewLoaded = true;
+                    deliverPendingOpenPeer();
                 }
             }
 
