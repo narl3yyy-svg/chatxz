@@ -440,16 +440,17 @@ class ChatWebServer:
                 if ident_hex == ih or ident_hex == ph:
                     return ph or ident_hex
 
-        if self.discovery:
-            candidates = []
-            for p in self.discovery.get_peers():
-                ph = normalize_hash(p.get("hash"))
-                if not ph or self._is_self_hash(ph):
-                    continue
-                candidates.append((p.get("last_seen", 0), ph, p.get("via")))
-            if candidates:
-                candidates.sort(key=lambda row: (10 if row[2] == "rns" else 0, row[0]), reverse=True)
-                return candidates[0][1]
+        if self.messaging and ident_hex and not self._is_self_hash(ident_hex):
+            mapped = self.messaging.dest_hash_for(ident_hex)
+            if mapped and len(mapped) == 32 and not self._is_self_hash(mapped):
+                return mapped
+
+        session_peer = self._session_chat_peer()
+        if session_peer and not self._is_self_hash(session_peer):
+            if not ident_hex or self.messaging and self.messaging.hashes_equivalent(
+                ident_hex, session_peer
+            ):
+                return session_peer
 
         if ident_hex and not self._is_self_hash(ident_hex):
             return self._peer_dest_hash(computed_dest or ident_hex)

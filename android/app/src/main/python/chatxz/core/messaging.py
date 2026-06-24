@@ -850,10 +850,57 @@ class MessagingBackend:
         except Exception:
             return 50
 
+    def _peer_hash_from_link_identity(self, link):
+        if not link:
+            return ""
+        try:
+            ident = link.get_remote_identity()
+            if not ident or not getattr(ident, "hash", None):
+                return ""
+            dest = self._dest_hash_from_identity(ident)
+            if dest and not self._is_self_hash(dest):
+                return self.dest_hash_for(dest)
+            ident_hex = normalize_hash(RNS.hexrep(ident.hash))
+            if ident_hex and not self._is_self_hash(ident_hex):
+                return self.dest_hash_for(ident_hex)
+        except Exception:
+            pass
+        return ""
+
+    def _find_active_link_for_peer(self, dest_hex, alt_hex=None):
+        targets = []
+        for raw in (dest_hex, alt_hex):
+            clean = self.dest_hash_for(raw)
+            if clean and clean != "unknown" and clean not in targets:
+                targets.append(clean)
+        if not targets:
+            return None
+        for link in list(self.links.values()):
+            try:
+                if link.status != RNS.Link.ACTIVE:
+                    continue
+            except Exception:
+                continue
+            peer = self._peer_hash_from_link_identity(link)
+            if not peer or peer == "unknown":
+                cached = self._link_peer_hashes.get(link.link_id)
+                if cached:
+                    peer = self.dest_hash_for(cached)
+            if not peer or peer == "unknown":
+                continue
+            for target in targets:
+                if self.hashes_equivalent(peer, target):
+                    return link
+        return None
+
     def _resolve_incoming_link_peer(self, link, peer_hash):
+        identity_peer = self._peer_hash_from_link_identity(link)
+        if identity_peer and identity_peer != "unknown" and not self._is_self_hash(identity_peer):
+            return identity_peer
         peer_hash = self.dest_hash_for(peer_hash)
         if peer_hash and peer_hash != "unknown" and not self._is_self_hash(peer_hash):
-            return peer_hash
+            if identity_peer and not self.hashes_equivalent(peer_hash, identity_peer):
+                peer_hash = ""
         if self.peer_resolver:
             try:
                 ident_hex = ""
@@ -1538,7 +1585,8 @@ class MessagingBackend:
                     return True
             except Exception:
                 return True
-        return False
+        found = self._find_active_link_for_peer(dest_hex, alt_hex)
+        return found is not None
 
     def _wait_for_peer_link(self, dest_hex, alt_hex=None, timeout_s=REVERSE_CONNECT_WAIT_S):
         deadline = time.time() + timeout_s
@@ -1546,6 +1594,13 @@ class MessagingBackend:
             if self._interrupted():
                 return False
             if self._peer_link_active(dest_hex, alt_hex):
+                found = self._find_active_link_for_peer(dest_hex, alt_hex)
+                if found and not self._link_for_peer(dest_hex):
+                    self._notify_link_established(
+                        found, dest_hex, promote_active=True, background=False,
+                    )
+                else:
+                    self._adopt_healthy_peer_link(dest_hex)
                 return True
             time.sleep(LINK_CONNECT_POLL_S)
         return False
@@ -1775,7 +1830,11 @@ class MessagingBackend:
         return self._peer_for_link(link, fallback=fallback)
 
     def _notify_link_established(self, link, peer_hash=None, promote_active=True, background=False):
-        peer = self.dest_hash_for(peer_hash or self._peer_destination_hash(link))
+        peer = self.dest_hash_for(peer_hash or "")
+        if (not peer or peer == "unknown") and link:
+            peer = self.dest_hash_for(self._peer_hash_from_link_identity(link))
+        if not peer or peer == "unknown":
+            peer = self.dest_hash_for(self._peer_destination_hash(link, fallback=peer_hash))
         if not peer or peer == "unknown":
             peer = self.dest_hash_for(self.active_peer_hash or "")
         if not peer or peer == "unknown":
@@ -2502,6 +2561,14 @@ class MessagingBackend:
             self.register_peer_mapping(dest_hex, ident_hex)
 
             my_hash = normalize_hash(self.my_dest_hash or dest_hex)
+            inbound = self._find_active_link_for_peer(dest_hex, clean)
+            if inbound:
+                self._cache_link_peer(inbound, dest_hex)
+                self._notify_link_established(
+                    inbound, dest_hex, promote_active=True, background=False,
+                )
+                print(f"[connect] Adopted inbound link to {dest_hex[:16]}...")
+                return True
             if self._peer_link_active(dest_hex, clean):
                 print(f"[connect] Already linked to {dest_hex[:16]}... (inbound)")
                 return True
