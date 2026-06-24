@@ -739,14 +739,10 @@ def render_rns_config(interfaces, broadcast_ip=None, android=False, log=print):
                 if port in seen_serial_ports:
                     continue
                 seen_serial_ports.add(port)
-            if android:
-                port, reason = serial_skip_reason(iface.get("port"))
-                skipped_serial.append((iface.get("name") or "Serial", port, "hot-add on Android"))
-                continue
-            if not serial_runtime_active(iface):
-                port, reason = serial_skip_reason(iface.get("port"))
-                skipped_serial.append((iface.get("name") or "Serial", port, reason))
-                continue
+            port, reason = serial_skip_reason(iface.get("port"))
+            label = "hot-add on Android" if android else "hot-add at runtime"
+            skipped_serial.append((iface.get("name") or "Serial", port, label))
+            continue
         elif not iface.get("enabled", True):
             continue
         name = iface.get("name") or iface.get("type", "Interface")

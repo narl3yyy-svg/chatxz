@@ -556,23 +556,29 @@ class MessagingBackend:
         att_fam = interface_family(attached)
         serial_up = self._has_online_family("serial")
         physical_lan = physical_lan_reachable()
+        udp_up = self._has_online_family("udp")
+        # LAN/UDP primary whenever physical ethernet/Wi-Fi is up.
+        if physical_lan and udp_up:
+            if att_fam == "serial":
+                return "udp"
+            return "udp"
+        if physical_lan and lan_mesh_has_peer() and att_fam == "serial":
+            return "lan"
         if serial_up and not physical_lan:
             return "serial"
         if att_fam in ("udp", "lan") and not physical_lan and serial_up:
             return "serial"
         if att_fam == "serial":
-            if self._has_online_family("udp"):
+            if udp_up:
                 return "udp"
             if self._has_online_family("lan"):
                 return "lan"
         if att_fam == "lan" and not lan_mesh_has_peer():
             if bool(online_interfaces(family="udp")):
                 return "udp"
-            if self._has_online_family("serial"):
+            if serial_up:
                 return "serial"
-        if att_fam == "lan" and self._has_online_family("serial"):
-            return "serial"
-        if att_fam == "udp" and self._has_online_family("serial"):
+        if att_fam == "udp" and not physical_lan and serial_up:
             return "serial"
         if att_fam == "udp" and lan_mesh_has_peer():
             return "lan"
@@ -714,6 +720,14 @@ class MessagingBackend:
         if att_fam == "serial" and not self._has_online_family("serial"):
             if self._has_online_family("udp") or self._has_online_family("lan"):
                 return True, "serial down, LAN available"
+
+        if (
+            att_fam == "serial"
+            and physical_lan_reachable()
+            and self._has_online_family("udp")
+            and not in_grace
+        ):
+            return True, "LAN available, upgrading from serial"
 
         if len(self._pending_sends) >= RECEIPT_FAILOVER_MIN_PENDING:
             oldest = min(self._pending_sends.values())
@@ -881,13 +895,56 @@ class MessagingBackend:
         finally:
             self._link_handoff = False
 
+    def _links_for_peer(self, peer_hash):
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown":
+            return []
+        seen = set()
+        out = []
+        for link in self._other_active_links_for_peer(peer):
+            lid = getattr(link, "link_id", None)
+            if lid and lid in seen:
+                continue
+            if lid:
+                seen.add(lid)
+            out.append(link)
+        for cached_peer, link in list(self.peer_links.items()):
+            if not self.hashes_equivalent(cached_peer, peer):
+                continue
+            lid = getattr(link, "link_id", None)
+            if lid and lid in seen:
+                continue
+            if lid:
+                seen.add(lid)
+            out.append(link)
+        return out
+
+    def _best_outgoing_link(self, peer_hash=None):
+        peer = self.dest_hash_for(
+            peer_hash or self.active_peer_hash or self._session_peer_hash or ""
+        )
+        if not peer or peer == "unknown":
+            return None
+        best = None
+        best_score = -1
+        for link in self._links_for_peer(peer):
+            if not self._link_interface_healthy(link):
+                continue
+            score = self._link_path_score(link)
+            if score > best_score:
+                best_score = score
+                best = link
+        if best:
+            return best
+        return self._outgoing_link(peer)
+
     def _outgoing_link(self, peer_hash=None):
         if peer_hash:
-            link = self._link_for_peer(peer_hash)
+            link = self._best_outgoing_link(peer_hash)
             if link:
                 return link
         if self.active_peer_hash:
-            link = self._link_for_peer(self.active_peer_hash)
+            link = self._best_outgoing_link(self.active_peer_hash)
             if link:
                 return link
         return self._send_link or self.active_link
@@ -1316,6 +1373,59 @@ class MessagingBackend:
         )
         return False
 
+    def _promote_outbound_link(self, link, dest_hex, old_link=None, promote_active=None):
+        if not link:
+            return False
+        try:
+            if link.status != RNS.Link.ACTIVE:
+                return False
+        except Exception:
+            return False
+        if old_link and old_link.link_id != link.link_id:
+            old_peer = self._link_peer_hashes.get(old_link.link_id)
+            if old_peer and self.hashes_equivalent(old_peer, dest_hex):
+                self._link_handoff = True
+                try:
+                    old_link.teardown()
+                except Exception:
+                    pass
+                finally:
+                    self._link_handoff = False
+                self._last_handoff = True
+            else:
+                self._last_handoff = False
+        else:
+            self._last_handoff = False
+        self._setup_link(link)
+        if promote_active is None:
+            promote_active = (
+                getattr(self, "_connect_failover", False)
+                or (self._connect_user_initiated and not self._connect_background)
+                or (
+                    self.active_peer_hash
+                    and self.hashes_equivalent(dest_hex, self.active_peer_hash)
+                )
+                or (
+                    self._session_peer_hash
+                    and self.hashes_equivalent(dest_hex, self._session_peer_hash)
+                )
+            )
+        background = not promote_active
+        self._notify_link_established(
+            link, dest_hex,
+            promote_active=promote_active,
+            background=background,
+        )
+        if promote_active:
+            self._send_link = link
+        try:
+            link.identify(self.identity)
+        except Exception:
+            pass
+        print("[connect] Link established")
+        self.drain_queue(link, dest_hex, include_files=not self._failover_in_progress)
+        return True
+
     def _establish_outbound_link(self, destination, dest_hex, clean, old_link=None,
                                  timeout_s=LINK_CONNECT_TIMEOUT_S, promote_active=None):
         """Try to open an outbound RNS link within timeout_s."""
@@ -1329,64 +1439,37 @@ class MessagingBackend:
                     return False
                 time.sleep(LINK_CONNECT_POLL_S)
                 if self._peer_link_active(dest_hex, clean):
+                    existing = self._link_for_peer(dest_hex) or self._link_for_peer(clean)
+                    if existing:
+                        self._notify_link_established(
+                            existing, dest_hex,
+                            promote_active=True, background=False,
+                        )
                     self._teardown_outbound_attempt(link)
                     return True
                 try:
                     if link.status == RNS.Link.ACTIVE:
-                        if old_link and old_link.link_id != link.link_id:
-                            old_peer = self._link_peer_hashes.get(old_link.link_id)
-                            if old_peer and self.hashes_equivalent(old_peer, dest_hex):
-                                self._link_handoff = True
-                                try:
-                                    old_link.teardown()
-                                except Exception:
-                                    pass
-                                finally:
-                                    self._link_handoff = False
-                                self._last_handoff = True
-                            else:
-                                self._last_handoff = False
-                        else:
-                            self._last_handoff = False
-                        self._setup_link(link)
-                        if promote_active is None:
-                            promote_active = (
-                                getattr(self, "_connect_failover", False)
-                                or (self._connect_user_initiated and not self._connect_background)
-                                or (
-                                    self.active_peer_hash
-                                    and self.hashes_equivalent(dest_hex, self.active_peer_hash)
-                                )
-                                or (
-                                    self._session_peer_hash
-                                    and self.hashes_equivalent(dest_hex, self._session_peer_hash)
-                                )
-                            )
-                        background = not promote_active
-                        self._notify_link_established(
-                            link, dest_hex,
-                            promote_active=promote_active,
-                            background=background,
+                        return self._promote_outbound_link(
+                            link, dest_hex, old_link=old_link, promote_active=promote_active,
                         )
-                        if promote_active:
-                            self._send_link = link
-                        try:
-                            link.identify(self.identity)
-                        except Exception:
-                            pass
-                        print("[connect] Link established")
-                        self.drain_queue(link, dest_hex, include_files=not self._failover_in_progress)
-                        return True
                     if link.status == RNS.Link.CLOSED:
                         break
                 except Exception:
                     pass
                 if self.active_link and link and self.active_link.link_id == link.link_id:
                     return True
+            if self._promote_outbound_link(
+                link, dest_hex, old_link=old_link, promote_active=promote_active,
+            ):
+                return True
+            if self._adopt_healthy_peer_link(dest_hex):
+                return True
         except Exception as e:
             print(f"[connect] Link failed: {e}")
         finally:
             self._teardown_outbound_attempt(link)
+        if self._adopt_healthy_peer_link(dest_hex):
+            return True
         return self._peer_link_active(dest_hex, clean)
 
     def _peer_link_active(self, dest_hex, alt_hex=None):
@@ -2463,6 +2546,7 @@ class MessagingBackend:
                 return True
 
             if self._peer_link_active(dest_hex, clean):
+                self._adopt_healthy_peer_link(dest_hex)
                 print("[connect] Link established (inbound after outbound attempt)")
                 return True
 
@@ -2543,17 +2627,27 @@ class MessagingBackend:
         return bool(link and self._link_interface_healthy(link))
 
     def send_message(self, text, receipt_callback=None, msg_id=None, target_peer=None):
-        peer = self.dest_hash_for(target_peer or self.active_peer_hash or "")
+        peer = self.dest_hash_for(
+            target_peer or self.active_peer_hash or self._session_peer_hash or ""
+        )
+        self._adopt_healthy_peer_link(peer)
         if not self._peer_link_active(peer):
             print(f"[messaging] send_message: no active link to {peer[:16] if peer else 'peer'}")
             return False
-        link = self._outgoing_link(peer)
+        link = self._best_outgoing_link(peer)
         if not link:
             print(f"[messaging] send_message: no link to {peer[:16] if peer else 'peer'}")
             return False
         if not self._link_interface_healthy(link):
-            print(f"[messaging] send_message: link transport offline for {peer[:16] if peer else 'peer'}")
-            return False
+            alt = self._best_outgoing_link(peer)
+            if alt and alt.link_id != link.link_id and self._link_interface_healthy(alt):
+                link = alt
+                self._notify_link_established(
+                    link, peer, promote_active=True, background=False,
+                )
+            else:
+                print(f"[messaging] send_message: link transport offline for {peer[:16] if peer else 'peer'}")
+                return False
         msg = ChatMessage(MESSAGE_TYPE_TEXT, text, msg_id=msg_id)
         data = msg.to_json().encode("utf-8")
         mtu = getattr(link, 'mtu', 500)
