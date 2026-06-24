@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.86
+**Current version:** 0.3.87
 
 ## Download
 
@@ -147,6 +147,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.87** — Dual-path serial failover fixes: restore serial in RNS config when port accessible; detect peer LAN down (HTTP wake timeout) and switch to serial even when local LAN is up; accept incoming serial links during failover; stop premature UDP upgrade when peer path is still serial; serial retry after LAN connect failure; eager runtime serial ensure on failover/startup
 - **v0.3.86** — LAN-primary failover: prefer UDP when RJ45/Wi-Fi up, serial when down; register outbound links even if poll misses ACTIVE; pick best healthy link per send; serial hot-add only (no duplicate config interface)
 - **v0.3.85** — Failover link tracking: promote serial/UDP reconnect to active session; keep active links registered (fix orphan teardown); adopt background links on send; stop path-switch flapping on equal scores
 - **v0.3.84** — Serial failover fix: RNS announces pinned to serial/UDP interface (no errno 101 UDP spam when RJ45 unplugged); dedupe duplicate SerialInterface on same port; suppress offline UDP/AutoInterface when physical LAN down

@@ -36,6 +36,7 @@ from chatxz.utils.platform import is_android, physical_lan_reachable
 from chatxz.core.rns_interfaces import (
     configured_serial_enabled,
     configured_udp_lan_enabled,
+    ensure_runtime_serial,
     lan_discovery_configured,
     load_settings_interfaces,
     dedupe_serial_interfaces,
@@ -65,6 +66,7 @@ LINK_STALE_FAILOVER_IDLE_S = 90
 SESSION_RECONNECT_MIN_IDLE_S = 18
 DUAL_PATH_RECONNECT_MIN_IDLE_S = 4
 DUAL_PATH_FAILOVER_COOLDOWN_S = 8
+PEER_LAN_UNREACHABLE_TTL_S = 90
 RECEIPT_FAILOVER_TIMEOUT_S = 30
 RECEIPT_FAILOVER_MIN_PENDING = 2
 MAX_CONCURRENT_RECEIVES = 2
@@ -195,6 +197,7 @@ class MessagingBackend:
         self.peer_links = {}
         self._connect_user_initiated = False
         self._connect_background = False
+        self._peer_lan_unreachable = {}
 
     def _is_self_hash(self, h):
         clean = normalize_hash(h)
@@ -551,14 +554,21 @@ class MessagingBackend:
             return
         self._silent_announce(peer_ip=peer_ip if physical_lan_reachable() else None)
 
-    def _preferred_failover_family(self, peer, attached=None):
+    def _preferred_failover_family(self, peer, attached=None, peer_ip=None):
         attached = attached or self._link_attached_interface(self.active_link)
         att_fam = interface_family(attached)
         serial_up = self._has_online_family("serial")
         physical_lan = physical_lan_reachable()
         udp_up = self._has_online_family("udp")
-        # LAN/UDP primary whenever physical ethernet/Wi-Fi is up.
-        if physical_lan and udp_up:
+        peer_lan_down = bool(peer_ip and self._peer_lan_recently_unreachable(peer_ip))
+        path_iface = self._peer_path_interface(peer)
+        path_fam = interface_family(path_iface) if path_iface else ""
+        if peer_lan_down and serial_up:
+            return "serial"
+        if path_fam == "serial" and serial_up and not physical_lan:
+            return "serial"
+        # LAN/UDP primary whenever physical ethernet/Wi-Fi is up and peer answers on LAN.
+        if physical_lan and udp_up and not peer_lan_down:
             if att_fam == "serial":
                 return "udp"
             return "udp"
@@ -598,6 +608,12 @@ class MessagingBackend:
     def _prepare_failover_path(self, peer, prefer_family=None, peer_ip=None, peer_port=None):
         if self._interrupted():
             return False
+        self._ensure_runtime_serial_transport()
+        if peer_ip and self._peer_lan_recently_unreachable(peer_ip):
+            peer_ip = None
+            if prefer_family in ("udp", "lan"):
+                prefer_family = "serial" if self._has_online_family("serial") else prefer_family
+            clear_paths_on_family("udp")
         suppress_offline_lan_transports()
         dedupe_serial_interfaces()
         prune_dead_serial_interfaces()
@@ -717,6 +733,14 @@ class MessagingBackend:
             if not in_grace:
                 return True, "ethernet down, serial available"
 
+        if (
+            att_fam in ("udp", "lan")
+            and self._has_online_family("serial")
+            and self._peer_has_path_on_family(peer, "serial")
+            and not in_grace
+        ):
+            return True, "peer path on serial"
+
         if att_fam == "serial" and not self._has_online_family("serial"):
             if self._has_online_family("udp") or self._has_online_family("lan"):
                 return True, "serial down, LAN available"
@@ -727,6 +751,9 @@ class MessagingBackend:
             and self._has_online_family("udp")
             and not in_grace
         ):
+            path_iface = self._peer_path_interface(peer)
+            if path_iface and interface_family(path_iface) == "serial":
+                return False, ""
             return True, "LAN available, upgrading from serial"
 
         if len(self._pending_sends) >= RECEIPT_FAILOVER_MIN_PENDING:
@@ -806,7 +833,7 @@ class MessagingBackend:
             )
             fam = interface_family(iface)
             if fam == "serial":
-                score = 20
+                score = 85 if not physical_lan_reachable() else 45
             elif fam == "lan":
                 score = 100
             elif fam == "udp":
@@ -1266,6 +1293,27 @@ class MessagingBackend:
     def _serial_transport_ready(self):
         return serial_interface_online() is not None
 
+    def _mark_peer_lan_unreachable(self, peer_ip):
+        peer_ip = (peer_ip or "").strip()
+        if peer_ip:
+            self._peer_lan_unreachable[peer_ip] = time.time() + PEER_LAN_UNREACHABLE_TTL_S
+
+    def _clear_peer_lan_unreachable(self, peer_ip):
+        self._peer_lan_unreachable.pop((peer_ip or "").strip(), None)
+
+    def _peer_lan_recently_unreachable(self, peer_ip):
+        peer_ip = (peer_ip or "").strip()
+        if not peer_ip:
+            return False
+        return time.time() < self._peer_lan_unreachable.get(peer_ip, 0)
+
+    def _ensure_runtime_serial_transport(self):
+        try:
+            return ensure_runtime_serial(load_settings_interfaces(self.config_dir))
+        except Exception as exc:
+            print(f"[serial] Runtime serial ensure failed: {exc}")
+            return None
+
     def _http_peer_post(self, peer_ip, peer_port, path, payload=None, timeout=HTTP_WAKE_TIMEOUT_S):
         if not peer_ip or self._interrupted() or not physical_lan_reachable():
             return False
@@ -1322,7 +1370,12 @@ class MessagingBackend:
         t_announce.start()
         t_connect.join(timeout=HTTP_WAKE_TIMEOUT_S + 0.5)
         t_announce.join(timeout=HTTP_WAKE_TIMEOUT_S + 0.5)
-        return results["connect"] or results["announce"]
+        ok = results["connect"] or results["announce"]
+        if ok:
+            self._clear_peer_lan_unreachable(peer_ip)
+        else:
+            self._mark_peer_lan_unreachable(peer_ip)
+        return ok
 
     def _prime_udp_path(self, dest_hex, peer_ip=None, timeout_s=None):
         """Establish a UDP RNS path before opening a link (required for Android peers)."""
@@ -1467,7 +1520,8 @@ class MessagingBackend:
         except Exception as e:
             print(f"[connect] Link failed: {e}")
         finally:
-            self._teardown_outbound_attempt(link)
+            if not self._peer_link_active(dest_hex, clean):
+                self._teardown_outbound_attempt(link)
         if self._adopt_healthy_peer_link(dest_hex):
             return True
         return self._peer_link_active(dest_hex, clean)
@@ -1834,8 +1888,20 @@ class MessagingBackend:
                 old_score = self._link_path_score(self.active_link)
                 new_score = self._link_path_score(link)
                 old_healthy = self._link_interface_healthy(self.active_link)
+                incoming_fam = interface_family(self._link_attached_interface(link))
+                old_fam = interface_family(self._link_attached_interface(self.active_link))
+                prefer_serial = (
+                    incoming_fam == "serial"
+                    and (
+                        self._failover_in_progress
+                        or not physical_lan_reachable()
+                        or self._peer_has_path_on_family(peer_hash, "serial")
+                        or (old_fam in ("udp", "lan") and not old_healthy)
+                    )
+                )
                 if (
-                    new_score > old_score + 8
+                    prefer_serial
+                    or new_score > old_score + 8
                     or (not old_healthy and new_score >= old_score)
                 ):
                     self._handoff_to_link(link, peer_hash)
@@ -2285,7 +2351,7 @@ class MessagingBackend:
         self._failover_last_attempt = now
         self._failover_in_progress = True
         try:
-            prefer = self._preferred_failover_family(peer)
+            prefer = self._preferred_failover_family(peer, peer_ip=peer_ip)
             if prefer in ("udp", "lan") and not self._lan_transport_ready():
                 prefer = "serial" if self._has_online_family("serial") else prefer
             if prefer == "serial" and not self._has_online_family("serial"):
@@ -2441,9 +2507,14 @@ class MessagingBackend:
                 return True
 
             physical_lan = physical_lan_reachable()
-            lan_ready = self._lan_transport_ready() and physical_lan
+            peer_lan_down = bool(peer_ip and self._peer_lan_recently_unreachable(peer_ip))
+            if peer_lan_down:
+                peer_ip = None
+                clear_paths_on_family("udp")
+            self._ensure_runtime_serial_transport()
+            lan_ready = self._lan_transport_ready() and physical_lan and not peer_lan_down
             serial_ready = self._serial_transport_ready()
-            serial_only = serial_ready and not lan_ready
+            serial_only = serial_ready and (not lan_ready or peer_lan_down)
             prune_stale_lan_paths()
 
             if serial_ready and (serial_only or not physical_lan or self._peer_has_path_on_family(dest_hex, "serial")):
@@ -2560,6 +2631,28 @@ class MessagingBackend:
                     )
                 if self._wait_for_reverse_link(dest_hex, alt_hex=clean, timeout_s=reverse_wait):
                     print("[connect] Reverse connect established")
+                    return True
+
+            if (
+                serial_ready
+                and not serial_only
+                and (peer_lan_down or not physical_lan)
+                and not self._peer_link_active(dest_hex, clean)
+            ):
+                print("[connect] Retrying over serial after LAN path failed...")
+                scrub_peer_path(dest_hex)
+                request_paths_for_hash(dest_hex, family="serial")
+                self._prime_serial_path(dest_hex, timeout_s=14.0)
+                if self._establish_outbound_link(
+                    destination, dest_hex, clean, old_link=old_link,
+                    timeout_s=SERIAL_LINK_CONNECT_TIMEOUT_S,
+                ):
+                    return True
+                if self._wait_for_peer_link(
+                    dest_hex, alt_hex=clean, timeout_s=REVERSE_CONNECT_WAIT_S,
+                ):
+                    self._adopt_healthy_peer_link(dest_hex)
+                    print("[connect] Link established (serial inbound after LAN failure)")
                     return True
 
             print("[connect] Peer not reachable")

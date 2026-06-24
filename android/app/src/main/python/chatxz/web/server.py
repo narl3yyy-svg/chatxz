@@ -913,10 +913,18 @@ class ChatWebServer:
             print("[network] Serial/other-only mode — LAN beacon disabled")
         print("[network] One startup announce; manual Announce or Connect after that")
 
-        serial_hot = ensure_runtime_serial(settings.get("rns_interfaces"))
+        serial_hot = None
+        for attempt in range(3):
+            serial_hot = ensure_runtime_serial(settings.get("rns_interfaces"))
+            if serial_hot:
+                break
+            if attempt < 2:
+                time.sleep(0.5)
         dedupe_serial_interfaces()
         if serial_hot:
             print(f"[serial] Runtime serial interface active on {getattr(serial_hot, 'port', '?')}")
+        elif configured_serial_port(settings.get("rns_interfaces"))[0]:
+            print("[serial] Warning: serial port configured but RNS SerialInterface is not active")
 
         try:
             from chatxz.core.lan_rns import prune_stale_lan_paths

@@ -189,7 +189,7 @@ def configured_serial_enabled(interfaces=None, config_dir=None):
     for iface in items:
         if iface.get("preset") != "serial" and iface.get("type") != "SerialInterface":
             continue
-        if iface.get("enabled", True) and serial_runtime_active(iface):
+        if serial_runtime_active(iface):
             return True
     return False
 
@@ -697,7 +697,21 @@ def ensure_runtime_serial(settings_interfaces=None):
             return None
         remove_serial_interfaces(port)
     if serial_port_accessible(port):
-        return hot_add_serial_interface(port, speed=speed)
+        added = hot_add_serial_interface(port, speed=speed)
+        if added:
+            return added
+        print(f"[serial] Hot-add skipped for {port} — interface already loaded or port busy")
+        try:
+            import RNS
+            for iface in getattr(RNS.Transport, "interfaces", []) or []:
+                if type(iface).__name__ == "SerialInterface" and getattr(iface, "port", None) == port:
+                    if getattr(iface, "online", False):
+                        return iface
+        except Exception:
+            pass
+        return None
+    status = serial_port_status(port)
+    print(f"[serial] Runtime serial unavailable on {port} ({status})")
     return None
 
 
@@ -739,9 +753,23 @@ def render_rns_config(interfaces, broadcast_ip=None, android=False, log=print):
                 if port in seen_serial_ports:
                     continue
                 seen_serial_ports.add(port)
+            if android:
+                port, reason = serial_skip_reason(iface.get("port"))
+                skipped_serial.append((iface.get("name") or "Serial", port, "hot-add on Android"))
+                continue
+            if serial_runtime_active(iface):
+                name = iface.get("name") or iface.get("type", "Serial")
+                lines.append(f"  [[{name}]]")
+                lines.append("    type = SerialInterface")
+                lines.append("    enabled = Yes")
+                lines.append(f"    port = {iface.get('port', '/dev/ttyUSB0')}")
+                lines.append(f"    speed = {iface.get('speed', SERIAL_DEFAULT_BAUD)}")
+                if iface.get("ifac_size"):
+                    lines.append(f"    ifac_size = {iface.get('ifac_size')}")
+                lines.append("")
+                continue
             port, reason = serial_skip_reason(iface.get("port"))
-            label = "hot-add on Android" if android else "hot-add at runtime"
-            skipped_serial.append((iface.get("name") or "Serial", port, label))
+            skipped_serial.append((iface.get("name") or "Serial", port, reason))
             continue
         elif not iface.get("enabled", True):
             continue
