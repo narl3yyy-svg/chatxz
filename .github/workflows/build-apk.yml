@@ -101,7 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -155,7 +155,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -184,6 +184,8 @@ jobs:
 
       - name: Build macOS .app and .dmg
         shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           chmod +x packaging/macos/build-portable.sh
           bash packaging/macos/build-portable.sh

@@ -4,24 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chatxz"
-version = "0.3.72"
+version = "0.3.73"
 description = "Decentralized chat over Reticulum Network Stack"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
-    "rns>=0.8.0",
+    "rns>=1.3.0",
     "aiohttp>=3.9.0",
 ]
 
-[project.optional-dependencies]
-voice = ["pyaudio"]
-tui = ["textual>=0.52"]
-full = ["pyaudio", "textual>=0.52"]
-
 [project.scripts]
-chatxz = "chatxz.app:main"
-chatxz-web = "chatxz.web.server:main"
+chatxz = "chatxz.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["chatxz*"]
 
 [tool.setuptools.package-data]
-chatxz = ["web/static/*"]
+chatxz = ["web/static/*", "web/static/**/*"]

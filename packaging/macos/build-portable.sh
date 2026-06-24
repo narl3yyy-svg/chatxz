@@ -12,7 +12,9 @@ echo "Installing build dependencies..."
 "$PYTHON" -m pip install "rns>=1.3.0" "aiohttp>=3.9.0" pyinstaller
 "$PYTHON" -m pip install -e .
 
-VERSION="$("$PYTHON" -c "from chatxz._version import __version__; print(__version__)")"
+if [ -z "${VERSION:-}" ]; then
+  VERSION="$("$PYTHON" -c "from chatxz._version import __version__; print(__version__)")"
+fi
 echo "Building chatxz v${VERSION} for macOS..."
 
 pyinstaller --noconfirm packaging/macos/chatxz-portable.spec
