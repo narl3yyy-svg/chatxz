@@ -307,7 +307,19 @@ def normalize_interface_list(items):
         merged.setdefault("name", INTERFACE_PRESETS.get(preset, {}).get("label", merged.get("type", "Interface")))
         merged["type"] = INTERFACE_PRESETS.get(preset, {}).get("type", merged.get("type", "UDPInterface"))
         out.append(_sync_serial_enabled(merged))
-    return out or default_interface_list()
+    if not out:
+        return default_interface_list()
+    seen_serial_ports = set()
+    deduped = []
+    for item in out:
+        if item.get("type") == "SerialInterface":
+            port = (item.get("port") or "").strip()
+            if port and port in seen_serial_ports:
+                continue
+            if port:
+                seen_serial_ports.add(port)
+        deduped.append(item)
+    return deduped
 
 
 def _pick_default_serial_port():
@@ -524,6 +536,44 @@ def _finalize_rns_interface(iface, ifac_size=16):
         iface.final_init()
 
 
+def dedupe_serial_interfaces(port=None):
+    """Keep one SerialInterface per USB port — duplicates break the link."""
+    try:
+        import RNS
+    except Exception:
+        return 0
+    keepers = {}
+    removed = 0
+    for iface in list(getattr(RNS.Transport, "interfaces", []) or []):
+        if type(iface).__name__ != "SerialInterface":
+            continue
+        p = getattr(iface, "port", None)
+        if port and p != port:
+            continue
+        if not p:
+            continue
+        prev = keepers.get(p)
+        if prev is None:
+            keepers[p] = iface
+            continue
+        drop = iface
+        if getattr(prev, "online", False) and not getattr(iface, "online", False):
+            drop = iface
+        elif getattr(iface, "online", False) and not getattr(prev, "online", False):
+            keepers[p] = iface
+            drop = prev
+        _stop_serial_reconnect(drop)
+        try:
+            RNS.Transport.remove_interface(drop)
+            removed += 1
+            print(f"[serial] Removed duplicate SerialInterface on {p}")
+        except Exception:
+            pass
+        if drop is prev:
+            keepers[p] = iface
+    return removed
+
+
 def remove_serial_interfaces(port=None):
     """Remove SerialInterface(s) from the running transport (stops reconnect spam)."""
     try:
@@ -590,6 +640,7 @@ def hot_add_serial_interface(port, speed=SERIAL_DEFAULT_BAUD, ifac_size=16):
         print(f"[serial] Hot-add unavailable: {exc}")
         return None
 
+    dedupe_serial_interfaces(port)
     for iface in getattr(RNS.Transport, "interfaces", []) or []:
         if type(iface).__name__ != "SerialInterface":
             continue
@@ -610,10 +661,11 @@ def hot_add_serial_interface(port, speed=SERIAL_DEFAULT_BAUD, ifac_size=16):
         })
         _finalize_rns_interface(iface, ifac_size=ifac_size)
         RNS.Transport.add_interface(iface)
+        dedupe_serial_interfaces(port)
         print(f"[serial] Hot-added RNS SerialInterface on {port}")
         for attempt in range(3):
             try:
-                RNS.Transport.identity.announce()
+                RNS.Transport.identity.announce(attached_interface=iface)
             except Exception:
                 pass
             if attempt < 2:
@@ -678,9 +730,15 @@ def render_rns_config(interfaces, broadcast_ip=None, android=False, log=print):
         "[interfaces]",
     ]
     skipped_serial = []
+    seen_serial_ports = set()
     for iface in normalized:
         itype = iface.get("type", "")
         if itype == "SerialInterface":
+            port = (iface.get("port") or "").strip()
+            if port:
+                if port in seen_serial_ports:
+                    continue
+                seen_serial_ports.add(port)
             if android:
                 port, reason = serial_skip_reason(iface.get("port"))
                 skipped_serial.append((iface.get("name") or "Serial", port, "hot-add on Android"))

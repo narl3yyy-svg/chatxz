@@ -35,6 +35,7 @@ from chatxz.core.rns_interfaces import (
     add_interface,
     configured_serial_port,
     delete_interface,
+    dedupe_serial_interfaces,
     ensure_runtime_serial,
     lan_discovery_configured,
     configured_serial_enabled,
@@ -913,6 +914,7 @@ class ChatWebServer:
         print("[network] One startup announce; manual Announce or Connect after that")
 
         serial_hot = ensure_runtime_serial(settings.get("rns_interfaces"))
+        dedupe_serial_interfaces()
         if serial_hot:
             print(f"[serial] Runtime serial interface active on {getattr(serial_hot, 'port', '?')}")
 
@@ -1823,7 +1825,13 @@ class ChatWebServer:
                 break
             if self._shutting_down or not self.messaging:
                 continue
-            from chatxz.core.lan_rns import clear_paths_on_family, prune_stale_lan_paths
+            from chatxz.core.lan_rns import (
+                clear_paths_on_family,
+                prune_stale_lan_paths,
+                suppress_offline_lan_transports,
+            )
+            await self._run_blocking(suppress_offline_lan_transports)
+            await self._run_blocking(dedupe_serial_interfaces)
             if not serial_interface_online():
                 await self._run_blocking(prune_dead_serial_interfaces)
                 await self._run_blocking(clear_paths_on_family, "serial")

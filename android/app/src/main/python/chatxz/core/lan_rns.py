@@ -159,6 +159,15 @@ def serial_interface_online(port=None):
     return None
 
 
+def udp_interface_online():
+    for iface in iter_transport_interfaces():
+        if type(iface).__name__ != "UDPInterface":
+            continue
+        if interface_is_healthy(iface):
+            return iface
+    return None
+
+
 def iter_transport_interfaces():
     for iface in getattr(RNS.Transport, "interfaces", []) or []:
         yield iface
@@ -284,6 +293,24 @@ def clear_paths_except_families(keep_families):
     return removed
 
 
+def suppress_offline_lan_transports():
+    """Detach UDP/AutoInterface when physical LAN is down (avoids errno 101/99 spam)."""
+    if is_android() or physical_lan_reachable():
+        return 0
+    detached = 0
+    for iface in list(iter_transport_interfaces()):
+        name = type(iface).__name__
+        if name not in ("UDPInterface", "AutoInterface", "AutoInterfacePeer"):
+            continue
+        try:
+            if hasattr(iface, "detach"):
+                iface.detach()
+                detached += 1
+        except Exception:
+            pass
+    return detached
+
+
 def detach_unhealthy_interfaces():
     detached = 0
     for iface in list(iter_transport_interfaces()):
@@ -295,16 +322,7 @@ def detach_unhealthy_interfaces():
                 detached += 1
         except Exception:
             pass
-    if not is_android() and not physical_lan_reachable():
-        for iface in list(iter_transport_interfaces()):
-            if type(iface).__name__ != "AutoInterface":
-                continue
-            try:
-                if hasattr(iface, "detach"):
-                    iface.detach()
-                    detached += 1
-            except Exception:
-                pass
+    detached += suppress_offline_lan_transports()
     return detached
 
 

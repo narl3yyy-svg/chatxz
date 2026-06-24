@@ -25,6 +25,8 @@ from chatxz.core.lan_rns import (
     request_paths_for_hash,
     scrub_peer_path,
     serial_interface_online,
+    suppress_offline_lan_transports,
+    udp_interface_online,
     register_udp_peer_ip,
     unicast_announce_packet,
     wait_for_peer_path,
@@ -36,6 +38,7 @@ from chatxz.core.rns_interfaces import (
     configured_udp_lan_enabled,
     lan_discovery_configured,
     load_settings_interfaces,
+    dedupe_serial_interfaces,
     prune_dead_serial_interfaces,
 )
 
@@ -524,6 +527,8 @@ class MessagingBackend:
     def _prepare_failover_path(self, peer, prefer_family=None, peer_ip=None, peer_port=None):
         if self._interrupted():
             return False
+        suppress_offline_lan_transports()
+        dedupe_serial_interfaces()
         prune_dead_serial_interfaces()
         if not self._serial_transport_ready():
             serial_cleared = clear_paths_on_family("serial")
@@ -1020,27 +1025,41 @@ class MessagingBackend:
             and not lan_discovery_configured(load_settings_interfaces(self.config_dir))
         )
 
+    def _announce_payload(self):
+        return json.dumps({
+            "app": APP_NAME,
+            "name": self.display_name or "",
+        }).encode("utf-8")
+
+    def _announce_on_interface(self, iface, app_data=None):
+        if not self.destination or not iface:
+            return False
+        data = app_data if app_data is not None else self._announce_payload()
+        self.destination.announce(app_data=data, attached_interface=iface)
+        try:
+            RNS.Transport.identity.announce(attached_interface=iface)
+        except Exception:
+            pass
+        return True
+
     def _burst_serial_announce(self, count=None, interval=None):
-        """Send several RNS announces on serial — slow links need repeats."""
+        """Send several RNS announces on serial only — slow links need repeats."""
         if not self.destination or not self._serial_transport_ready():
             return 0
+        suppress_offline_lan_transports()
+        dedupe_serial_interfaces()
         prune_dead_serial_interfaces()
+        iface = serial_interface_online()
+        if not iface:
+            return 0
         burst = count or SERIAL_ANNOUNCE_BURST_COUNT
         gap = interval if interval is not None else SERIAL_ANNOUNCE_BURST_INTERVAL_S
-        announce_data = json.dumps({
-            "app": APP_NAME,
-            "name": self.display_name or ""
-        }).encode("utf-8")
+        announce_data = self._announce_payload()
         for attempt in range(burst):
-            self.destination.announce(app_data=announce_data)
-            try:
-                RNS.Transport.identity.announce()
-            except Exception:
-                pass
+            self._announce_on_interface(iface, app_data=announce_data)
             if attempt < burst - 1 and gap > 0:
                 time.sleep(gap)
-        iface = serial_interface_online()
-        port = getattr(iface, "port", "?") if iface else "?"
+        port = getattr(iface, "port", "?")
         print(f"[serial] Burst {burst} RNS announce(s) on {port}")
         return burst
 
@@ -1048,19 +1067,25 @@ class MessagingBackend:
         """RNS path refresh only — no subnet beacon probe."""
         if not self.destination:
             return
-        if self._serial_mode_active() and self._serial_transport_ready() and not peer_ip:
-            self._burst_serial_announce(count=3, interval=0.3)
+        announce_data = self._announce_payload()
+        if not physical_lan_reachable():
+            suppress_offline_lan_transports()
+            if self._serial_transport_ready():
+                self._burst_serial_announce(count=3, interval=0.3)
             return
         prune_dead_serial_interfaces()
-        announce_data = json.dumps({
-            "app": APP_NAME,
-            "name": self.display_name or ""
-        }).encode("utf-8")
-        self.destination.announce(app_data=announce_data)
-        try:
-            RNS.Transport.identity.announce()
-        except Exception:
-            pass
+        udp_iface = udp_interface_online()
+        if udp_iface:
+            self._announce_on_interface(udp_iface, app_data=announce_data)
+        elif self._serial_transport_ready():
+            self._burst_serial_announce(count=3, interval=0.3)
+            return
+        else:
+            self.destination.announce(app_data=announce_data)
+            try:
+                RNS.Transport.identity.announce()
+            except Exception:
+                pass
         if peer_ip:
             packet = build_announce_packet(self.destination, announce_data)
             unicast_announce_packet(packet, peer_ip=peer_ip, subnet_probe=False)
@@ -1068,12 +1093,16 @@ class MessagingBackend:
     def _announce(self, peer_ip=None, unicast_subnet=None):
         if not self.destination:
             return
+        announce_data = self._announce_payload()
+        if not physical_lan_reachable() and self._serial_transport_ready():
+            self._burst_serial_announce()
+            return
         prune_dead_serial_interfaces()
-        announce_data = json.dumps({
-            "app": APP_NAME,
-            "name": self.display_name or ""
-        }).encode("utf-8")
-        self.destination.announce(app_data=announce_data)
+        udp_iface = udp_interface_online()
+        if udp_iface:
+            self._announce_on_interface(udp_iface, app_data=announce_data)
+        else:
+            self.destination.announce(app_data=announce_data)
         if unicast_subnet is None:
             unicast_subnet = True
         lan_ok = (
@@ -1187,6 +1216,8 @@ class MessagingBackend:
         if not self._serial_transport_ready():
             print("[connect] Serial path blocked — Serial in RNS: no")
             return False
+        suppress_offline_lan_transports()
+        dedupe_serial_interfaces()
         if timeout_s is None:
             timeout_s = SERIAL_PATH_PRIME_TIMEOUT_S
         print(f"[connect] Priming serial RNS path ({timeout_s:.0f}s)...")
