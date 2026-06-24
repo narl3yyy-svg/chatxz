@@ -40,6 +40,7 @@ from chatxz.core.rns_interfaces import (
     configured_serial_enabled,
     configured_udp_lan_enabled,
     remove_serial_interfaces,
+    prune_dead_serial_interfaces,
     list_serial_ports,
     android_standalone_needs_udp,
     standalone_needs_udp,
@@ -1812,7 +1813,9 @@ class ChatWebServer:
             await asyncio.sleep(8)
             if self._shutting_down or not self.messaging:
                 continue
-            from chatxz.core.lan_rns import prune_stale_lan_paths
+            from chatxz.core.lan_rns import clear_paths_on_family, prune_stale_lan_paths
+            await self._run_blocking(prune_dead_serial_interfaces)
+            await self._run_blocking(clear_paths_on_family, "serial")
             await self._run_blocking(prune_stale_lan_paths)
             peer = self._peer_dest_hash(
                 self.messaging.active_peer_hash
@@ -1828,9 +1831,17 @@ class ChatWebServer:
 
             settings = self.load_settings()
             interfaces = normalize_interface_list(settings.get("rns_interfaces"))
+            if configured_udp_lan_enabled(interfaces):
+                await self._run_blocking(patch_udp_interface_unicast)
             await self._run_blocking(ensure_runtime_serial, interfaces)
 
             peer_ip, peer_port = self._peer_connect_meta(peer)
+            if (
+                configured_udp_lan_enabled(interfaces)
+                and lan_ip_reachable()
+                and self.lan_beacon
+            ):
+                await self._run_blocking(self.lan_beacon.send, 1, False)
             print(f"[connect] Failover triggered: {reason}")
 
             result = await self._run_blocking(
@@ -2980,7 +2991,7 @@ class ChatWebServer:
                 if not target_hash and self.messaging._session_peer_hash:
                     target_hash = self.messaging._session_peer_hash
                 linked_to_target = bool(
-                    target_hash and self.messaging._peer_link_active(target_hash)
+                    target_hash and self.messaging.peer_send_ready(target_hash)
                 )
                 if linked_to_target:
                     def on_receipt(status, receipt):

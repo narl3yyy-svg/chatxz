@@ -236,6 +236,23 @@ def prune_stale_lan_paths():
     return removed
 
 
+def clear_paths_on_family(family):
+    """Remove path-table entries tied to a transport family (e.g. unplugged serial)."""
+    removed = 0
+    try:
+        with RNS.Transport.path_table_lock:
+            for dest_bytes, entry in list(RNS.Transport.path_table.items()):
+                if not entry or len(entry) <= 5:
+                    continue
+                iface = entry[5]
+                if interface_family(iface) == family:
+                    RNS.Transport.path_table.pop(dest_bytes, None)
+                    removed += 1
+    except Exception:
+        pass
+    return removed
+
+
 def detach_unhealthy_interfaces():
     detached = 0
     for iface in list(iter_transport_interfaces()):
@@ -272,14 +289,21 @@ def request_paths_for_hash(hash_hex, family=None):
 
 def wait_for_peer_path(hash_hex, family=None, timeout_s=12.0, poll_s=0.25):
     """Wait until path table lists peer on a healthy interface (optional family filter)."""
+    families = (family,) if family is not None else (None,)
+    return wait_for_peer_path_families(hash_hex, families=families, timeout_s=timeout_s, poll_s=poll_s)
+
+
+def wait_for_peer_path_families(hash_hex, families=(None,), timeout_s=12.0, poll_s=0.25):
+    """Wait until peer path exists on any of the requested transport families."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         scrub_peer_path(hash_hex)
         _, path_iface = peer_path_entry(hash_hex)
         if path_iface and interface_is_healthy(path_iface):
             fam = interface_family(path_iface)
-            if family is None or fam == family:
-                return path_iface
+            for want in families:
+                if want is None or fam == want:
+                    return path_iface
         time.sleep(poll_s)
     return None
 
