@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.84
+**Current version:** 0.3.85
 
 ## Download
 
@@ -147,6 +147,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.85** — Failover link tracking: promote serial/UDP reconnect to active session; keep active links registered (fix orphan teardown); adopt background links on send; stop path-switch flapping on equal scores
 - **v0.3.84** — Serial failover fix: RNS announces pinned to serial/UDP interface (no errno 101 UDP spam when RJ45 unplugged); dedupe duplicate SerialInterface on same port; suppress offline UDP/AutoInterface when physical LAN down
 - **v0.3.83** — Dual-path failover: auto RNS announce before path switch; keep paths on target transport (no full wipe); faster reconnect when USB serial + LAN both configured; detach AutoInterface when ethernet down (fixes errno 101 spam on Ubuntu)
 - **v0.3.82** — Fix import: `physical_lan_reachable` from `chatxz.utils.platform` (Ubuntu startup crash)
