@@ -6,7 +6,13 @@ import time
 import RNS
 
 from chatxz.core.lan_targets import directed_broadcasts, efficient_unicast_hosts
-from chatxz.utils.platform import is_android, lan_connected, lan_ip, list_network_interfaces
+from chatxz.utils.platform import (
+    is_android,
+    lan_connected,
+    lan_ip,
+    list_network_interfaces,
+    physical_lan_reachable,
+)
 
 RNS_PORT = 4242
 
@@ -111,7 +117,8 @@ def interface_is_healthy(iface):
         return False
     if hasattr(iface, "online") and not iface.online:
         return False
-    if interface_family(iface) == "udp" and not is_android() and not lan_ip_reachable():
+    fam = interface_family(iface)
+    if fam in ("udp", "lan") and not is_android() and not physical_lan_reachable():
         return False
     owner = getattr(iface, "owner", None)
     if owner is not None:
@@ -228,7 +235,11 @@ def prune_stale_lan_paths():
                     continue
                 iface = entry[5]
                 fam = interface_family(iface)
-                if fam in ("udp", "lan") and not interface_is_healthy(iface):
+                stale_lan = fam in ("udp", "lan") and (
+                    not interface_is_healthy(iface)
+                    or (not is_android() and not physical_lan_reachable())
+                )
+                if stale_lan:
                     RNS.Transport.path_table.pop(dest_bytes, None)
                     removed += 1
     except Exception:
@@ -253,6 +264,26 @@ def clear_paths_on_family(family):
     return removed
 
 
+def clear_paths_except_families(keep_families):
+    """Drop path-table entries not on one of the kept transport families."""
+    keep = {f for f in (keep_families or ()) if f}
+    if not keep:
+        return 0
+    removed = 0
+    try:
+        with RNS.Transport.path_table_lock:
+            for dest_bytes, entry in list(RNS.Transport.path_table.items()):
+                if not entry or len(entry) <= 5:
+                    continue
+                iface = entry[5]
+                if interface_family(iface) not in keep:
+                    RNS.Transport.path_table.pop(dest_bytes, None)
+                    removed += 1
+    except Exception:
+        pass
+    return removed
+
+
 def detach_unhealthy_interfaces():
     detached = 0
     for iface in list(iter_transport_interfaces()):
@@ -264,6 +295,16 @@ def detach_unhealthy_interfaces():
                 detached += 1
         except Exception:
             pass
+    if not is_android() and not physical_lan_reachable():
+        for iface in list(iter_transport_interfaces()):
+            if type(iface).__name__ != "AutoInterface":
+                continue
+            try:
+                if hasattr(iface, "detach"):
+                    iface.detach()
+                    detached += 1
+            except Exception:
+                pass
     return detached
 
 

@@ -2877,7 +2877,8 @@ class ChatWebServer:
                 if (
                     now - self._session_resume_last >= 45.0
                     and not getattr(self.messaging, "_failover_in_progress", False)
-                    and (now - getattr(self.messaging, "_failover_last_attempt", 0)) >= 20.0
+                    and (now - getattr(self.messaging, "_failover_last_attempt", 0))
+                    >= getattr(self.messaging, "_failover_cooldown", lambda: 20.0)()
                 ):
                     self._session_resume_last = now
                     peer_ip, peer_port = self._peer_connect_meta(peer)

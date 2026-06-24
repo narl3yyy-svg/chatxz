@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.78
+**Current version:** 0.3.83
 
 ## Download
 
@@ -70,6 +70,12 @@ bash scripts/install-arch.sh    # Arch
 ./run.sh web --share
 ```
 
+If `git pull` fails with local changes (e.g. `tests/test_platform_interfaces.py`), stash first:
+
+```bash
+git stash -u && git pull
+```
+
 Open **http://localhost:8742** (or `http://<your-lan-ip>:8742` with `--share`).
 
 **Firewall:** allow UDP **4242** (RNS) and **8743** (discovery beacon) on the LAN.
@@ -87,7 +93,7 @@ Open **http://localhost:8742** (or `http://<your-lan-ip>:8742` with `--share`).
 |---------|---------|
 | Messaging | Per-peer threads, delivery receipts, offline queue, emoji |
 | Files | Any size via encrypted RNS resources; drag & drop; live speed in dock |
-| Network | LAN discovery, USB serial failover, fast reconnect, saved contacts |
+| Network | LAN discovery, USB serial ↔ UDP failover (no manual Announce), saved contacts |
 | Privacy | E2E encrypted links (AES-256-CBC); HTTP :8742 is local UI only |
 
 ---
@@ -141,6 +147,8 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.83** — Dual-path failover: auto RNS announce before path switch; keep paths on target transport (no full wipe); faster reconnect when USB serial + LAN both configured; detach AutoInterface when ethernet down (fixes errno 101 spam on Ubuntu)
+- **v0.3.82** — Fix import: `physical_lan_reachable` from `chatxz.utils.platform` (Ubuntu startup crash)
 - **v0.3.81** — Failover overhaul: serial-first when RJ45/Wi-Fi down (VPN no longer masquerades as LAN); no HTTP wake to unreachable peers; RNS-only serial auto-announce; faster Ctrl+C shutdown; stop clearing live serial paths
 - **v0.3.80** — LAN interface picker lists VPN tunnels (WireGuard, OpenVPN, Tailscale, tun/tap); auto mode prefers physical Ethernet/Wi-Fi over VPN
 - **v0.3.79** — Serial→LAN failover: prefer UDP paths when USB unplugged; clear stale serial paths; wake peer and prime UDP during failover; queue sends when link transport is offline
