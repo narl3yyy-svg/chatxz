@@ -22,7 +22,6 @@ from chatxz.core.contacts import (
 )
 from chatxz.core.lan_rns import (
     lan_ip_reachable,
-    physical_lan_reachable,
     patch_udp_interface_unicast,
     serial_interface_online,
 )
@@ -72,6 +71,7 @@ from chatxz.utils.platform import (
     lan_connected,
     lan_ip as platform_lan_ip,
     lan_broadcast,
+    physical_lan_reachable,
     set_lan_interface_preference,
     android_storage_dirs,
     patch_embedded_signals,
