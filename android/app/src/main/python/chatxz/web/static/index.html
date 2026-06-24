@@ -1047,6 +1047,13 @@ body.sidebar-open #sidebar-backdrop { display: block; }
             <button class="btn-block" style="flex:1" onclick="refreshNetworkStatus()">Refresh status</button>
             <button class="btn-block danger" style="flex:1" onclick="resetNetwork()">Reset network</button>
           </div>
+          <div class="settings-section">
+            <label>LAN network interface</label>
+            <select id="settings-lan-interface" onchange="saveLanInterface()">
+              <option value="">Auto (first link-up)</option>
+            </select>
+            <p class="field-hint">Pick which NIC chatxz uses for LAN IP, beacon, and UDP discovery. Use <strong>Auto</strong> to let chatxz choose. Restart chatxz after changing if peers stop seeing you.</p>
+          </div>
           <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin-bottom:8px">
             <input type="checkbox" id="settings-network-auto-reset" onchange="saveNetworkAutoReset()">
             Auto-reset beacon counters weekly
@@ -2628,6 +2635,40 @@ function saveNetworkAutoReset() {
   }).catch(() => {});
 }
 
+function populateLanInterfaceSelect(interfaces, selected) {
+  const sel = document.getElementById('settings-lan-interface');
+  if (!sel) return;
+  const pinned = selected !== undefined ? selected : sel.value;
+  let html = '<option value="">Auto (first link-up)</option>';
+  (interfaces || []).forEach(iface => {
+    const name = iface.name || 'iface';
+    const ip = iface.ip && iface.ip !== 'disconnected' ? iface.ip : 'offline';
+    const mark = iface.up ? 'up' : 'down';
+    html += `<option value="${escapeHtml(name)}">${escapeHtml(name)} — ${escapeHtml(ip)} (${mark})</option>`;
+  });
+  sel.innerHTML = html;
+  sel.value = pinned || '';
+}
+
+function saveLanInterface() {
+  const lan_interface = document.getElementById('settings-lan-interface')?.value || '';
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({lan_interface})
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.status === 'ok') {
+        toast(lan_interface ? `LAN pinned to ${lan_interface}` : 'LAN interface: auto');
+        refreshNetworkStatus(true);
+      } else {
+        toast('Failed: ' + (d.error || 'unknown'));
+      }
+    })
+    .catch(() => toast('Failed to save LAN interface'));
+}
+
 function startNetworkAutoRefresh() {
   stopNetworkAutoRefresh();
   networkRefreshTimer = setInterval(() => {
@@ -2669,6 +2710,14 @@ function refreshNetworkStatus(silent) {
       }
       html += row('RNS UDP', d.rns_udp_port ? d.rns_udp_port + ' (required for chat)' : '4242', true);
       html += row('Beacon UDP', d.beacon_udp_port || 8743);
+      if (Array.isArray(d.available_interfaces)) {
+        populateLanInterfaceSelect(d.available_interfaces, d.lan_interface || '');
+      }
+      if (d.lan_interface) {
+        html += row('LAN interface', d.lan_interface + ' (pinned)', !!d.lan_connected);
+      } else {
+        html += row('LAN interface', 'auto', true);
+      }
       const lanDiscovery = d.lan_discovery_configured !== false;
       const serialOnly = !!d.serial_only_mode;
       const lanConnected = lanDiscovery && d.lan_connected !== false && !!d.lan_ip
@@ -2746,10 +2795,14 @@ function refreshNetworkStatus(silent) {
           html += row('Serial groups', 'dialout not active — use ./run.sh web', false);
         }
       }
-      if (Array.isArray(d.interfaces) && d.interfaces.length) {
+      const allIfaces = d.available_interfaces || d.interfaces || [];
+      if (Array.isArray(allIfaces) && allIfaces.length) {
         html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Interfaces</div>';
-        d.interfaces.forEach(iface => {
-          html += `<div class="net-iface"><strong>${escapeHtml(iface.name || 'iface')}</strong> — ${escapeHtml(iface.ip || '?')}`;
+        allIfaces.forEach(iface => {
+          const pinned = d.lan_interface && iface.name === d.lan_interface;
+          const active = !d.lan_interface || pinned;
+          const label = pinned ? ' (pinned for LAN)' : (active ? '' : ' (not used for LAN)');
+          html += `<div class="net-iface"><strong>${escapeHtml(iface.name || 'iface')}</strong>${escapeHtml(label)} — ${escapeHtml(iface.ip || '?')}`;
           if (iface.broadcast) html += `<div style="font-size:10px;color:var(--text3);margin-top:4px">bcast ${escapeHtml(iface.broadcast)}</div>`;
           html += '</div>';
         });
@@ -2797,6 +2850,8 @@ function toggleSettings() {
         document.getElementById('settings-received-dir').value = s.received_dir || '';
         const autoReset = document.getElementById('settings-network-auto-reset');
         if (autoReset) autoReset.checked = s.network_stats_auto_reset !== false;
+        const lanSel = document.getElementById('settings-lan-interface');
+        if (lanSel && s.lan_interface) lanSel.value = s.lan_interface;
         window._hubRole = s.hub_role || 'off';
         const hubRole = document.getElementById('settings-hub-role');
         if (hubRole) hubRole.value = window._hubRole;

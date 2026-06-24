@@ -6,6 +6,7 @@ import sys
 _android = None
 _files_dir = None
 _signals_patched = False
+_lan_interface_pref = None
 
 
 def patch_embedded_signals():
@@ -114,17 +115,47 @@ def _android_connectivity_ip():
     return None
 
 
-def _java_lan_addresses():
-    """Enumerate IPv4 LAN addresses via Android/Java network APIs."""
+def set_lan_interface_preference(ifname):
+    """Pin LAN discovery/chat to one NIC (empty/None = auto)."""
+    global _lan_interface_pref
+    name = (ifname or "").strip()
+    _lan_interface_pref = name or None
+
+
+def get_lan_interface_preference():
+    return _lan_interface_pref
+
+
+def load_lan_interface_preference(config_dir=None):
+    try:
+        from chatxz.utils.helpers import get_config_dir
+        import json
+
+        root = config_dir or get_config_dir()
+        path = os.path.join(root, "settings.json")
+        with open(path, encoding="utf-8") as fh:
+            return (json.load(fh).get("lan_interface") or "").strip() or None
+    except Exception:
+        return None
+
+
+def apply_lan_interface_preference(config_dir=None):
+    set_lan_interface_preference(load_lan_interface_preference(config_dir))
+
+
+def _java_enumerate_interfaces():
+    """Enumerate IPv4 LAN interfaces via Android/Java network APIs."""
     try:
         from java import jclass
         network_interface = jclass("java.net.NetworkInterface")
         interfaces = network_interface.getNetworkInterfaces()
-        found = []
+        by_name = {}
         while interfaces.hasMoreElements():
             iface = interfaces.nextElement()
-            if not iface.isUp() or iface.isLoopback():
+            if iface.isLoopback():
                 continue
+            name = str(iface.getName())
+            up = bool(iface.isUp())
             addrs = iface.getInterfaceAddresses()
             while addrs.hasMoreElements():
                 ia = addrs.nextElement()
@@ -134,10 +165,29 @@ def _java_lan_addresses():
                     continue
                 broadcast = ia.getBroadcast()
                 bcast = str(broadcast.getHostAddress()) if broadcast else None
-                found.append((host, bcast))
-        return found
+                parts = host.split(".")
+                subnet = (
+                    f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+                    if len(parts) == 4 else None
+                )
+                by_name[name] = {
+                    "name": name,
+                    "ip": host if up else "disconnected",
+                    "broadcast": bcast if up else None,
+                    "subnet_broadcast": subnet if up else None,
+                    "up": up,
+                }
+        return [by_name[k] for k in sorted(by_name)]
     except Exception:
         return []
+
+
+def _java_lan_addresses():
+    found = []
+    for entry in _java_enumerate_interfaces():
+        if entry.get("up") and entry.get("ip") and entry["ip"] != "disconnected":
+            found.append((entry["ip"], entry.get("broadcast")))
+    return found
 
 
 def _linux_iface_ipv4(ifname):
@@ -180,17 +230,48 @@ def _linux_skip_iface(ifname):
     return ifname.startswith(("docker", "br-", "veth", "virbr", "wg", "tun", "tap"))
 
 
+def _linux_iface_entry(ifname):
+    link_up = _linux_iface_link_up(ifname)
+    ip = _linux_iface_ipv4(ifname) if link_up else None
+    parts = (ip or "").split(".")
+    subnet = (
+        f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+        if len(parts) == 4 and ip and not ip.startswith("169.254.")
+        else None
+    )
+    return {
+        "name": ifname,
+        "ip": ip if link_up and ip else "disconnected",
+        "broadcast": subnet if link_up else None,
+        "subnet_broadcast": subnet if link_up else None,
+        "up": bool(link_up and ip),
+    }
+
+
+def _linux_lan_ip_from_name(ifname):
+    if not ifname or ifname == "lo" or _linux_skip_iface(ifname):
+        return None
+    if not _linux_iface_link_up(ifname):
+        return None
+    ip = _linux_iface_ipv4(ifname)
+    if ip and not ip.startswith("169.254."):
+        return ip
+    return None
+
+
 def _linux_lan_ip():
-    """LAN IP from the first link-up interface (ignores stale addresses after unplug)."""
+    """LAN IP from preferred or first link-up interface."""
+    pref = get_lan_interface_preference()
+    if pref:
+        return _linux_lan_ip_from_name(pref)
+
     best = None
     try:
         for ifname in sorted(os.listdir("/sys/class/net")):
             if ifname == "lo" or _linux_skip_iface(ifname):
                 continue
-            if not _linux_iface_link_up(ifname):
-                continue
-            ip = _linux_iface_ipv4(ifname)
-            if not ip or ip.startswith("169.254."):
+            ip = _linux_lan_ip_from_name(ifname)
+            if not ip:
                 continue
             if not ip.startswith("10.") and not ip.startswith("192.168.") and not ip.startswith("172."):
                 best = best or ip
@@ -207,31 +288,49 @@ def _linux_enumerate_interfaces():
         for ifname in sorted(os.listdir("/sys/class/net")):
             if ifname == "lo" or _linux_skip_iface(ifname):
                 continue
-            link_up = _linux_iface_link_up(ifname)
-            ip = _linux_iface_ipv4(ifname) if link_up else None
-            if not link_up and not ip:
-                continue
-            parts = (ip or "").split(".")
-            subnet = (
-                f"{parts[0]}.{parts[1]}.{parts[2]}.255"
-                if len(parts) == 4 and not ip.startswith("169.254.")
-                else None
-            )
-            entries.append({
-                "name": ifname,
-                "ip": ip if link_up and ip else "disconnected",
-                "broadcast": subnet if link_up else None,
-                "subnet_broadcast": subnet if link_up else None,
-                "up": bool(link_up and ip),
-            })
+            entry = _linux_iface_entry(ifname)
+            if not entry["up"] and entry["ip"] == "disconnected":
+                entries.append(entry)
+            else:
+                entries.append(entry)
     except OSError:
         pass
     return entries
 
 
+def enumerate_lan_interfaces():
+    """All local NICs for the LAN interface picker (ignores preference)."""
+    if is_android():
+        return _java_enumerate_interfaces()
+    return _linux_enumerate_interfaces()
+
+
+def _filter_interfaces_for_lan(entries):
+    """Restrict LAN beacon/chat to the user-selected interface when set."""
+    pref = get_lan_interface_preference()
+    if not pref:
+        return entries
+    for entry in entries:
+        if entry.get("name") == pref:
+            return [entry]
+    return [{
+        "name": pref,
+        "ip": "disconnected",
+        "broadcast": None,
+        "subnet_broadcast": None,
+        "up": False,
+    }]
+
+
 def lan_connected():
     """True when a physical LAN link is up (carrier), not merely a stale IP."""
     if is_android():
+        pref = get_lan_interface_preference()
+        if pref:
+            for entry in _java_enumerate_interfaces():
+                if entry.get("name") == pref:
+                    return bool(entry.get("up"))
+            return False
         if _java_lan_addresses():
             return True
         return _android_connectivity_ip() is not None
@@ -243,8 +342,14 @@ def lan_ip():
     import socket
 
     if is_android():
-        for host, _ in _java_lan_addresses():
-            return host
+        pref = get_lan_interface_preference()
+        for entry in _java_enumerate_interfaces():
+            if pref and entry.get("name") != pref:
+                continue
+            if entry.get("up") and entry.get("ip") and entry["ip"] != "disconnected":
+                return entry["ip"]
+        if pref:
+            return None
         connectivity_ip = _android_connectivity_ip()
         if connectivity_ip:
             return connectivity_ip
@@ -271,53 +376,36 @@ def lan_ip():
 
 
 def list_network_interfaces():
-    """Active IPv4 interfaces with broadcast addresses."""
-    entries = []
-    seen = set()
-
+    """IPv4 interfaces used for LAN beacon/RNS (respects lan_interface preference)."""
     if is_android():
-        for host, bcast in _java_lan_addresses():
-            entry = {
-                "name": "wifi",
-                "ip": host,
-                "broadcast": bcast,
-                "subnet_broadcast": None,
-                "up": True,
-            }
-            if host and host not in seen:
-                seen.add(host)
-                parts = host.split(".")
-                if len(parts) == 4:
-                    entry["subnet_broadcast"] = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
-                entries.append(entry)
-        if entries:
-            return entries
-        return entries
+        return _filter_interfaces_for_lan(_java_enumerate_interfaces())
 
     linux_entries = _linux_enumerate_interfaces()
     if linux_entries:
-        return linux_entries
+        return _filter_interfaces_for_lan(linux_entries)
 
     ip = lan_ip()
     if ip:
         parts = ip.split(".")
         subnet = f"{parts[0]}.{parts[1]}.{parts[2]}.255" if len(parts) == 4 else None
-        entries.append({
-            "name": "default",
+        name = get_lan_interface_preference() or "default"
+        return [{
+            "name": name,
             "ip": ip,
             "broadcast": subnet,
             "subnet_broadcast": subnet,
             "up": True,
-        })
-    return entries
+        }]
+    return []
 
 
 def lan_broadcast():
     """Subnet broadcast address for RNS UDP announces (Android needs directed broadcast)."""
-    if is_android():
-        for host, bcast in _java_lan_addresses():
-            if bcast:
-                return bcast
+    for iface in list_network_interfaces():
+        if iface.get("up") and iface.get("broadcast"):
+            return iface["broadcast"]
+        if iface.get("up") and iface.get("subnet_broadcast"):
+            return iface["subnet_broadcast"]
 
     ip = lan_ip()
     if ip:

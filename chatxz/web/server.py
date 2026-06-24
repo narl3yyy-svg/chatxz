@@ -64,9 +64,13 @@ from chatxz.utils.debug_log import debug_log_path, debug_log_tail
 from chatxz.utils.android_notify import show_message_notification
 from chatxz.utils.platform import (
     is_android,
+    apply_lan_interface_preference,
+    enumerate_lan_interfaces,
+    get_lan_interface_preference,
     lan_connected,
     lan_ip as platform_lan_ip,
     lan_broadcast,
+    set_lan_interface_preference,
     android_storage_dirs,
     patch_embedded_signals,
     list_network_interfaces,
@@ -636,6 +640,7 @@ class ChatWebServer:
             "received_dir": os.path.join(self.config_dir, "received"),
             "network_stats_auto_reset": True,
             "network_stats_reset_at": 0,
+            "lan_interface": "",
             "rns_interfaces": normalize_interface_list(None),
             "hub_role": "off",
             "hub_host": "",
@@ -659,9 +664,12 @@ class ChatWebServer:
                 ):
                     s["rns_interfaces"] = normalize_interface_list(None)
                     self.save_settings(s)
+                apply_lan_interface_preference(self.config_dir)
                 return s
         except:
-            return self._apply_hub_settings(dict(defaults))
+            defaults = self._apply_hub_settings(dict(defaults))
+            apply_lan_interface_preference(self.config_dir)
+            return defaults
 
     def save_settings(self, settings):
         with open(SETTINGS_FILE, "w") as f:
@@ -831,6 +839,7 @@ class ChatWebServer:
                 raise RuntimeError(f"RNS init failed: {e}") from e
             raise
         settings = self.load_settings()
+        apply_lan_interface_preference(self.config_dir)
         interfaces = settings.get("rns_interfaces")
         if configured_udp_lan_enabled(interfaces):
             patch_udp_interface_unicast()
@@ -1915,6 +1924,8 @@ class ChatWebServer:
                 "not configured" if not lan_discovery else None
             ),
             "interfaces": list_network_interfaces(),
+            "available_interfaces": enumerate_lan_interfaces(),
+            "lan_interface": get_lan_interface_preference() or "",
             "rns_ready": bool(self.messaging and self.messaging.destination),
             "rns_error": self.rns_init_error,
             "rns_interfaces": rns_interfaces,
@@ -2189,6 +2200,10 @@ class ChatWebServer:
                     pass
             if "hub_server_hash" in data:
                 settings["hub_server_hash"] = (data.get("hub_server_hash") or "").strip()
+            if "lan_interface" in data:
+                settings["lan_interface"] = (data.get("lan_interface") or "").strip()
+                set_lan_interface_preference(settings["lan_interface"])
+                self._write_rns_config(settings)
             settings = self._apply_hub_settings(settings)
             self.save_settings(settings)
             if self.messaging:
