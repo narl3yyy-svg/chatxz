@@ -141,6 +141,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.80** — LAN interface picker lists VPN tunnels (WireGuard, OpenVPN, Tailscale, tun/tap); auto mode prefers physical Ethernet/Wi-Fi over VPN
 - **v0.3.79** — Serial→LAN failover: prefer UDP paths when USB unplugged; clear stale serial paths; wake peer and prime UDP during failover; queue sends when link transport is offline
 - **v0.3.78** — Serial-only fixes: Android transport enabled with serial; burst RNS announces on USB; longer serial connect/identity wait; clearer serial-only UI hints
 - **v0.3.77** — Settings → Network: pick which LAN NIC to use (multi-homed hosts); pins LAN IP, beacon, and UDP broadcast to that interface

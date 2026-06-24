@@ -1052,7 +1052,7 @@ body.sidebar-open #sidebar-backdrop { display: block; }
             <select id="settings-lan-interface" onchange="saveLanInterface()">
               <option value="">Auto (first link-up)</option>
             </select>
-            <p class="field-hint">Pick which NIC chatxz uses for LAN IP, beacon, and UDP discovery. Use <strong>Auto</strong> to let chatxz choose. Restart chatxz after changing if peers stop seeing you.</p>
+            <p class="field-hint">Pick which NIC chatxz uses for LAN IP, beacon, and UDP discovery — including <strong>VPN tunnels</strong> (WireGuard, OpenVPN, Tailscale). Use <strong>Auto</strong> to prefer physical Ethernet/Wi-Fi over VPN. Restart chatxz after changing if peers stop seeing you.</p>
           </div>
           <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin-bottom:8px">
             <input type="checkbox" id="settings-network-auto-reset" onchange="saveNetworkAutoReset()">
@@ -2644,7 +2644,8 @@ function populateLanInterfaceSelect(interfaces, selected) {
     const name = iface.name || 'iface';
     const ip = iface.ip && iface.ip !== 'disconnected' ? iface.ip : 'offline';
     const mark = iface.up ? 'up' : 'down';
-    html += `<option value="${escapeHtml(name)}">${escapeHtml(name)} — ${escapeHtml(ip)} (${mark})</option>`;
+    const kind = iface.kind && iface.kind !== 'other' ? ` · ${iface.kind}` : '';
+    html += `<option value="${escapeHtml(name)}">${escapeHtml(name)} — ${escapeHtml(ip)} (${mark}${kind})</option>`;
   });
   sel.innerHTML = html;
   sel.value = pinned || '';
@@ -2804,8 +2805,9 @@ function refreshNetworkStatus(silent) {
         allIfaces.forEach(iface => {
           const pinned = d.lan_interface && iface.name === d.lan_interface;
           const active = !d.lan_interface || pinned;
+          const kind = iface.kind && iface.kind !== 'other' ? ` · ${iface.kind}` : '';
           const label = pinned ? ' (pinned for LAN)' : (active ? '' : ' (not used for LAN)');
-          html += `<div class="net-iface"><strong>${escapeHtml(iface.name || 'iface')}</strong>${escapeHtml(label)} — ${escapeHtml(iface.ip || '?')}`;
+          html += `<div class="net-iface"><strong>${escapeHtml(iface.name || 'iface')}</strong>${escapeHtml(kind)}${escapeHtml(label)} — ${escapeHtml(iface.ip || '?')}`;
           if (iface.broadcast) html += `<div style="font-size:10px;color:var(--text3);margin-top:4px">bcast ${escapeHtml(iface.broadcast)}</div>`;
           html += '</div>';
         });

@@ -170,8 +170,13 @@ def _java_enumerate_interfaces():
                     f"{parts[0]}.{parts[1]}.{parts[2]}.255"
                     if len(parts) == 4 else None
                 )
+                kind = "vpn" if _linux_is_tunnel_iface(name) else (
+                    "wifi" if name.lower().startswith(("wl", "wlan", "wifi")) else
+                    "ethernet" if name.lower().startswith(("en", "eth")) else "other"
+                )
                 by_name[name] = {
                     "name": name,
+                    "kind": kind,
                     "ip": host if up else "disconnected",
                     "broadcast": bcast if up else None,
                     "subnet_broadcast": subnet if up else None,
@@ -209,6 +214,14 @@ def _linux_iface_ipv4(ifname):
     return None
 
 
+def _linux_iface_operstate(ifname):
+    try:
+        with open(f"/sys/class/net/{ifname}/operstate") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
 def _linux_iface_link_up(ifname):
     """True when the NIC reports link carrier (cable/Wi-Fi connected)."""
     if not ifname or ifname == "lo":
@@ -218,40 +231,85 @@ def _linux_iface_link_up(ifname):
         with open(carrier_path) as fh:
             return fh.read().strip() == "1"
     except OSError:
-        oper_path = f"/sys/class/net/{ifname}/operstate"
-        try:
-            with open(oper_path) as fh:
-                return fh.read().strip() in ("up", "unknown")
-        except OSError:
-            return False
+        return _linux_iface_operstate(ifname) in ("up", "unknown")
+
+
+def _linux_is_tunnel_iface(ifname):
+    """VPN/tunnel interfaces users may want to pin for RNS/LAN (WireGuard, OpenVPN, etc.)."""
+    name = (ifname or "").lower()
+    if name.startswith((
+        "tun", "tap", "wg", "ppp", "tailscale", "nordlynx", "proton", "zt",
+        "zerotier", "ts", "utun",
+    )):
+        return True
+    try:
+        with open(f"/sys/class/net/{ifname}/type") as fh:
+            # ARPHRD_NONE (65534) and PPP (512) are common for VPN tunnels.
+            return int(fh.read().strip()) in (512, 65534)
+    except (OSError, ValueError):
+        return False
 
 
 def _linux_skip_iface(ifname):
-    return ifname.startswith(("docker", "br-", "veth", "virbr", "wg", "tun", "tap"))
+    """Skip container bridge internals — not user-selectable host NICs."""
+    if not ifname or ifname == "lo":
+        return True
+    if ifname in ("docker0",):
+        return True
+    return ifname.startswith(("veth", "virbr", "ifb", "dummy"))
+
+
+def _linux_iface_broadcast(ip):
+    parts = (ip or "").split(".")
+    if len(parts) != 4 or ip.startswith("169.254."):
+        return None
+    return f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+
+
+def _linux_iface_usable(ifname):
+    """True when an interface can carry LAN/RNS traffic."""
+    if not ifname or ifname == "lo" or _linux_skip_iface(ifname):
+        return False
+    ip = _linux_iface_ipv4(ifname)
+    if ip and not ip.startswith("169.254."):
+        if _linux_is_tunnel_iface(ifname):
+            return True
+        return _linux_iface_link_up(ifname)
+    if _linux_is_tunnel_iface(ifname):
+        return _linux_iface_operstate(ifname) in ("up", "unknown")
+    return _linux_iface_link_up(ifname)
+
+
+def _linux_iface_kind(ifname):
+    if _linux_is_tunnel_iface(ifname):
+        return "vpn"
+    low = (ifname or "").lower()
+    if low.startswith(("wl", "wlan", "wifi")):
+        return "wifi"
+    if low.startswith(("en", "eth")):
+        return "ethernet"
+    return "other"
 
 
 def _linux_iface_entry(ifname):
-    link_up = _linux_iface_link_up(ifname)
-    ip = _linux_iface_ipv4(ifname) if link_up else None
-    parts = (ip or "").split(".")
-    subnet = (
-        f"{parts[0]}.{parts[1]}.{parts[2]}.255"
-        if len(parts) == 4 and ip and not ip.startswith("169.254.")
-        else None
-    )
+    tunnel = _linux_is_tunnel_iface(ifname)
+    ip = _linux_iface_ipv4(ifname)
+    usable = _linux_iface_usable(ifname)
+    subnet = _linux_iface_broadcast(ip) if usable and ip and not tunnel else None
     return {
         "name": ifname,
-        "ip": ip if link_up and ip else "disconnected",
-        "broadcast": subnet if link_up else None,
-        "subnet_broadcast": subnet if link_up else None,
-        "up": bool(link_up and ip),
+        "kind": _linux_iface_kind(ifname),
+        "ip": ip if usable and ip else "disconnected",
+        "broadcast": subnet if usable else None,
+        "subnet_broadcast": subnet if usable else None,
+        "up": bool(usable and ip),
     }
 
 
 def _linux_lan_ip_from_name(ifname):
     if not ifname or ifname == "lo" or _linux_skip_iface(ifname):
         return None
-    if not _linux_iface_link_up(ifname):
+    if not _linux_iface_usable(ifname):
         return None
     ip = _linux_iface_ipv4(ifname)
     if ip and not ip.startswith("169.254."):
@@ -259,13 +317,25 @@ def _linux_lan_ip_from_name(ifname):
     return None
 
 
+def _linux_iface_auto_priority(ifname, ip):
+    """Higher = preferred in auto mode. Physical LAN beats VPN tunnels."""
+    if _linux_is_tunnel_iface(ifname):
+        return 10
+    if ip.startswith("169.254."):
+        return 20
+    if ip.startswith(("10.", "192.168.", "172.")):
+        return 100
+    return 50
+
+
 def _linux_lan_ip():
-    """LAN IP from preferred or first link-up interface."""
+    """LAN IP from preferred or best link-up interface (physical LAN before VPN)."""
     pref = get_lan_interface_preference()
     if pref:
         return _linux_lan_ip_from_name(pref)
 
-    best = None
+    best_ip = None
+    best_score = -1
     try:
         for ifname in sorted(os.listdir("/sys/class/net")):
             if ifname == "lo" or _linux_skip_iface(ifname):
@@ -273,13 +343,13 @@ def _linux_lan_ip():
             ip = _linux_lan_ip_from_name(ifname)
             if not ip:
                 continue
-            if not ip.startswith("10.") and not ip.startswith("192.168.") and not ip.startswith("172."):
-                best = best or ip
-                continue
-            return ip
+            score = _linux_iface_auto_priority(ifname, ip)
+            if score > best_score:
+                best_score = score
+                best_ip = ip
     except OSError:
         pass
-    return best
+    return best_ip
 
 
 def _linux_enumerate_interfaces():
@@ -288,11 +358,7 @@ def _linux_enumerate_interfaces():
         for ifname in sorted(os.listdir("/sys/class/net")):
             if ifname == "lo" or _linux_skip_iface(ifname):
                 continue
-            entry = _linux_iface_entry(ifname)
-            if not entry["up"] and entry["ip"] == "disconnected":
-                entries.append(entry)
-            else:
-                entries.append(entry)
+            entries.append(_linux_iface_entry(ifname))
     except OSError:
         pass
     return entries
