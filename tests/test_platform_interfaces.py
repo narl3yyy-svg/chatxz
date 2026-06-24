@@ -76,19 +76,49 @@ class LinuxInterfaceHelpers(unittest.TestCase):
 
 
 class WindowsInterfaceHelpers(unittest.TestCase):
-    def test_windows_enumerate_parses_powershell_json(self):
-        payload = (
-            '[{"name":"Ethernet 2","ip":"10.0.47.37","up":true,"gateway_iface":true},'
-            '{"name":"Tailscale","ip":"100.64.0.2","up":true,"gateway_iface":false}]'
+    def test_windows_enumerate_parses_ipconfig(self):
+        ipconfig = (
+            "Ethernet adapter Ethernet 2:\r\n"
+            "\r\n"
+            "   IPv4 Address. . . . . . . . . . . : 10.0.47.37\r\n"
+            "   Subnet Mask . . . . . . . . . . . : 255.255.255.0\r\n"
+            "\r\n"
+            "Ethernet adapter Tailscale:\r\n"
+            "\r\n"
+            "   IPv4 Address. . . . . . . . . . . : 100.64.0.2\r\n"
         )
-        with patch.object(plat.subprocess, "run") as mock_run:
-            mock_run.return_value.stdout = payload
-            mock_run.return_value.returncode = 0
-            entries = plat._windows_enumerate_interfaces()
+        route = "0.0.0.0          0.0.0.0      10.0.47.1      10.0.47.37"
+
+        def fake_run(cmd, *args, **kwargs):
+            result = type("R", (), {"stdout": "", "returncode": 0})()
+            if cmd and cmd[0] == "ipconfig":
+                result.stdout = ipconfig
+            elif cmd and cmd[0] == "route":
+                result.stdout = route
+            return result
+
+        with patch.object(plat.subprocess, "run", side_effect=fake_run):
+            entries = plat._windows_enumerate_interfaces_ipconfig()
         self.assertEqual(len(entries), 2)
         self.assertEqual(entries[0]["ip"], "10.0.47.37")
         self.assertEqual(entries[0]["broadcast"], "10.0.47.255")
+        self.assertTrue(entries[0]["gateway_iface"])
         self.assertEqual(entries[1]["kind"], "vpn")
+
+    def test_desktop_interface_cache_reuses_results(self):
+        plat.invalidate_desktop_interface_cache()
+        calls = {"n": 0}
+
+        def fake_enum():
+            calls["n"] += 1
+            return [{"name": "eth0", "kind": "ethernet", "ip": "10.0.0.1", "up": True}]
+
+        with patch.object(plat, "_desktop_enumerate_interfaces_uncached", side_effect=fake_enum):
+            with patch.object(plat.sys, "platform", "win32"):
+                plat._desktop_enumerate_interfaces()
+                plat._desktop_enumerate_interfaces()
+        self.assertEqual(calls["n"], 1)
+        plat.invalidate_desktop_interface_cache()
 
     def test_desktop_lan_ip_prefers_gateway_interface(self):
         entries = [

@@ -74,6 +74,7 @@ from chatxz.utils.platform import (
     lan_ip as platform_lan_ip,
     lan_broadcast,
     physical_lan_reachable,
+    desktop_lan_status,
     set_lan_interface_preference,
     android_storage_dirs,
     patch_embedded_signals,
@@ -1965,8 +1966,17 @@ class ChatWebServer:
         settings = self.load_settings()
         configured = settings.get("rns_interfaces")
         lan_discovery = lan_discovery_configured(configured)
-        lan_up = lan_connected() if lan_discovery else False
-        lan_ip_value = detect_lan_ip() if lan_up else None
+        if lan_discovery and sys.platform in ("win32", "darwin"):
+            lan_snap = await asyncio.to_thread(desktop_lan_status)
+            lan_up = lan_snap["lan_connected"]
+            lan_ip_value = lan_snap["lan_ip"] if lan_up else None
+            bcast_value = lan_snap["broadcast"] if lan_up else None
+            avail_ifaces = lan_snap["interfaces"]
+        else:
+            lan_up = lan_connected() if lan_discovery else False
+            lan_ip_value = detect_lan_ip() if lan_up else None
+            bcast_value = lan_broadcast() if lan_up else None
+            avail_ifaces = enumerate_lan_interfaces()
         return web.json_response({
             "platform": self._platform_name(),
             "embedded": self.embedded,
@@ -1984,11 +1994,11 @@ class ChatWebServer:
             "lan_ip": lan_ip_value if lan_discovery else (
                 "not configured" if not lan_discovery else None
             ),
-            "broadcast": lan_broadcast() if lan_up else (
+            "broadcast": bcast_value if lan_up else (
                 "not configured" if not lan_discovery else None
             ),
             "interfaces": list_network_interfaces(),
-            "available_interfaces": enumerate_lan_interfaces(),
+            "available_interfaces": avail_ifaces,
             "lan_interface": get_lan_interface_preference() or "",
             "rns_ready": bool(self.messaging and self.messaging.destination),
             "rns_error": self.rns_init_error,
@@ -3144,6 +3154,19 @@ class ChatWebServer:
                 if link:
                     self.messaging.send_read_receipt(link, msg_id)
 
+    async def _init_rns_background(self):
+        try:
+            my_hash = await asyncio.to_thread(self.start_rns)
+            self._maybe_auto_reset_network_stats()
+            print(f"[startup] RNS ready, identity: {my_hash}")
+            await self._broadcast({"type": "rns_ready", "data": {"hash": my_hash}})
+        except SystemExit:
+            raise
+        except Exception:
+            import traceback
+            self.rns_init_error = traceback.format_exc()
+            print(f"[startup] RNS init failed:\n{self.rns_init_error}")
+
     async def _on_startup(self, app):
         self._loop = asyncio.get_running_loop()
         self._reset_connection_state()
@@ -3157,6 +3180,9 @@ class ChatWebServer:
             self._queue_retry_loop(),
         ):
             task = asyncio.create_task(coro)
+            self._background_tasks.append(task)
+        if not self.embedded and not is_android():
+            task = asyncio.create_task(self._init_rns_background())
             self._background_tasks.append(task)
         self._prune_stale_session_system_messages()
         retention = self.load_settings().get("history_retention", "never")
@@ -3289,14 +3315,13 @@ class ChatWebServer:
 
         app = web.Application()
         self._register_routes(app)
-        my_hash = self.start_rns()
         app.on_startup.append(self._on_startup)
         app.on_shutdown.append(self._on_shutdown)
         app.on_cleanup.append(self._on_cleanup)
 
         print(f"chatxz web server v{APP_VERSION}")
-        print(f"Your identity: {my_hash}")
         print(f"Web interface: http://{self.host}:{self.port}")
+        print("[startup] HTTP listening — RNS/network stack starting in background")
         print("Press Ctrl+C to stop")
 
         try:

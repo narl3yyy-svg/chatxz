@@ -5,11 +5,28 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 
 _android = None
 _files_dir = None
 _signals_patched = False
 _lan_interface_pref = None
+_desktop_if_cache = {"entries": None, "expires": 0.0}
+_desktop_if_cache_lock = threading.Lock()
+DESKTOP_IF_CACHE_TTL = 45.0
+
+
+def _subprocess_flags():
+    if sys.platform == "win32":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return 0
+
+
+def invalidate_desktop_interface_cache():
+    with _desktop_if_cache_lock:
+        _desktop_if_cache["entries"] = None
+        _desktop_if_cache["expires"] = 0.0
 
 
 def patch_embedded_signals():
@@ -123,6 +140,7 @@ def set_lan_interface_preference(ifname):
     global _lan_interface_pref
     name = (ifname or "").strip()
     _lan_interface_pref = name or None
+    invalidate_desktop_interface_cache()
 
 
 def get_lan_interface_preference():
@@ -393,32 +411,119 @@ def _windows_iface_kind(name):
     return "other"
 
 
-def _windows_enumerate_interfaces():
-    """Enumerate IPv4 interfaces on Windows via PowerShell (Win10+)."""
-    script = r"""
-$gwIndex = $null
-try {
-  $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-    Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } |
-    Sort-Object RouteMetric, InterfaceMetric |
-    Select-Object -First 1
-  if ($route) { $gwIndex = $route.InterfaceIndex }
-} catch {}
+def _windows_default_gateway_subnet():
+    """Return 'a.b.c' subnet prefix for the active default route, if known."""
+    try:
+        proc = subprocess.run(
+            ["route", "print", "0.0.0.0"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+            creationflags=_subprocess_flags(),
+        )
+        for line in (proc.stdout or "").splitlines():
+            if "0.0.0.0" not in line:
+                continue
+            parts = line.split()
+            nums = [p for p in parts if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", p)]
+            if len(nums) >= 2 and nums[0] == "0.0.0.0":
+                gw = nums[1]
+                gw_parts = gw.split(".")
+                if len(gw_parts) == 4 and not gw.startswith("0."):
+                    return ".".join(gw_parts[:3])
+    except Exception:
+        pass
+    return None
 
-$rows = @()
-$addrs = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-  Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' }
-foreach ($addr in $addrs) {
-  $adapter = Get-NetAdapter -InterfaceIndex $addr.InterfaceIndex -ErrorAction SilentlyContinue
-  $up = $false
-  if ($adapter) { $up = ($adapter.Status -eq 'Up') }
-  $rows += [PSCustomObject]@{
-    name = $addr.InterfaceAlias
-    ip = $addr.IPAddress
-    up = $up
-    gateway_iface = ($addr.InterfaceIndex -eq $gwIndex)
-  }
+
+def _windows_enumerate_interfaces_ipconfig():
+    """Fast Windows NIC scan via ipconfig (no PowerShell startup)."""
+    try:
+        proc = subprocess.run(
+            ["ipconfig"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+            creationflags=_subprocess_flags(),
+        )
+        text = proc.stdout or ""
+    except Exception:
+        return []
+
+    gw_subnet = _windows_default_gateway_subnet()
+    entries = []
+    current_name = None
+    current_up = True
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not line.startswith((" ", "\t")) and stripped.endswith(":"):
+            current_name = stripped[:-1].strip()
+            current_up = True
+            continue
+        if not current_name:
+            continue
+        low = stripped.lower()
+        if "media disconnected" in low:
+            current_up = False
+            continue
+        match = re.search(
+            r"IPv4 Address[^:]*:\s*([\d.]+)",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        ip = match.group(1)
+        if ip.startswith("127.") or ip.startswith("169.254."):
+            continue
+        subnet = _host_ipv4_broadcast(ip) if current_up else None
+        ip_parts = ip.split(".")
+        gateway_iface = bool(
+            gw_subnet
+            and len(ip_parts) == 4
+            and ".".join(ip_parts[:3]) == gw_subnet
+        )
+        entries.append({
+            "name": current_name,
+            "kind": _windows_iface_kind(current_name),
+            "ip": ip if current_up else "disconnected",
+            "broadcast": subnet if current_up else None,
+            "subnet_broadcast": subnet if current_up else None,
+            "up": current_up,
+            "gateway_iface": gateway_iface,
+        })
+    return entries
+
+
+def _windows_enumerate_interfaces_powershell():
+    """Fallback Windows NIC scan when ipconfig parsing fails."""
+    script = r"""
+$adapters = @{}
+Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
+  $adapters[$_.InterfaceIndex] = ($_.Status -eq 'Up')
 }
+$gwIndex = $null
+$route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+  Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } |
+  Sort-Object RouteMetric, InterfaceMetric |
+  Select-Object -First 1
+if ($route) { $gwIndex = $route.InterfaceIndex }
+$rows = @()
+Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+  Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' } |
+  ForEach-Object {
+    $up = [bool]$adapters[$_.InterfaceIndex]
+    [PSCustomObject]@{
+      name = $_.InterfaceAlias
+      ip = $_.IPAddress
+      up = $up
+      gateway_iface = ($_.InterfaceIndex -eq $gwIndex)
+    }
+  }
 if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress }
 """
     try:
@@ -426,8 +531,9 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress }
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True,
             text=True,
-            timeout=8,
+            timeout=5,
             check=False,
+            creationflags=_subprocess_flags(),
         )
         raw = (proc.stdout or "").strip()
         if not raw:
@@ -458,6 +564,13 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress }
     return entries
 
 
+def _windows_enumerate_interfaces():
+    entries = _windows_enumerate_interfaces_ipconfig()
+    if not entries:
+        entries = _windows_enumerate_interfaces_powershell()
+    return entries
+
+
 def _darwin_is_vpn_iface(name):
     low = (name or "").lower()
     return any(token in low for token in (
@@ -483,7 +596,7 @@ def _darwin_enumerate_interfaces():
             ["ifconfig"],
             capture_output=True,
             text=True,
-            timeout=8,
+            timeout=3,
             check=False,
         )
         text = proc.stdout or ""
@@ -518,7 +631,7 @@ def _darwin_enumerate_interfaces():
     return entries
 
 
-def _desktop_enumerate_interfaces():
+def _desktop_enumerate_interfaces_uncached():
     if sys.platform == "win32":
         entries = _windows_enumerate_interfaces()
         if entries:
@@ -528,6 +641,19 @@ def _desktop_enumerate_interfaces():
         if entries:
             return entries
     return _linux_enumerate_interfaces()
+
+
+def _desktop_enumerate_interfaces():
+    now = time.time()
+    with _desktop_if_cache_lock:
+        cached = _desktop_if_cache.get("entries")
+        if cached is not None and now < _desktop_if_cache.get("expires", 0):
+            return list(cached)
+    entries = _desktop_enumerate_interfaces_uncached()
+    with _desktop_if_cache_lock:
+        _desktop_if_cache["entries"] = list(entries)
+        _desktop_if_cache["expires"] = now + DESKTOP_IF_CACHE_TTL
+    return entries
 
 
 def _desktop_iface_auto_priority(entry):
@@ -713,6 +839,46 @@ def list_network_interfaces():
             "up": True,
         }]
     return []
+
+
+def desktop_lan_status():
+    """Single-pass LAN status for API handlers (reuses cached interface list)."""
+    entries = _desktop_enumerate_interfaces()
+    pref = get_lan_interface_preference()
+    physical = False
+    connected = False
+    best_ip = None
+    best_score = -1
+    broadcast = None
+
+    for entry in entries:
+        if entry.get("kind") == "vpn":
+            continue
+        if not entry.get("up"):
+            continue
+        ip = entry.get("ip")
+        if not ip or ip == "disconnected" or str(ip).startswith("169.254."):
+            continue
+        physical = True
+        if pref and entry.get("name") != pref:
+            continue
+        connected = True
+        score = _desktop_iface_auto_priority(entry)
+        if score > best_score:
+            best_score = score
+            best_ip = str(ip)
+            broadcast = entry.get("broadcast") or entry.get("subnet_broadcast")
+
+    if best_ip and not broadcast:
+        broadcast = _host_ipv4_broadcast(best_ip)
+
+    return {
+        "physical_lan_reachable": physical,
+        "lan_connected": connected,
+        "lan_ip": best_ip,
+        "broadcast": broadcast or "255.255.255.255",
+        "interfaces": entries,
+    }
 
 
 def local_ipv4_addresses():
