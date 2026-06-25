@@ -1867,13 +1867,20 @@ function handleWSMessage(msg) {
     const data = msg.data || {};
     const chatPeer = data.chat_peer || data.peer || data.sender;
     const isIncoming = !data.outgoing && data.sender !== 'system';
-    if (isIncoming && chatPeer && !messageBelongsToPeer(data)) {
-      bumpUnread(chatPeer);
-      renderContacts(allContacts);
-      const preview = data.type === 'text' || data.type === 'emoji'
-        ? data.content
-        : (data.file_name || data.type || 'New message');
-      showMessageNotification(chatPeer, preview);
+    if (isIncoming && chatPeer) {
+      const linked = isPeerLinked(chatPeer);
+      const viewing = messageBelongsToPeer(data);
+      if (!linked || !viewing) {
+        bumpUnread(chatPeer);
+        renderContacts(allContacts);
+        renderDiscovered(window._discoveredPeers || []);
+      }
+      if (!linked || !viewing) {
+        const preview = data.type === 'text' || data.type === 'emoji'
+          ? data.content
+          : (data.file_name || data.type || 'New message');
+        showMessageNotification(chatPeer, preview);
+      }
     }
     addMessage(data);
   } else if (msg.type === 'receipt') {
@@ -1919,8 +1926,11 @@ function handleWSMessage(msg) {
     if (msg.data?.hash) {
       const h = msg.data.hash;
       registerPeerAliases(h, ...(msg.data.aliases || []));
-      setLinkPeer(h, true);
-      if (msg.data.linked_peers) syncLinkedPeers(msg.data.linked_peers);
+      const passive = msg.data.passive || msg.data.user_disconnected;
+      if (!passive && msg.data.promote_active !== false) {
+        setLinkPeer(h, true);
+      }
+      if (msg.data.linked_peers && !passive) syncLinkedPeers(msg.data.linked_peers);
       const now = Date.now();
       if (connectInFlight && !msg.data.background) {
         connectInFlight = false;
@@ -2242,12 +2252,14 @@ function renderDiscovered(peers) {
     const active = peersMatch(p.hash, viewingPeer);
     div.className = 'contact-item' + (active ? ' active' : '');
     const name = p.name || truncateHash(p.hash);
+    const unread = unreadForPeer(p.hash);
+    const linked = isPeerLinked(p.hash);
     div.innerHTML = `<div class="contact-avatar contact-avatar-lan">${escapeHtml(name).charAt(0).toUpperCase()}</div>
       <div class="contact-info">
-        <div class="contact-name">${escapeHtml(name)}</div>
+        <div class="contact-name">${escapeHtml(name)}${linked ? ' <span style="color:var(--success);font-size:10px">●</span>' : ''}</div>
         <div class="contact-hash">${truncateHash(p.hash)}${p.ip ? ' · ' + escapeHtml(p.ip) : ''}</div>
       </div>
-      <span class="contact-badge lan">LAN</span>`;
+      ${unread > 0 ? `<span class="contact-badge unread">${unread > 99 ? '99+' : unread}</span>` : '<span class="contact-badge lan">LAN</span>'}`;
     div.onclick = () => openChat(p.hash, true, {ip: p.ip, port: p.port});
     div.oncontextmenu = (e) => {
       e.preventDefault();

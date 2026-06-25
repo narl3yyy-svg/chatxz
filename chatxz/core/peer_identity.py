@@ -64,14 +64,28 @@ def register_beacon_identity(data):
         except Exception:
             app_data = None
 
+    computed_dest = ""
+    try:
+        ident_probe = RNS.Identity.recall(identity_bytes)
+        if ident_probe:
+            computed_dest = connect_hash_from_identity(ident_probe)
+    except Exception:
+        pass
+
     dest_bytes = None
-    if dest_hex and len(dest_hex) == 32:
+    canonical_dest = computed_dest or (dest_hex if len(dest_hex) == 32 else "")
+    if canonical_dest:
+        try:
+            dest_bytes = bytes.fromhex(canonical_dest)
+        except ValueError:
+            dest_bytes = None
+    if dest_bytes is None and dest_hex and len(dest_hex) == 32:
         try:
             dest_bytes = bytes.fromhex(dest_hex)
         except ValueError:
             dest_bytes = None
-    if dest_bytes is None:
-        dest_bytes = identity_bytes
+
+    purge_stale_known_destinations(pubkey, canonical_dest or dest_hex, identity_bytes)
 
     try:
         RNS.Identity.remember(identity_bytes, dest_bytes, pubkey, app_data)
@@ -121,6 +135,32 @@ def peer_record_from_beacon(data):
     if data.get("pubkey"):
         peer["pubkey"] = data.get("pubkey")
     return peer
+
+
+def purge_stale_known_destinations(pubkey, canonical_dest, identity_bytes=None):
+    """Drop RNS known_destinations entries for a pubkey that use a wrong dest hash."""
+    if not pubkey:
+        return 0
+    canonical = normalize_hash(canonical_dest)
+    removed = 0
+    try:
+        with RNS.Identity.known_destinations_lock:
+            stale = []
+            for dest_hash_bytes, entry in RNS.Identity.known_destinations.items():
+                if len(entry) < 3 or entry[2] != pubkey:
+                    continue
+                found = normalize_hash(RNS.hexrep(dest_hash_bytes))
+                if canonical and found != canonical:
+                    stale.append(dest_hash_bytes)
+            for raw in stale:
+                try:
+                    del RNS.Identity.known_destinations[raw]
+                    removed += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return removed
 
 
 def purge_rns_paths_for_hashes(hashes):

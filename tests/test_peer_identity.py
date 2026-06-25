@@ -51,6 +51,26 @@ class PeerIdentityTests(unittest.TestCase):
         self.assertEqual(len(peers), 1)
         self.assertEqual(peers[0]["hash"], "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 
+    def test_purge_stale_known_destinations_removes_wrong_hash(self):
+        try:
+            import RNS
+        except ImportError:
+            self.skipTest("RNS not installed")
+        from chatxz.core.peer_identity import purge_stale_known_destinations
+
+        pubkey = b"\x01" * (RNS.Identity.KEYSIZE // 8)
+        stale_dest = bytes.fromhex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        canonical = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        identity_bytes = bytes.fromhex("cccccccccccccccccccccccccccccccc")
+        with RNS.Identity.known_destinations_lock:
+            RNS.Identity.known_destinations[stale_dest] = (
+                identity_bytes, None, pubkey,
+            )
+        removed = purge_stale_known_destinations(pubkey, canonical, identity_bytes)
+        self.assertEqual(removed, 1)
+        with RNS.Identity.known_destinations_lock:
+            self.assertNotIn(stale_dest, RNS.Identity.known_destinations)
+
 
 if __name__ == "__main__":
     unittest.main()

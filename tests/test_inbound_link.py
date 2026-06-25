@@ -121,6 +121,44 @@ class InboundLinkTests(unittest.TestCase):
         self.assertEqual(notified[0], "4a2aa1dbbed382886b0333274e546ba8")
         self.assertEqual(backend.active_peer_hash, "4a2aa1dbbed382886b0333274e546ba8")
 
+    def test_user_disconnect_blocks_session_resume(self):
+        backend = _make_backend()
+        peer = "4a2aa1dbbed382886b0333274e546ba8"
+        backend._session_peer_hash = peer
+        backend.mark_user_disconnected(peer)
+        self.assertTrue(backend.is_user_disconnected(peer))
+        self.assertFalse(backend.resume_session_peer())
+
+    def test_user_initiated_connect_clears_disconnect_flag(self):
+        backend = _make_backend()
+        peer = "4a2aa1dbbed382886b0333274e546ba8"
+        backend.mark_user_disconnected(peer)
+        backend.clear_user_disconnected(peer)
+        self.assertFalse(backend.is_user_disconnected(peer))
+
+    def test_passive_link_notify_skips_active_promotion(self):
+        backend = _make_backend()
+        remote_ident = "f687bbff423a220af49f04edb8381ab2"
+        link = _FakeLink("44" * 16, remote_ident)
+        connect_hex = "4a2aa1dbbed382886b0333274e546ba8"
+        backend.mark_user_disconnected(connect_hex)
+        notified = []
+
+        def on_established(peer, link_obj, **kwargs):
+            notified.append(kwargs)
+
+        backend.on_link_established = on_established
+        with patch(
+            "chatxz.core.messaging.message_dest_hash_for_identity",
+            return_value=connect_hex,
+        ):
+            backend._notify_link_established(
+                link, connect_hex, promote_active=False, passive=True,
+            )
+        self.assertEqual(len(notified), 1)
+        self.assertTrue(notified[0].get("passive"))
+        self.assertIsNone(backend.active_peer_hash)
+
 
 if __name__ == "__main__":
     unittest.main()

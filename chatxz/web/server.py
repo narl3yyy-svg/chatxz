@@ -1381,7 +1381,8 @@ class ChatWebServer:
                 self._loop
             )
 
-    def _on_link_established(self, peer_hash, link, background=False, promote_active=True):
+    def _on_link_established(self, peer_hash, link, background=False, promote_active=True,
+                             passive=False):
         if self.messaging and link:
             resolved = self.messaging.canonical_connect_hash(peer_hash, link=link)
         else:
@@ -1392,11 +1393,17 @@ class ChatWebServer:
                 resolved = fixed
         elif not resolved:
             resolved = self._peer_dest_hash(peer_hash)
-        if promote_active:
+        user_disconnected = bool(
+            self.messaging and self.messaging.is_user_disconnected(resolved)
+        )
+        if passive or user_disconnected:
+            promote_active = False
+            background = True
+        if promote_active and not passive:
             self.active_peer = resolved
         self._prune_stale_session_system_messages()
         path_switch = bool(getattr(self.messaging, "_last_handoff", False))
-        label = "background" if background else "active"
+        label = "passive" if passive else ("background" if background else "active")
         print(f"[connect] Link with {resolved[:16]}... ({label})")
         if self.websockets and self._loop:
             asyncio.run_coroutine_threadsafe(
@@ -1408,6 +1415,8 @@ class ChatWebServer:
                         "path_switch": path_switch,
                         "background": background,
                         "promote_active": promote_active,
+                        "passive": passive,
+                        "user_disconnected": user_disconnected,
                         "linked_peers": (
                             self.messaging.linked_peers() if self.messaging else []
                         ),
@@ -1722,6 +1731,12 @@ class ChatWebServer:
             peer_port = data.get("port") or 8742
             caller_ip = detect_lan_ip() or (self.host if self.host not in ("127.0.0.1", "0.0.0.0") else "")
             resolved = self._resolve_connect_target(peer_hash, peer_ip)
+            if self.messaging and self.messaging.is_user_disconnected(resolved):
+                return web.json_response({
+                    "status": "ok",
+                    "passive": True,
+                    "connected": False,
+                })
             if self.messaging and self.messaging._peer_link_active(resolved):
                 return web.json_response({
                     "status": "ok",
@@ -2053,6 +2068,8 @@ class ChatWebServer:
 
     async def _resume_session_task(self, peer, peer_ip, peer_port):
         try:
+            if self.messaging and self.messaging.is_user_disconnected(peer):
+                return
             result = await self._run_blocking(
                 self.messaging.resume_session_peer,
                 peer_ip,
@@ -2371,19 +2388,12 @@ class ChatWebServer:
         if not peer:
             peer = self._ui_state.get("viewing_peer") or self.active_peer or ""
         peer = self._peer_dest_hash(peer)
-        if peer:
-            self._purge_ephemeral_peer(peer)
         if self.messaging and peer:
-            self.messaging.disconnect_peer(peer)
+            self.messaging.disconnect_peer(peer, user_initiated=True)
         elif self.messaging:
             self.messaging.disconnect_all_peers(clear_session=True)
         if self.active_peer and peer and self._peers_equivalent(self.active_peer, peer):
             self.active_peer = None
-        if peer:
-            await self._broadcast({
-                "type": "peer_history_cleared",
-                "data": {"peer": peer, "removed": 1},
-            })
         await self._broadcast({
             "type": "link_closed",
             "data": {
@@ -3230,7 +3240,11 @@ class ChatWebServer:
             peer = self._peer_dest_hash(
                 getattr(self.messaging, "_session_peer_hash", None) or self.active_peer
             )
-            if peer and not self.messaging.active_link:
+            if (
+                peer
+                and not self.messaging.active_link
+                and not self.messaging.is_user_disconnected(peer)
+            ):
                 now = time.time()
                 if (
                     now - self._session_resume_last >= 45.0

@@ -204,6 +204,7 @@ class MessagingBackend:
         self._connect_user_initiated = False
         self._connect_background = False
         self._peer_lan_unreachable = {}
+        self._user_disconnected = set()
 
     def _is_self_hash(self, h):
         clean = normalize_hash(h)
@@ -334,16 +335,60 @@ class MessagingBackend:
             out.append(peer)
         return out
 
-    def disconnect_peer(self, peer_hash):
+    def disconnect_peer(self, peer_hash, user_initiated=False):
         peer = self.dest_hash_for(peer_hash)
-        link = self._link_for_peer(peer)
-        if not link:
+        if user_initiated and peer:
+            self.mark_user_disconnected(peer)
+        closed = 0
+        for link in list(self.links.values()):
+            resolved = self._peer_hash_from_link_identity(link)
+            if not resolved:
+                cached = self._link_peer_hashes.get(link.link_id)
+                resolved = self.dest_hash_for(cached) if cached else ""
+            if peer and resolved and not self.hashes_equivalent(resolved, peer):
+                continue
+            if peer and not resolved:
+                continue
+            try:
+                link.teardown()
+                closed += 1
+            except Exception:
+                pass
+        if user_initiated and peer:
+            if self.active_peer_hash and self.hashes_equivalent(
+                self.active_peer_hash, peer
+            ):
+                self.active_link = None
+                self.active_peer_hash = None
+                self._send_link = None
+            if self._session_peer_hash and self.hashes_equivalent(
+                self._session_peer_hash, peer
+            ):
+                self.clear_session_peer()
+        return closed > 0
+
+    def mark_user_disconnected(self, peer_hash):
+        peer = self.dest_hash_for(peer_hash)
+        if peer and peer != "unknown":
+            self._user_disconnected.add(peer)
+
+    def clear_user_disconnected(self, peer_hash):
+        peer = self.dest_hash_for(peer_hash)
+        if not peer:
+            return
+        self._user_disconnected = {
+            h for h in self._user_disconnected
+            if not self.hashes_equivalent(h, peer)
+        }
+
+    def is_user_disconnected(self, peer_hash):
+        peer = self.dest_hash_for(peer_hash)
+        if not peer:
             return False
-        try:
-            link.teardown()
-        except Exception:
-            pass
-        return True
+        return any(
+            self.hashes_equivalent(peer, blocked)
+            for blocked in self._user_disconnected
+        )
 
     def disconnect_all_peers(self, clear_session=True):
         """Tear down every open RNS link (network reset / full disconnect)."""
@@ -833,6 +878,8 @@ class MessagingBackend:
         peer = self.dest_hash_for(self.active_peer_hash or self._session_peer_hash or "")
         if not peer or peer == "unknown":
             return False, ""
+        if self.is_user_disconnected(peer):
+            return False, ""
         adopted = self._adopt_healthy_peer_link(peer)
         if adopted:
             if self.active_link and self._link_interface_healthy(self.active_link):
@@ -862,7 +909,35 @@ class MessagingBackend:
 
     def clear_session_peer(self):
         self._session_peer_hash = None
-        self._pending_sends.clear()
+
+    def _teardown_mismatched_links(self, target_peer):
+        """Close links whose resolved peer hash disagrees with the target connect hash."""
+        target = self.dest_hash_for(target_peer)
+        if not target or target == "unknown":
+            return 0
+        closed = 0
+        for link in list(self.links.values()):
+            resolved = self._peer_hash_from_link_identity(link)
+            if not resolved or self.hashes_equivalent(resolved, target):
+                continue
+            try:
+                ident = link.get_remote_identity()
+                if ident:
+                    ident_dest = self._dest_hash_from_identity(ident)
+                    if ident_dest and self.hashes_equivalent(ident_dest, target):
+                        self._cache_link_peer(link, ident_dest)
+                        self._register_peer_link(link, ident_dest)
+                        continue
+            except Exception:
+                pass
+            try:
+                link.teardown()
+                closed += 1
+            except Exception:
+                pass
+        if closed:
+            self._pending_sends.clear()
+        return closed
 
     def _link_path_score(self, link):
         if not link:
@@ -904,20 +979,6 @@ class MessagingBackend:
             dest = self._dest_hash_from_identity(ident)
             if dest and not self._is_self_hash(dest):
                 return dest
-            pub = None
-            try:
-                pub = ident.get_public_key()
-            except Exception:
-                pass
-            if pub:
-                with RNS.Identity.known_destinations_lock:
-                    for dest_hash_bytes, entry in RNS.Identity.known_destinations.items():
-                        if len(entry) > 2 and entry[2] == pub:
-                            found = normalize_hash(RNS.hexrep(dest_hash_bytes))
-                            ident_hex = normalize_hash(RNS.hexrep(ident.hash))
-                            if found and not self._is_self_hash(found):
-                                self.register_peer_mapping(found, ident_hex)
-                                return found
         except Exception:
             pass
         return ""
@@ -1922,7 +1983,8 @@ class MessagingBackend:
     def _peer_destination_hash(self, link, fallback=None):
         return self._peer_for_link(link, fallback=fallback)
 
-    def _notify_link_established(self, link, peer_hash=None, promote_active=True, background=False):
+    def _notify_link_established(self, link, peer_hash=None, promote_active=True,
+                                 background=False, passive=False):
         peer = self.canonical_connect_hash(peer_hash or "", link=link)
         if (not peer or peer == "unknown") and link:
             peer = self._peer_hash_from_link_identity(link)
@@ -1953,10 +2015,17 @@ class MessagingBackend:
         print(f"[messaging] Link ready with {peer[:16]}... ({label})")
         if self.on_link_established:
             try:
-                self.on_link_established(peer, link, background=background, promote_active=promote_active)
+                self.on_link_established(
+                    peer, link,
+                    background=background,
+                    promote_active=promote_active,
+                    passive=passive,
+                )
             except TypeError:
                 try:
-                    self.on_link_established(peer, link)
+                    self.on_link_established(
+                        peer, link, background=background, promote_active=promote_active,
+                    )
                 except Exception as e:
                     print(f"[messaging] on_link_established error: {e}")
             except Exception as e:
@@ -2096,13 +2165,22 @@ class MessagingBackend:
         print(f"[messaging] Incoming link established: {link.link_id.hex()[:12]} ({peer_hash[:16]}...)")
         self._last_handoff = False
         self._setup_link(link)
-        promote = not self.active_link or self.hashes_equivalent(peer_hash, self.active_peer_hash)
+        passive_only = self.is_user_disconnected(peer_hash)
+        if passive_only:
+            promote = False
+        else:
+            promote = (
+                not self.active_link
+                or self.hashes_equivalent(peer_hash, self.active_peer_hash)
+            )
         self._notify_link_established(
             link, peer_hash,
             promote_active=promote,
             background=not promote,
+            passive=passive_only,
         )
-        self.drain_queue(link, peer_hash)
+        if not passive_only:
+            self.drain_queue(link, peer_hash)
 
     def _link_closed(self, link):
         def callback(link):
@@ -2497,6 +2575,8 @@ class MessagingBackend:
         peer = self.dest_hash_for(self._session_peer_hash or self.active_peer_hash or "")
         if not peer or peer == "unknown":
             return False
+        if self.is_user_disconnected(peer):
+            return False
         if self.active_link and self._peer_link_active(peer):
             return True
         if self._failover_in_progress:
@@ -2516,6 +2596,8 @@ class MessagingBackend:
             return False
         peer = self.dest_hash_for(self.active_peer_hash or self._session_peer_hash or "")
         if not peer or peer == "unknown":
+            return False
+        if self.is_user_disconnected(peer):
             return False
         if not self.active_peer_hash:
             self.active_peer_hash = peer
@@ -2612,6 +2694,23 @@ class MessagingBackend:
                 return False
             if peer_ip:
                 register_udp_peer_ip(peer_ip)
+
+            if user_initiated:
+                self.clear_user_disconnected(clean)
+                pruned = self._teardown_mismatched_links(clean)
+                if pruned:
+                    print(f"[connect] Closed {pruned} stale link(s) for {clean[:16]}...")
+            elif respond_to_wake and self.is_user_disconnected(clean):
+                print(
+                    f"[connect] Passive mode — not reverse-connecting to "
+                    f"{clean[:16]}... (user disconnected)"
+                )
+                inbound = self._find_active_link_for_peer(clean)
+                if inbound:
+                    self._notify_link_established(
+                        inbound, clean, promote_active=False, background=True, passive=True,
+                    )
+                return bool(inbound)
 
             old_link = None
             if self.active_link and self.active_peer_hash and self.hashes_equivalent(clean, self.active_peer_hash):
