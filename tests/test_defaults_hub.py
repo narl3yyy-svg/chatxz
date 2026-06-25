@@ -8,7 +8,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from chatxz.core import rns_interfaces as ri
 from chatxz.core.discovery import PeerDiscovery
-from chatxz.core.messaging import is_hub_peer_hash, HUB_GROUP_PEER
+from chatxz.core.lan_rns import interface_family
+from chatxz.core.messaging import is_hub_peer_hash, HUB_GROUP_PEER, MessagingBackend
 
 
 class DefaultInterfaceTests(unittest.TestCase):
@@ -53,6 +54,40 @@ class HubSettingsTests(unittest.TestCase):
         self.assertEqual(server_iface.get("listen_ip"), "0.0.0.0")
         self.assertEqual(server_iface.get("listen_port"), 4242)
 
+    def test_apply_hub_server_disables_all_tcp_clients(self):
+        from chatxz.web.server import ChatWebServer
+
+        server = ChatWebServer.__new__(ChatWebServer)
+        settings = {
+            "hub_role": "server",
+            "hub_port": 4242,
+            "rns_interfaces": [
+                {
+                    "id": "c1",
+                    "preset": "tcp_client",
+                    "type": "TCPClientInterface",
+                    "enabled": True,
+                    "target_host": "10.10.100.11",
+                    "target_port": 4242,
+                },
+                {
+                    "id": "c2",
+                    "preset": "tcp_client",
+                    "type": "TCPClientInterface",
+                    "enabled": True,
+                    "target_host": "127.0.0.1",
+                    "target_port": 4242,
+                },
+            ],
+        }
+        out = server._apply_hub_settings(settings)
+        clients = [
+            i for i in out["rns_interfaces"]
+            if i.get("type") == "TCPClientInterface"
+        ]
+        self.assertTrue(clients)
+        self.assertTrue(all(not c.get("enabled") for c in clients))
+
     def test_apply_hub_client_points_tcp_client_at_host(self):
         from chatxz.web.server import ChatWebServer
 
@@ -71,6 +106,30 @@ class HubSettingsTests(unittest.TestCase):
         self.assertEqual(client.get("target_host"), "10.10.100.11")
         self.assertEqual(client.get("target_port"), 4242)
         self.assertTrue(client.get("enabled"))
+
+
+class TcpFamilyTests(unittest.TestCase):
+    def test_interface_family_recognizes_tcp(self):
+        class TCPClientInterface:
+            pass
+        class TCPServerInterface:
+            pass
+        self.assertEqual(interface_family(TCPClientInterface()), "tcp")
+        self.assertEqual(interface_family(TCPServerInterface()), "tcp")
+
+
+class HubFailoverTests(unittest.TestCase):
+    def test_failover_uses_tcp_in_hub_mode(self):
+        from unittest.mock import MagicMock, patch
+
+        ident = MagicMock()
+        ident.hash = bytes.fromhex("a" * 32)
+        backend = MessagingBackend(identity=ident, config_dir="/tmp/chatxz-hub-test")
+        backend.running = True
+        with patch.object(backend, "_hub_transport_active", return_value=True):
+            with patch.object(backend, "_has_online_family", return_value=False):
+                families = backend._failover_families_to_try("b" * 32)
+        self.assertEqual(families, ["tcp"])
 
 
 class HubPeerTests(unittest.TestCase):

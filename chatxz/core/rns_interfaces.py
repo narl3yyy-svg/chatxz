@@ -777,6 +777,111 @@ def hot_add_tcp_server_interface(listen_ip="0.0.0.0", listen_port=4242, ifac_siz
         return None
 
 
+def remove_tcp_client_interfaces():
+    """Remove TCPClientInterface(s) from the running transport."""
+    try:
+        import RNS
+    except Exception:
+        return 0
+    removed = 0
+    for iface in list(getattr(RNS.Transport, "interfaces", []) or []):
+        if type(iface).__name__ != "TCPClientInterface":
+            continue
+        try:
+            RNS.Transport.remove_interface(iface)
+            removed += 1
+            print(f"[hub] Removed RNS TCPClientInterface {getattr(iface, 'name', iface)}")
+        except Exception as exc:
+            print(f"[hub] Could not remove TCPClientInterface: {exc}")
+    return removed
+
+
+def hot_add_tcp_client_interface(target_host, target_port=4242, ifac_size=16):
+    """Attach TCPClientInterface when hub client mode is enabled after RNS already started."""
+    target_host = (target_host or "").strip()
+    target_port = int(target_port or 4242)
+    if not target_host:
+        return None
+    try:
+        import RNS
+        from RNS.Interfaces.TCPInterface import TCPClientInterface
+    except Exception as exc:
+        print(f"[hub] TCP client hot-add unavailable: {exc}")
+        return None
+
+    for iface in list(getattr(RNS.Transport, "interfaces", []) or []):
+        if type(iface).__name__ != "TCPClientInterface":
+            continue
+        host = (getattr(iface, "target_host", None) or "").strip()
+        port = int(
+            getattr(iface, "target_port", None)
+            or getattr(iface, "port", None)
+            or 4242
+        )
+        if (
+            host == target_host
+            and port == target_port
+            and getattr(iface, "online", False)
+        ):
+            return iface
+        try:
+            RNS.Transport.remove_interface(iface)
+        except Exception:
+            pass
+
+    name = f"TCP Client {target_host}:{target_port}"
+    try:
+        iface = TCPClientInterface(RNS.Transport, {
+            "name": name,
+            "target_host": target_host,
+            "target_port": target_port,
+            "ifac_size": ifac_size,
+        })
+        _finalize_rns_interface(iface, ifac_size=ifac_size)
+        RNS.Transport.add_interface(iface)
+        print(f"[hub] Hot-added TCP hub client to {target_host}:{target_port}")
+        return iface
+    except Exception as exc:
+        print(f"[hub] TCP client hot-add failed for {target_host}:{target_port}: {exc}")
+        return None
+
+
+def ensure_runtime_tcp_client(settings=None, config_dir=None):
+    """Dial TCP hub server when hub_role is client (runtime hot-add)."""
+    if not settings:
+        try:
+            from chatxz.utils.helpers import get_config_dir
+            import json
+            path = os.path.join(config_dir or get_config_dir(), "settings.json")
+            with open(path, encoding="utf-8") as fh:
+                settings = json.load(fh)
+        except Exception:
+            return None
+    if (settings.get("hub_role") or "off") != "client":
+        return None
+    host = (settings.get("hub_host") or "").strip()
+    if not host:
+        return None
+    try:
+        import RNS
+        if RNS.Reticulum.get_instance() is None:
+            return None
+    except Exception:
+        return None
+    port = int(settings.get("hub_port") or 4242)
+    ifac_size = 16
+    for iface in normalize_interface_list(settings.get("rns_interfaces")):
+        if iface.get("type") != "TCPClientInterface":
+            continue
+        if not iface.get("enabled", True):
+            continue
+        ifac_size = int(iface.get("ifac_size") or ifac_size)
+        break
+    return hot_add_tcp_client_interface(
+        target_host=host, target_port=port, ifac_size=ifac_size,
+    )
+
+
 def ensure_runtime_tcp_hub(settings=None, config_dir=None):
     """Start TCP hub listener when hub_role is server (runtime hot-add)."""
     if not settings:

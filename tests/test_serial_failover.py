@@ -125,6 +125,12 @@ class FailoverPreferenceTests(unittest.TestCase):
                         )):
                             self.assertTrue(backend._serial_faster_than_lan(peer))
 
+    def test_failover_skips_lan_when_hub_mode(self):
+        backend = self._backend()
+        with patch.object(backend, "_hub_transport_active", return_value=True):
+            families = backend._failover_families_to_try("4a2aa1dbbed382886b0333274e546ba8")
+        self.assertEqual(families, ["tcp"])
+
     def test_on_serial_transport_attached_announces(self):
         backend = self._backend()
         backend.destination = MagicMock()

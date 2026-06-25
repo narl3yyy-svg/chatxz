@@ -372,6 +372,7 @@ class MessagingBackend:
             self._consolidate_peer_links(peer, keep_link=use_link)
         if initiated and not self.is_user_disconnected(peer):
             self._schedule_queue_drain(peer, link=use_link, include_files=True)
+            self._schedule_hub_queue_drain()
         return True
 
     def _udp_connect_ready(self, dest_hex, peer_ip=None, peer_lan_down=False):
@@ -660,7 +661,35 @@ class MessagingBackend:
             return True
         return str(iface_a) == str(iface_b)
 
+    def _load_hub_settings(self):
+        try:
+            import json
+            import os
+            from chatxz.utils.helpers import get_config_dir
+            path = os.path.join(self.config_dir or get_config_dir(), "settings.json")
+            with open(path, encoding="utf-8") as fh:
+                settings = json.load(fh)
+            return (
+                settings.get("hub_role") or "off",
+                (settings.get("hub_server_hash") or "").strip(),
+            )
+        except Exception:
+            return "off", ""
+
+    def _hub_transport_active(self):
+        role, _ = self._load_hub_settings()
+        return role != "off"
+
     def _has_online_family(self, family):
+        if family == "tcp":
+            from chatxz.core.rns_interfaces import (
+                tcp_client_interface_online,
+                tcp_server_interface_online,
+            )
+            return (
+                tcp_client_interface_online() is not None
+                or tcp_server_interface_online() is not None
+            )
         if family == "serial":
             return serial_interface_online() is not None
         if family == "udp":
@@ -744,6 +773,8 @@ class MessagingBackend:
 
     def _failover_families_to_try(self, peer, peer_ip=None):
         """Ordered transports to attempt when reconnecting (LAN preferred unless serial is faster)."""
+        if self._hub_transport_active():
+            return ["tcp"]
         peer_lan_down = bool(peer_ip and self._peer_lan_recently_unreachable(peer_ip))
         lan_up = (
             physical_lan_reachable()
@@ -772,6 +803,9 @@ class MessagingBackend:
 
     def _failover_announce(self, prefer_family, peer_ip=None):
         """Refresh RNS path on the target transport before failover reconnect."""
+        if prefer_family == "tcp":
+            self._silent_announce(peer_ip=None)
+            return
         if prefer_family == "serial":
             if self._serial_transport_ready():
                 self._burst_serial_announce(count=5, interval=0.25)
@@ -785,6 +819,8 @@ class MessagingBackend:
         self._silent_announce(peer_ip=peer_ip if physical_lan_reachable() else None)
 
     def _preferred_failover_family(self, peer, attached=None, peer_ip=None):
+        if self._hub_transport_active():
+            return "tcp"
         attached = attached or self._link_attached_interface(self.active_link)
         att_fam = interface_family(attached)
         serial_up = self._serial_transport_ready()
@@ -860,6 +896,8 @@ class MessagingBackend:
             print(f"[connect] Cleared {pruned} stale LAN path(s)")
         if prefer_family == "serial":
             keep_families = ("serial",)
+        elif prefer_family == "tcp":
+            keep_families = ("tcp",)
         elif prefer_family in ("lan", "udp"):
             keep_families = ("udp", "lan")
         else:
@@ -906,6 +944,11 @@ class MessagingBackend:
                 path_iface = wait_for_peer_path_families(
                     peer, families=families, timeout_s=8.0, should_stop=stop,
                 )
+        elif prefer_family == "tcp":
+            request_paths_for_hash(peer, family="tcp")
+            path_iface = wait_for_peer_path_families(
+                peer, families=("tcp",), timeout_s=18.0, should_stop=stop,
+            )
         else:
             request_paths_for_hash(peer, family=prefer_family)
             families = (prefer_family,) if prefer_family else (None,)
@@ -930,6 +973,15 @@ class MessagingBackend:
             return False, ""
 
         attached = self._link_attached_interface(self.active_link)
+        if self._hub_transport_active():
+            att_fam = interface_family(attached)
+            if att_fam == "tcp" and self._link_interface_healthy(self.active_link):
+                return False, ""
+            if self._has_online_family("tcp") and not self._link_interface_healthy(self.active_link):
+                return True, "hub TCP link offline"
+            if att_fam != "tcp" and self._has_online_family("tcp"):
+                return True, "hub path on TCP"
+            return False, ""
         in_grace = (time.time() - self._last_link_established_at) < LINK_FAILOVER_GRACE_S
 
         if not self._link_interface_healthy(self.active_link):
@@ -1367,6 +1419,81 @@ class MessagingBackend:
                 return best
         return link_hint or best or self._link_for_peer(peer)
 
+    def _hub_send_targets(self, hub_server_hash=None, hub_server_mode=False):
+        if hub_server_mode:
+            return [
+                p for p in self.linked_peers()
+                if p and not is_hub_peer_hash(p)
+            ]
+        if hub_server_hash:
+            peer = self.dest_hash_for(hub_server_hash)
+            return [peer] if peer and peer != "unknown" else []
+        return [
+            p for p in self.linked_peers()[:1]
+            if p and not is_hub_peer_hash(p)
+        ]
+
+    def drain_hub_group_queue(self, hub_server_hash=None, hub_server_mode=False):
+        if not any(is_hub_peer_hash(e.get("target_hash")) for e in self.message_queue):
+            return 0
+        targets = self._hub_send_targets(hub_server_hash, hub_server_mode)
+        if not targets or not any(self._peer_link_active(t) for t in targets):
+            return 0
+        remaining = []
+        sent = 0
+        for entry in self.message_queue:
+            if not is_hub_peer_hash(entry.get("target_hash")):
+                remaining.append(entry)
+                continue
+            if entry.get("type") not in ("text", "emoji"):
+                remaining.append(entry)
+                continue
+            msg_id = entry.get("msg_id")
+            result = self.send_hub_message(
+                entry["content"],
+                msg_id=msg_id,
+                hub_server_hash=hub_server_hash,
+                hub_server_mode=hub_server_mode,
+            )
+            if result:
+                sent += 1
+                if self.on_queue_sent:
+                    try:
+                        self.on_queue_sent(result, HUB_GROUP_PEER, entry)
+                    except Exception as e:
+                        print(f"[queue] on_queue_sent error: {e}")
+            else:
+                remaining.append(entry)
+        if sent:
+            print(f"[queue] Drained {sent} hub group item(s)")
+        self.message_queue = remaining
+        self._save_queue()
+        return sent
+
+    def _schedule_hub_queue_drain(self, delay=None):
+        role, hub_hash = self._load_hub_settings()
+        if role == "off":
+            return
+        wait = QUEUE_DRAIN_DELAY_S if delay is None else delay
+
+        def run():
+            try:
+                if not self.running:
+                    return
+                role_now, hub_hash_now = self._load_hub_settings()
+                if role_now == "off":
+                    return
+                self.drain_hub_group_queue(
+                    hub_server_hash=hub_hash_now,
+                    hub_server_mode=(role_now == "server"),
+                )
+            except Exception as e:
+                print(f"[queue] Hub drain error: {e}")
+
+        timer = threading.Timer(wait, run)
+        timer.daemon = True
+        timer.start()
+
     def _schedule_queue_drain(self, peer_hash, link=None, include_files=True, delay=None):
         peer = self.dest_hash_for(peer_hash)
         if not peer or peer == "unknown" or is_hub_peer_hash(peer):
@@ -1528,6 +1655,12 @@ class MessagingBackend:
             except Exception:
                 pass
             sent += self.drain_queue(link, peer, include_files=True)
+        role, hub_hash = self._load_hub_settings()
+        if role != "off":
+            sent += self.drain_hub_group_queue(
+                hub_server_hash=hub_hash,
+                hub_server_mode=(role == "server"),
+            )
         return sent
 
     def queue_size(self):
@@ -3237,18 +3370,10 @@ class MessagingBackend:
         msg = ChatMessage(MESSAGE_TYPE_TEXT, text, msg_id=msg_id)
         msg.hub_group = True
         data = msg.to_json().encode("utf-8")
-        if hub_server_mode:
-            targets = [
-                p for p in self.linked_peers()
-                if p and not is_hub_peer_hash(p)
-            ]
-        elif hub_server_hash:
-            targets = [self.dest_hash_for(hub_server_hash)]
-        else:
-            targets = [
-                p for p in self.linked_peers()[:1]
-                if p and not is_hub_peer_hash(p)
-            ]
+        targets = self._hub_send_targets(
+            hub_server_hash=hub_server_hash,
+            hub_server_mode=hub_server_mode,
+        )
         sent = False
         for peer in targets:
             if not peer or is_hub_peer_hash(peer):

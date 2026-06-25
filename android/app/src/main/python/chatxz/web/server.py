@@ -440,6 +440,8 @@ class ChatWebServer:
 
     def _discovery_scope_ip(self):
         settings = self.load_settings()
+        if settings.get("hub_role", "off") != "off":
+            return None
         if not lan_discovery_configured(settings.get("rns_interfaces")):
             return None
         return detect_lan_ip()
@@ -576,6 +578,11 @@ class ChatWebServer:
             url = self._file_url(enriched["content"])
             if url:
                 enriched["file_url"] = url
+        sender = enriched.get("sender")
+        if sender and sender != "system":
+            sender_name = self._peer_display_name(sender)
+            if sender_name:
+                enriched["sender_name"] = sender_name
         return enriched
 
     def _is_session_system_message(self, entry):
@@ -691,12 +698,12 @@ class ChatWebServer:
             server["listen_ip"] = (server.get("listen_ip") or "0.0.0.0").strip() or "0.0.0.0"
             server["listen_port"] = hub_port
             for iface in interfaces:
-                if not self._is_tcp_client_iface(iface):
-                    continue
-                host = (iface.get("target_host") or "").strip().lower()
-                if host in ("127.0.0.1", "localhost", ""):
+                if self._is_tcp_client_iface(iface):
                     iface["enabled"] = False
-        elif hub_role == "client" and hub_host:
+        elif hub_role == "client":
+            if not hub_host:
+                settings["rns_interfaces"] = normalize_interface_list(interfaces)
+                return settings
             for iface in interfaces:
                 if self._is_tcp_server_iface(iface):
                     iface["enabled"] = False
@@ -727,14 +734,18 @@ class ChatWebServer:
         hub_role = settings.get("hub_role", "off")
         try:
             from chatxz.core.rns_interfaces import (
+                ensure_runtime_tcp_client,
                 ensure_runtime_tcp_hub,
+                remove_tcp_client_interfaces,
                 tcp_client_interface_online,
                 tcp_server_interface_online,
             )
             if hub_role == "server":
+                remove_tcp_client_interfaces()
                 iface = ensure_runtime_tcp_hub(settings, self.config_dir)
                 if iface and self.messaging:
                     self.messaging._silent_announce()
+                    self.messaging._schedule_hub_queue_drain()
                 online = tcp_server_interface_online(int(settings.get("hub_port") or 4242))
                 if online:
                     print(f"[hub] TCP hub server listening on 0.0.0.0:{settings.get('hub_port', 4242)}")
@@ -746,9 +757,14 @@ class ChatWebServer:
             elif hub_role == "client":
                 host = settings.get("hub_host") or ""
                 port = int(settings.get("hub_port") or 4242)
+                iface = ensure_runtime_tcp_client(settings, self.config_dir)
+                if iface and self.messaging:
+                    self.messaging._silent_announce()
                 online = tcp_client_interface_online()
                 if online:
-                    print(f"[hub] TCP hub client connected")
+                    print(f"[hub] TCP hub client connected to {host}:{port}")
+                    if self.messaging:
+                        self.messaging._schedule_hub_queue_drain()
                 elif host:
                     print(f"[hub] TCP hub client connecting to {host}:{port}...")
         except Exception as exc:
@@ -776,7 +792,6 @@ class ChatWebServer:
                 s = json.load(f)
                 for key, val in defaults.items():
                     s.setdefault(key, val)
-                s = self._apply_hub_settings(s)
                 needs_udp = standalone_needs_udp(
                     s.get("rns_interfaces"), s.get("hub_role", "off")
                 )
@@ -786,9 +801,8 @@ class ChatWebServer:
                 apply_lan_interface_preference(self.config_dir)
                 return s
         except:
-            defaults = self._apply_hub_settings(dict(defaults))
             apply_lan_interface_preference(self.config_dir)
-            return defaults
+            return dict(defaults)
 
     def save_settings(self, settings):
         with open(SETTINGS_FILE, "w") as f:
@@ -921,7 +935,7 @@ class ChatWebServer:
                 print(f"[serial] Android USB bootstrap failed: {e}")
         # v0.3.90+ starts RNS on a worker thread on desktop; RNS registers SIGINT handlers.
         patch_embedded_signals()
-        settings = self.load_settings()
+        settings = self._apply_hub_settings(self.load_settings())
         self._write_rns_config(settings)
         self._log_serial_diagnostics()
 
@@ -1074,6 +1088,11 @@ class ChatWebServer:
             print(f"[network] Startup announce failed: {exc}")
 
         self._apply_hub_runtime(settings)
+        if settings.get("hub_role") == "server":
+            hub_hash = my_dest_clean
+            if settings.get("hub_server_hash") != hub_hash:
+                settings["hub_server_hash"] = hub_hash
+                self.save_settings(settings)
 
         return my_hash
 
@@ -1081,7 +1100,15 @@ class ChatWebServer:
         hub_group = bool(getattr(chat_msg, "hub_group", False))
         if hub_group:
             chat_peer = HUB_GROUP_PEER
-            sender = self._peer_dest_hash(sender_hash) if sender_hash and sender_hash != "system" else "system"
+            if sender_hash and sender_hash != "system":
+                sender = self._peer_dest_hash(sender_hash)
+                if self.messaging:
+                    sender = (
+                        self.messaging.canonical_connect_hash(sender_hash)
+                        or sender
+                    )
+            else:
+                sender = "system"
         elif sender_hash and sender_hash != "system":
             if self.messaging:
                 chat_peer = (
@@ -1188,7 +1215,26 @@ class ChatWebServer:
         for contact in list_contacts(self.config_dir):
             if self._peers_equivalent(contact.get("hash"), peer_hash):
                 return contact.get("name") or ""
+        if self.discovery:
+            for peer in self.discovery.get_peers():
+                if self._peers_equivalent(peer.get("hash"), peer_hash):
+                    name = (peer.get("name") or "").strip()
+                    if name and name != peer_hash[:8]:
+                        return name
+        settings = self.load_settings()
+        my_hash = self._my_sender_hash()
+        if settings.get("name") and self._peers_equivalent(peer_hash, my_hash):
+            return settings.get("name")
         return ""
+
+    def _peer_display_name(self, peer_hash):
+        if not peer_hash or peer_hash == "system":
+            return ""
+        name = self._contact_name_for(peer_hash)
+        if name:
+            return name
+        clean = self._peer_dest_hash(peer_hash)
+        return clean[:8] if clean else ""
 
     def _notification_preview(self, entry):
         msg_type = entry.get("type", "text")
@@ -1459,6 +1505,26 @@ class ChatWebServer:
                 self._loop
             )
 
+    def _register_link_peer_in_discovery(self, peer_hash):
+        if not self.discovery or not peer_hash:
+            return
+        name = self._peer_display_name(peer_hash) or peer_hash[:8]
+        settings = self.load_settings()
+        via = "tcp_hub" if settings.get("hub_role", "off") != "off" else "link"
+        self.discovery.register_link_peer(peer_hash, name=name, via=via)
+
+    def _maybe_update_hub_server_hash(self, peer_hash):
+        settings = self.load_settings()
+        if settings.get("hub_role") != "client":
+            return
+        clean = self._peer_dest_hash(peer_hash)
+        if not clean or self._is_self_hash(clean):
+            return
+        if settings.get("hub_server_hash") != clean:
+            settings["hub_server_hash"] = clean
+            self.save_settings(settings)
+            print(f"[hub] Recorded hub server hash {clean[:16]}...")
+
     def _on_link_established(self, peer_hash, link, background=False, promote_active=True,
                              passive=False):
         if self.messaging and link:
@@ -1471,6 +1537,8 @@ class ChatWebServer:
                 resolved = fixed
         elif not resolved:
             resolved = self._peer_dest_hash(peer_hash)
+        self._register_link_peer_in_discovery(resolved)
+        self._maybe_update_hub_server_hash(resolved)
         user_disconnected = bool(
             self.messaging and self.messaging.is_user_disconnected(resolved)
         )
@@ -1712,7 +1780,12 @@ class ChatWebServer:
                 await self._run_blocking(self.messaging._burst_serial_announce, 4, 0.3)
             resolved_hash = self._resolve_connect_target(peer_hash, peer_ip)
             resolved_hash = self._resolve_current_peer_hash(resolved_hash, peer_ip)
-            if self.discovery and not self._peer_is_current(resolved_hash):
+            hub_role = settings.get("hub_role", "off")
+            if (
+                self.discovery
+                and hub_role == "off"
+                and not self._peer_is_current(resolved_hash)
+            ):
                 return web.json_response({
                     "error": "Stale peer hash — use the peer in Discovered or wait for Announce",
                 }, status=400)
@@ -2215,6 +2288,9 @@ class ChatWebServer:
 
             settings = self.load_settings()
             interfaces = normalize_interface_list(settings.get("rns_interfaces"))
+            hub_role = settings.get("hub_role", "off")
+            if hub_role != "off" and not lan_discovery_configured(interfaces):
+                continue
             if configured_udp_lan_enabled(interfaces):
                 await self._run_blocking(patch_udp_interface_unicast)
             await self._run_blocking(ensure_runtime_serial, interfaces)
@@ -2395,6 +2471,7 @@ class ChatWebServer:
             "hub_role": hub_role,
             "hub_host": settings.get("hub_host") or "",
             "hub_port": hub_port,
+            "hub_server_hash": settings.get("hub_server_hash") or "",
             "tcp_hub_online": tcp_hub_online,
             "tcp_client_online": tcp_client_online,
         })
@@ -2516,7 +2593,7 @@ class ChatWebServer:
         return web.json_response({"status": "ok"})
 
     async def handle_settings_get(self, request):
-        return web.json_response(self.load_settings())
+        return web.json_response(self._apply_hub_settings(self.load_settings()))
 
     def _normalize_received_dir(self, raw):
         path = os.path.normpath(os.path.expanduser((raw or "").strip()))
@@ -2653,6 +2730,11 @@ class ChatWebServer:
             hub_changed = any(
                 k in data for k in ("hub_role", "hub_host", "hub_port")
             )
+            if settings.get("hub_role") == "client" and not (settings.get("hub_host") or "").strip():
+                return web.json_response(
+                    {"error": "Hub host IP is required for client mode"},
+                    status=400,
+                )
             settings = self._apply_hub_settings(settings)
             self.save_settings(settings)
             if hub_changed:

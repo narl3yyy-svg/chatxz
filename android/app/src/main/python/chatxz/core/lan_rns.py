@@ -103,6 +103,8 @@ def interface_family(iface):
     text = str(iface).lower()
     if "serial" in name or "tty" in text:
         return "serial"
+    if "tcpclient" in name or "tcpserver" in name or "tcpinterface" in name:
+        return "tcp"
     if "autointerfacepeer" in name or "auto" in name:
         return "lan"
     if "udp" in name:

@@ -667,6 +667,10 @@ body::before {
   font-size: 10px; color: rgba(255,255,255,0.45); margin-top: 6px; text-align: right;
 }
 .msg.other .time { color: var(--text3); }
+.msg .sender-label {
+  font-size: 11px; font-weight: 600; color: var(--primary);
+  margin-bottom: 4px; opacity: 0.9;
+}
 .msg img.msg-img {
   max-width: 100%; border-radius: var(--radius-md); margin-top: 8px;
   cursor: pointer; transition: transform var(--transition);
@@ -1164,7 +1168,7 @@ body.sidebar-open #sidebar-backdrop { display: block; }
           <div class="settings-subhead">Hub group chat (optional)</div>
           <div class="settings-section">
             <label>Hub mode</label>
-            <select id="settings-hub-role" onchange="saveHubSettings()">
+            <select id="settings-hub-role" onchange="onHubRoleChange()">
               <option value="off">Off — direct P2P only</option>
               <option value="server">Hub server (relay for all clients)</option>
               <option value="client">Hub client (connect to hub IP)</option>
@@ -3192,7 +3196,6 @@ function saveSettings() {
       window._hubRole = d.settings?.hub_role || hub_role;
       updateHubUi();
       toast('Settings saved');
-      toggleSettings();
     } else {
       toast('Failed to save: ' + (d.error || 'unknown error'));
     }
@@ -3311,7 +3314,11 @@ function sendMessage() {
   input.value = '';
   autoResize(input);
   document.getElementById('emoji-picker')?.classList.remove('open');
-  if (!linked) toast('Message queued — will send when connected');
+  const isHubChat = viewingPeer === HUB_GROUP_PEER;
+  const hubActive = window._hubRole && window._hubRole !== 'off';
+  if (!linked && !(isHubChat && hubActive)) {
+    toast('Message queued — will send when connected');
+  }
 }
 
 function onInputKey(e) {
@@ -3509,6 +3516,13 @@ function addMessage(data, opts) {
     html += '<div class="msg-actions">';
     if (copyable) html += '<button class="msg-action-btn copy-btn" onclick="event.stopPropagation();copyMsgText(this)" title="Copy text">📋</button>';
     html += `<button class="msg-action-btn delete-btn" onclick="event.stopPropagation();deleteMessage('${data.msg_id}')" title="Delete message">🗑</button></div>`;
+  }
+  const isGroupChat = viewingPeer === HUB_GROUP_PEER || data.hub_group;
+  if (isGroupChat && !isSelf && !isSystem) {
+    const senderLabel = data.sender_name || contactNameFor(data.sender) || truncateHash(data.sender);
+    if (senderLabel) {
+      html += `<div class="sender-label">${escapeHtml(senderLabel)}</div>`;
+    }
   }
   if (data.type === 'text' || data.type === 'emoji') {
     html += `<span class="msg-text">${linkify(escapeHtml(data.content))}</span>`;

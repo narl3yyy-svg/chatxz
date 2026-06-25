@@ -179,6 +179,18 @@ class PeerDiscovery:
         except Exception as e:
             print(f"[discovery] on_peer_evicted error: {e}")
 
+    def register_link_peer(self, peer_hash, name="", via="link"):
+        """Register a peer learned from an established RNS link (e.g. TCP hub)."""
+        hash_hex = normalize_hash(peer_hash)
+        if not hash_hex:
+            return
+        self._store_peer({
+            "hash": hash_hex,
+            "name": (name or hash_hex[:8]).strip() or hash_hex[:8],
+            "via": via,
+            "last_seen": time.time(),
+        })
+
     def _store_peer(self, peer):
         hash_hex = normalize_hash(peer.get("hash"))
         if not hash_hex:
