@@ -20,14 +20,13 @@ if "%~1:~0,1%"=="-" goto :web
 echo.
 echo ============================================================
 echo   FROM CMD use:
-echo     run web --share
-echo     run web --share --debug
+echo     run.bat web --share
+echo     run.bat web --share --debug
 echo.
-echo   Do NOT use:  .\run.ps1
+echo   Do NOT use:  .\run.ps1  or  PowerShell
 echo   Windows opens .ps1 in VS Code — the server never starts.
 echo ============================================================
 echo.
-echo   PowerShell:  .\run.ps1 web --share --debug
 echo   Git Bash:    ./run.sh web --share --debug
 echo.
 exit /b 1
