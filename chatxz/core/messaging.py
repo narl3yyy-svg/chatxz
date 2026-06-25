@@ -430,6 +430,9 @@ class MessagingBackend:
         peer = self.dest_hash_for(peer_hash)
         if user_initiated and peer:
             self.mark_user_disconnected(peer)
+            self.clear_session_peer()
+            self._transport_reconnect_pending = False
+            self._last_link_lost_at = 0
         closed = 0
         for link in list(self.links.values()):
             resolved = self._peer_hash_from_link_identity(link)
@@ -452,10 +455,9 @@ class MessagingBackend:
                 self.active_link = None
                 self.active_peer_hash = None
                 self._send_link = None
-            if self._session_peer_hash and self.hashes_equivalent(
-                self._session_peer_hash, peer
-            ):
-                self.clear_session_peer()
+            self.clear_session_peer()
+            self._transport_reconnect_pending = False
+            self._last_link_lost_at = 0
         return closed > 0
 
     def mark_user_disconnected(self, peer_hash):
@@ -2835,11 +2837,17 @@ class MessagingBackend:
                 self._flush_pending_files_failed(link.link_id)
             closing_active = self.active_link and self.active_link.link_id == link.link_id
             if closing_active and not self._link_handoff:
-                if self.active_peer_hash:
+                lost_peer = self.dest_hash_for(self.active_peer_hash)
+                if (
+                    self.active_peer_hash
+                    and lost_peer
+                    and not self.is_user_disconnected(lost_peer)
+                ):
                     self._session_peer_hash = self.active_peer_hash
                 self.active_link = None
                 self.active_peer_hash = None
-                self._last_link_lost_at = time.time()
+                if lost_peer and not self.is_user_disconnected(lost_peer):
+                    self._last_link_lost_at = time.time()
                 remaining = [
                     p for p in self.linked_peers()
                     if p and not is_hub_peer_hash(p)

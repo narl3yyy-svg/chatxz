@@ -3387,15 +3387,26 @@ function sameSubnet(ipA, ipB) {
 }
 
 function detectClientPlatform() {
-  if (appPlatform === 'android' || window.chatxzAndroid?.isAndroid?.()) return 'android';
-  if (['windows', 'darwin', 'linux', 'android'].includes(appPlatform)) return appPlatform;
-  const plat = (navigator.platform || '').toLowerCase();
+  if (window.chatxzAndroid?.isAndroid?.()) return 'android';
   const ua = navigator.userAgent || '';
+  const uad = navigator.userAgentData;
+  if (uad?.platform) {
+    const p = String(uad.platform).toLowerCase();
+    if (p.includes('win')) return 'windows';
+    if (p.includes('mac')) return 'darwin';
+    if (p.includes('linux')) return 'linux';
+    if (p.includes('android')) return 'android';
+  }
+  if (/mac os x|macintosh/i.test(ua)) return 'darwin';
+  if (/windows|win32|win64/i.test(ua)) return 'windows';
   if (/android/i.test(ua)) return 'android';
-  if (/win/i.test(plat)) return 'windows';
+  if (/linux/i.test(ua)) return 'linux';
+  const plat = (navigator.platform || '').toLowerCase();
   if (/mac/i.test(plat)) return 'darwin';
+  if (/win/i.test(plat)) return 'windows';
   if (/linux/i.test(plat)) return 'linux';
-  return appPlatform || 'desktop';
+  if (['windows', 'darwin', 'linux', 'android'].includes(appPlatform)) return appPlatform;
+  return 'desktop';
 }
 
 function bestPeerForContact(peers, contact) {
@@ -4220,12 +4231,16 @@ window.onChatxzAudioPermissionGranted = function() {
 
 function micBrowserLabel() {
   const ua = navigator.userAgent || '';
+  if (/Firefox/i.test(ua)) return 'Firefox';
   if (/Helium/i.test(ua)) return 'Helium';
   if (/Edg\//i.test(ua)) return 'Edge';
   if (/Chrome/i.test(ua)) return 'Chrome';
-  if (/Firefox/i.test(ua)) return 'Firefox';
   if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) return 'Safari';
   return 'your browser';
+}
+
+function firefoxMicHint() {
+  return 'Firefox → Settings → Privacy & Security → Permissions → Microphone → allow http://localhost:8742';
 }
 
 function micAccessHint(err) {
@@ -4237,7 +4252,12 @@ function micAccessHint(err) {
   }
   const name = err?.name || '';
   if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
-    if (os === 'darwin') return 'No microphone found — check System Settings → Sound → Input and pick a mic';
+    if (os === 'darwin') {
+      if (browser === 'Firefox') {
+        return `No microphone — allow mic for localhost in Firefox (${firefoxMicHint()}) and enable Firefox under System Settings → Privacy & Security → Microphone`;
+      }
+      return 'No microphone found — check System Settings → Sound → Input, then Privacy & Security → Microphone for your browser';
+    }
     if (os === 'windows') return 'No microphone found — plug one in or enable it in Windows Sound settings';
     if (os === 'linux') return 'No microphone found — check your audio input in system sound settings';
     return 'No microphone found on this device';
@@ -4247,7 +4267,8 @@ function micAccessHint(err) {
   }
   if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
     if (os === 'darwin') {
-      return `Microphone blocked — in ${browser} allow mic for this site, then System Settings → Privacy & Security → Microphone → enable ${browser}`;
+      const ff = browser === 'Firefox' ? ` ${firefoxMicHint()}.` : '';
+      return `Microphone blocked — allow mic for this site in ${browser}${ff} Then System Settings → Privacy & Security → Microphone → enable ${browser}`;
     }
     if (os === 'windows') {
       return `Microphone blocked — in ${browser} click the lock/site icon → Allow microphone. Also Windows Settings → Privacy & security → Microphone → allow desktop apps.`;
@@ -4300,14 +4321,21 @@ async function startVoice(skipPermissionCheck) {
   }
   const mimeType = pickVoiceRecorderMime();
   const recorderOpts = mimeType ? {mimeType} : {};
-  const audioConstraints = {
+  const richAudio = {
     audio: {
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
     },
   };
-  navigator.mediaDevices.getUserMedia(audioConstraints)
+  const requestMic = () => navigator.mediaDevices.getUserMedia(richAudio)
+    .catch(err => {
+      if (err?.name === 'NotFoundError' || err?.name === 'OverconstrainedError') {
+        return navigator.mediaDevices.getUserMedia({audio: true});
+      }
+      throw err;
+    });
+  requestMic()
     .then(stream => {
       recording = true;
       voiceChunks = [];

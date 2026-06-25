@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.135
+**Current version:** 0.3.136
 
 ## Download
 
@@ -32,7 +32,7 @@ run.bat web --share
 
 Open **http://127.0.0.1:8742**. Logs stay in that cmd window.
 
-**Voice notes:** use `http://127.0.0.1:8742` (Windows) or `http://localhost:8742` (macOS). If mic is blocked: allow the site in your browser, then enable the browser under **Windows → Privacy → Microphone** or **macOS → Privacy & Security → Microphone**.
+**Voice notes:** use `http://127.0.0.1:8742` (Windows) or `http://localhost:8742` (macOS/Linux). **Firefox on Mac:** Settings → Privacy & Security → Permissions → Microphone → allow `localhost`. Also enable Firefox under **macOS → Privacy & Security → Microphone**.
 
 **Stop:** **Ctrl+C** — server exits and **all ports close** (8742, 4242, 8743). Nothing keeps listening after `run.bat` ends.
 
@@ -195,6 +195,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.136** — macOS/Firefox mic hints (no more Windows text on Mac); Firefox voice retry with simpler audio constraints; **Disconnect** no longer auto-reconnects after 5–10s; TCP LAN `ifac_netname` crash patch on incoming connections
 - **v0.3.135** — Emoji search uses per-emoji names/aliases (`zebra`, `pizza`, `heart`, etc.) via `emoji-keywords.json`
 - **v0.3.134** — LAN scope match fix: `172.17.13.x` peers visible when pinned to `172.17.121.x` (same `172.17/16`); contact IP no longer overwritten by `10.0.5.x` VPN beacons
 - **v0.3.133** — Platform-aware UI hints (Windows vs macOS vs Linux): mic permission messages, folder picker, serial setup; server reports `windows`/`darwin`/`linux`/`android`; saved contact IP prefers your pinned LAN subnet
