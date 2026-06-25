@@ -2196,33 +2196,6 @@ class ChatWebServer:
         if self.messaging:
             self.messaging.receive_dir = path
 
-    def _pick_directory_tk(self, start):
-        if is_android() or not os.environ.get("DISPLAY"):
-            return None
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-        except Exception:
-            return None
-        try:
-            root = tk.Tk()
-            root.withdraw()
-            try:
-                root.attributes("-topmost", True)
-            except Exception:
-                pass
-            picked = filedialog.askdirectory(
-                initialdir=start,
-                mustexist=True,
-                title="Select folder for received files",
-            )
-            root.destroy()
-            if picked:
-                return os.path.normpath(picked)
-        except Exception:
-            pass
-        return None
-
     def _pick_directory_native(self):
         if is_android():
             return None
@@ -2239,10 +2212,6 @@ class ChatWebServer:
             commands.append(["kdialog", "--getexistingdirectory", start])
         if shutil.which("yad"):
             commands.append(["yad", "--file", "--directory", f"--filename={start}"])
-
-        picked = self._pick_directory_tk(start)
-        if picked:
-            return picked
 
         for cmd in commands:
             try:
@@ -2333,13 +2302,83 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
+    async def _reload_identity_runtime(self, old_dest_hash="", old_identity_hash=""):
+        from chatxz.core.discovery import normalize_hash
+
+        old_dest = normalize_hash(old_dest_hash)
+        old_ident = normalize_hash(old_identity_hash or old_dest_hash)
+        my_dest_clean = ""
+        my_ident_clean = ""
+
+        if self.messaging and self.identity:
+            dest = await asyncio.to_thread(self.messaging.rebind_identity, self.identity)
+            my_hash = RNS.hexrep(dest.hash)
+            my_dest_clean = my_hash.replace(":", "")
+            self.messaging.my_dest_hash = my_dest_clean
+            self.destination_hash = my_hash
+        elif self.identity_mgr:
+            my_ident_clean = (self.identity_mgr.get_hex_hash() or "").replace(":", "")
+
+        if self.identity_mgr:
+            my_ident_clean = (self.identity_mgr.get_hex_hash() or "").replace(":", "")
+
+        if self.discovery:
+            self.discovery.purge_hashes({old_dest, old_ident, my_dest_clean, my_ident_clean})
+            self.discovery.clear_peers()
+            self.discovery.accept_peers = True
+
+        if self.lan_beacon and my_dest_clean:
+            self.lan_beacon.dest_hash = my_dest_clean
+            self.lan_beacon.identity_hash = my_ident_clean
+            try:
+                self.lan_beacon.identity_pubkey = (
+                    self.identity.get_public_key() if self.identity else None
+                )
+            except Exception:
+                self.lan_beacon.identity_pubkey = None
+            self.lan_beacon.display_name = self.load_settings().get("name", "")
+
+        self.active_peer = None
+        if self.messaging:
+            self.messaging.display_name = self.load_settings().get("name", "")
+
+        if self.websockets and self._loop:
+            await self._broadcast({
+                "type": "identity_changed",
+                "data": {
+                    "hash": my_dest_clean or my_ident_clean,
+                    "identity_hash": my_ident_clean,
+                    "old_hash": old_dest,
+                    "old_identity_hash": old_ident,
+                },
+            })
+            if self.messaging:
+                await self._perform_announce()
+            peers = self.discovery.get_peers() if self.discovery else []
+            await self._broadcast({"type": "peers", "data": peers})
+
+        print(
+            f"[identity] Live identity update: {old_dest[:16] or old_ident[:16]}... "
+            f"-> {(my_dest_clean or my_ident_clean)[:16]}..."
+        )
+
     async def handle_regenerate_identity(self, request):
         try:
-            old_hash = self.identity_mgr.get_hex_hash()
+            from chatxz.core.discovery import normalize_hash
+
+            old_dest = normalize_hash(self.destination_hash or "")
+            old_ident = normalize_hash(self.identity_mgr.get_hex_hash() if self.identity_mgr else "")
             self.identity = self.identity_mgr.regenerate()
-            if self.messaging:
-                print("[identity] Restart required for new identity to take full effect")
-            return web.json_response({"status": "ok", "old_hash": old_hash, "new_hash": self.identity_mgr.get_hex_hash()})
+            await self._reload_identity_runtime(old_dest, old_ident)
+            new_dest = normalize_hash(self.destination_hash or "")
+            new_ident = normalize_hash(self.identity_mgr.get_hex_hash())
+            return web.json_response({
+                "status": "ok",
+                "old_hash": old_dest or old_ident,
+                "new_hash": new_dest or new_ident,
+                "identity_hash": new_ident,
+                "live": bool(self.messaging),
+            })
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
@@ -2988,18 +3027,27 @@ class ChatWebServer:
 
     async def _discovery_broadcaster(self):
         print("[broadcaster] Started")
-        last_count = -1
+        last_snapshot = None
         while True:
             await asyncio.sleep(3)
             if not self.websockets or not self.discovery:
                 continue
             peers = self.discovery.get_peers()
-            count = len(peers)
+            snapshot = tuple(
+                sorted(
+                    (
+                        (p.get("hash") or ""),
+                        (p.get("identity_hash") or ""),
+                        int(p.get("last_seen", 0)),
+                    )
+                    for p in peers
+                )
+            )
             self._prune_websockets()
-            if count != last_count:
+            if snapshot != last_snapshot:
+                count = len(peers)
                 print(f"[broadcaster] {count} peer(s), {self._ws_client_count()} ws client(s)")
-                last_count = count
-            if peers:
+                last_snapshot = snapshot
                 await self._broadcast({"type": "peers", "data": peers})
 
     async def handle_discover(self, request):

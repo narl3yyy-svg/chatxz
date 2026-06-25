@@ -1051,7 +1051,7 @@ body.sidebar-open #sidebar-backdrop { display: block; }
               <input id="settings-received-dir" placeholder="/home/user/Downloads">
               <button class="btn-block" onclick="pickReceivedDir()" style="width:auto;white-space:nowrap;padding:0 12px;height:40px" title="Select folder">Select folder</button>
             </div>
-            <p class="field-hint" id="settings-received-hint">Select folder opens a native directory picker (zenity/kdialog/tk on Linux). Click Save to apply.</p>
+            <p class="field-hint" id="settings-received-hint">Select folder opens your system directory picker. Click Save to apply.</p>
             <input type="file" id="dir-picker-fallback" style="display:none" webkitdirectory onchange="pickReceivedDirFallback(this)">
           </div>
         </div>
@@ -1750,6 +1750,10 @@ function handleWSMessage(msg) {
   } else if (msg.type === 'peers') {
     console.log('[ws] Peers received:', msg.data ? msg.data.length : 0, msg.data);
     renderDiscovered(msg.data);
+  } else if (msg.type === 'identity_changed') {
+    const data = msg.data || {};
+    applyIdentityChange(data.hash, data.identity_hash, data.old_hash || data.old_identity_hash);
+    toast('Identity updated — tap Announce so peers see the new hash');
   } else if (msg.type === 'progress') {
     showProgress(msg.data);
   } else if (msg.type === 'link_established') {
@@ -3602,14 +3606,14 @@ async function pickReceivedDir() {
       if (e.name === 'AbortError') return;
     }
   }
-  toast('No native folder picker found — install zenity (GTK) or use tkinter, then try again.');
+  document.getElementById('dir-picker-fallback').click();
 }
 function pickReceivedDirFallback(input) {
   if (input.files && input.files.length > 0) {
     const rel = input.files[0].webkitRelativePath;
     const hint = rel.substring(0, rel.indexOf('/'));
     document.getElementById('settings-received-dir').value = '.../' + hint;
-    toast('Browser folder pick is limited — enter the full absolute path, then Save.');
+    toast('Enter the full absolute path, then Save.');
   }
 }
 
@@ -3619,18 +3623,34 @@ function regenerateIdentity() {
     .then(r => r.json())
     .then(d => {
       if (d.status === 'ok') {
-        myHash = d.new_hash;
-        document.getElementById('settings-hash').value = myHash;
-        document.getElementById('identity-box').textContent = formatHashDisplay(myHash);
-      document.getElementById('identity-box').title = stripHashColons(myHash) + ' (click to copy)';
-      updateAndroidDebugLogHint(d.debug_log_path);
-      const sh = document.getElementById('settings-hash');
-      if (sh) sh.value = myHash;
-        toast('New identity: ' + d.new_hash.substring(0, 16) + '...');
+        applyIdentityChange(d.new_hash, d.identity_hash || d.new_hash, d.old_hash);
+        toast(d.live ? 'Identity updated live — tap Announce to advertise' : 'New identity saved');
       } else {
         toast('Failed: ' + (d.error || ''));
       }
     });
+}
+
+function applyIdentityChange(newHash, identityHash, oldHash) {
+  const clean = stripHashColons(newHash || identityHash || '');
+  myHash = clean;
+  document.getElementById('settings-hash').value = clean;
+  document.getElementById('identity-box').textContent = formatHashDisplay(clean);
+  document.getElementById('identity-box').title = clean + ' (click to copy)';
+  const sh = document.getElementById('settings-hash');
+  if (sh) sh.value = clean;
+  if (oldHash) {
+    const oldKey = peerKey(oldHash);
+    linkedPeers.delete(oldKey);
+    if (peerKey(viewingPeer) === oldKey) viewingPeer = null;
+    if (peerKey(linkPeer) === oldKey) linkPeer = null;
+    window._discoveredPeers = (window._discoveredPeers || []).filter(p =>
+      peerKey(p.hash) !== oldKey && peerKey(p.identity_hash) !== oldKey
+    );
+    renderDiscovered(window._discoveredPeers);
+  }
+  setLinkStatus('disconnected', 'Inactive');
+  updatePeerHeader();
 }
 
 function restartServer() {

@@ -1646,6 +1646,40 @@ class MessagingBackend:
             except:
                 pass
 
+    def rebind_identity(self, identity):
+        """Hot-swap local identity and destination without restarting the process."""
+        self.disconnect_all_peers(clear_session=True)
+        self.identity = identity
+        self.identity_to_dest.clear()
+        self.dest_to_identity.clear()
+        self._link_peer_hashes.clear()
+        self.peer_links.clear()
+        self.links.clear()
+        self.active_link = None
+        self.active_peer_hash = None
+        self._send_link = None
+        self._session_peer_hash = None
+        self.destination = RNS.Destination(
+            self.identity,
+            RNS.Destination.IN,
+            RNS.Destination.SINGLE,
+            APP_NAME,
+            "messages",
+        )
+        self.destination.set_proof_strategy(RNS.Destination.PROVE_ALL)
+        self.destination.accepts_links(True)
+        self.destination.set_link_established_callback(self._link_callback)
+        dest_hex = normalize_hash(RNS.hexrep(self.destination.hash))
+        ident_hex = normalize_hash(RNS.hexrep(self.identity.hash))
+        self.my_dest_hash = dest_hex
+        self.register_peer_mapping(dest_hex, ident_hex)
+        try:
+            self._silent_announce()
+        except Exception as e:
+            print(f"[identity] Post-rebind announce failed: {e}")
+        print(f"[identity] Rebound messaging destination to {dest_hex[:16]}...")
+        return self.destination
+
     def _dest_hash_from_identity(self, ident):
         dest = message_dest_hash_for_identity(ident)
         if dest and ident and getattr(ident, "hash", None):

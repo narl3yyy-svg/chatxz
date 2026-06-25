@@ -12,10 +12,10 @@ def discovery_timeout_s():
             return 300
     except Exception:
         pass
-    return 60
+    return 30
 
 
-DISCOVERY_TIMEOUT = 60
+DISCOVERY_TIMEOUT = 30
 APP_NAME = "chatxz"
 PUBKEY_SIZE = RNS.Identity.KEYSIZE // 8
 
@@ -131,11 +131,60 @@ class PeerDiscovery:
         self.peers.clear()
         self._last_log.clear()
 
+    def purge_hashes(self, hashes):
+        """Remove stale discovery entries by destination or identity hash."""
+        targets = {
+            normalize_hash(h) for h in (hashes or []) if normalize_hash(h)
+        }
+        if not targets:
+            return 0
+        removed = 0
+        for key in list(self.peers.keys()):
+            peer = self.peers.get(key) or {}
+            peer_hashes = {
+                normalize_hash(key),
+                normalize_hash(peer.get("hash")),
+                normalize_hash(peer.get("identity_hash")),
+            }
+            if peer_hashes & targets:
+                del self.peers[key]
+                removed += 1
+        for target in targets:
+            self._last_log.pop(target, None)
+            self._last_log.pop(f"beacon:{target}", None)
+            self._last_log.pop(f"beacon-id:{target}", None)
+        return removed
+
+    def _evict_superseded_peers(self, peer):
+        """Drop older entries for the same host when identity/hash changes."""
+        ip = (peer.get("ip") or "").strip()
+        new_hash = normalize_hash(peer.get("hash"))
+        new_ident = normalize_hash(peer.get("identity_hash"))
+        new_pubkey = peer.get("pubkey")
+        if not ip and not new_ident and not new_pubkey:
+            return 0
+        removed = 0
+        for key, existing in list(self.peers.items()):
+            same_host = ip and existing.get("ip") == ip
+            same_ident = (
+                new_ident
+                and normalize_hash(existing.get("identity_hash")) == new_ident
+            )
+            same_pubkey = new_pubkey and existing.get("pubkey") == new_pubkey
+            same_hash = normalize_hash(existing.get("hash")) == new_hash
+            if same_hash:
+                continue
+            if same_host or same_ident or same_pubkey:
+                del self.peers[key]
+                removed += 1
+        return removed
+
     def _store_peer(self, peer):
         hash_hex = normalize_hash(peer.get("hash"))
         if not hash_hex:
             return
         peer["hash"] = hash_hex
+        self._evict_superseded_peers(peer)
         existing = self.peers.get(hash_hex)
         if existing:
             if peer.get("ip") and not existing.get("ip"):
@@ -188,6 +237,13 @@ class PeerDiscovery:
         }
         if identity_hex and identity_hex != hash_hex:
             peer["identity_hash"] = identity_hex
+        if announced_identity:
+            try:
+                peer["pubkey"] = base64.b64encode(
+                    announced_identity.get_public_key()
+                ).decode("ascii")
+            except Exception:
+                pass
         self._store_peer(peer)
         via = peer.get("via", "rns")
         self._log_once(
