@@ -71,6 +71,8 @@ RECEIPT_FAILOVER_TIMEOUT_S = 30
 RECEIPT_FAILOVER_MIN_PENDING = 2
 MAX_CONCURRENT_RECEIVES = 2
 QUEUE_RETRY_INTERVAL_S = 5
+QUEUE_DRAIN_DELAY_S = 1.0
+QUEUE_RECEIPT_TIMEOUT_S = 30
 _NO_COMPRESS_SUFFIXES = frozenset({
     ".apk", ".zip", ".gz", ".bz2", ".xz", ".7z", ".rar",
     ".mp4", ".mkv", ".webm", ".mov", ".m4v",
@@ -200,6 +202,8 @@ class MessagingBackend:
         self._pending_sends = {}
         self._longtext_temp_paths = {}
         self._queue_retry_thread = None
+        self._queue_drain_timers = {}
+        self._queue_drain_lock = threading.Lock()
         self.peer_links = {}
         self._connect_user_initiated = False
         self._connect_background = False
@@ -364,9 +368,7 @@ class MessagingBackend:
         if use_link:
             self._consolidate_peer_links(peer, keep_link=use_link)
         if initiated and not self.is_user_disconnected(peer):
-            send_link = use_link or self._best_outgoing_link(peer) or self.active_link
-            if send_link and self._peer_link_active(peer):
-                self.drain_queue(send_link, peer, include_files=True)
+            self._schedule_queue_drain(peer, link=use_link, include_files=True)
         return True
 
     def _udp_connect_ready(self, dest_hex, peer_ip=None, peer_lan_down=False):
@@ -1141,7 +1143,7 @@ class MessagingBackend:
                     old.teardown()
                 except Exception:
                     pass
-            self.drain_queue(link, peer_hash, include_files=False)
+            self._schedule_queue_drain(peer_hash, link=link, include_files=False, delay=0.5)
         finally:
             self._link_handoff = False
 
@@ -1186,7 +1188,13 @@ class MessagingBackend:
                 best = link
         if best:
             return best
-        return self._outgoing_link(peer)
+        for link in self._links_for_peer(peer):
+            try:
+                if link.status == RNS.Link.ACTIVE:
+                    return link
+            except Exception:
+                return link
+        return self._link_for_peer(peer)
 
     def _outgoing_link(self, peer_hash=None):
         if peer_hash:
@@ -1243,30 +1251,120 @@ class MessagingBackend:
             return False
         return self.hashes_equivalent(tgt, target_hash)
 
+    def _remove_queue_entry(self, msg_id):
+        if not msg_id:
+            return False
+        before = len(self.message_queue)
+        self.message_queue = [
+            e for e in self.message_queue if e.get("msg_id") != msg_id
+        ]
+        if len(self.message_queue) < before:
+            self._save_queue()
+            print(f"[queue] Confirmed delivery for {msg_id[:8]}")
+            return True
+        return False
+
+    def _queue_send_link(self, peer_hash, link_hint=None):
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown":
+            return None
+        best = self._best_outgoing_link(peer)
+        if best:
+            if not link_hint:
+                return best
+            if self._link_path_score(best) >= self._link_path_score(link_hint):
+                return best
+        return link_hint or best or self._link_for_peer(peer)
+
+    def _schedule_queue_drain(self, peer_hash, link=None, include_files=True, delay=None):
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown" or is_hub_peer_hash(peer):
+            return
+        if self.is_user_disconnected(peer):
+            return
+        wait = QUEUE_DRAIN_DELAY_S if delay is None else delay
+
+        def run():
+            with self._queue_drain_lock:
+                self._queue_drain_timers.pop(peer, None)
+            try:
+                if not self.running or self.is_user_disconnected(peer):
+                    return
+                self._drain_queue_for_peer(peer, link_hint=link, include_files=include_files)
+            except Exception as e:
+                print(f"[queue] Scheduled drain error: {e}")
+
+        with self._queue_drain_lock:
+            existing = self._queue_drain_timers.pop(peer, None)
+            if existing:
+                existing.cancel()
+            timer = threading.Timer(wait, run)
+            timer.daemon = True
+            self._queue_drain_timers[peer] = timer
+            timer.start()
+
+    def _drain_queue_for_peer(self, peer_hash, link_hint=None, include_files=True):
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown" or is_hub_peer_hash(peer):
+            return 0
+        if not self._peer_link_active(peer):
+            return 0
+        send_link = self._queue_send_link(peer, link_hint=link_hint)
+        if not send_link:
+            return 0
+        self._consolidate_peer_links(peer, keep_link=send_link)
+        return self.drain_queue(send_link, peer, include_files=include_files)
+
     def drain_queue(self, link, target_hash, include_files=True):
-        if not link or not target_hash or is_hub_peer_hash(target_hash):
+        peer = self.dest_hash_for(target_hash)
+        if not peer or is_hub_peer_hash(peer):
+            return 0
+        send_link = self._queue_send_link(peer, link_hint=link)
+        if not send_link:
             return 0
         remaining = []
         sent = 0
+        confirmed_ids = set()
+        now = time.time()
         for entry in self.message_queue:
-            if not self._queue_matches_target(entry, target_hash):
+            if not self._queue_matches_target(entry, peer):
                 remaining.append(entry)
                 continue
             try:
                 if entry["type"] in ("text", "emoji"):
-                    result = self.send_message(
-                        entry["content"],
-                        msg_id=entry.get("msg_id"),
-                        target_peer=target_hash,
-                        link=link,
-                    )
-                    if result:
-                        sent += 1
-                        if self.on_queue_sent:
+                    sent_at = entry.get("_queue_sent_at")
+                    if sent_at and (now - sent_at) < QUEUE_RECEIPT_TIMEOUT_S:
+                        remaining.append(entry)
+                        continue
+                    if sent_at:
+                        entry.pop("_queue_sent_at", None)
+                    msg_id = entry.get("msg_id")
+                    sent_msg = []
+
+                    def on_receipt(status, receipt, mid=msg_id, qentry=entry):
+                        if status not in ("received", "read"):
+                            return
+                        confirmed_ids.add(mid)
+                        self._remove_queue_entry(mid)
+                        if self.on_queue_sent and sent_msg:
                             try:
-                                self.on_queue_sent(result, target_hash, entry)
+                                self.on_queue_sent(sent_msg[0], peer, qentry)
                             except Exception as e:
                                 print(f"[queue] on_queue_sent error: {e}")
+
+                    result = self.send_message(
+                        entry["content"],
+                        msg_id=msg_id,
+                        target_peer=peer,
+                        link=send_link,
+                        receipt_callback=on_receipt,
+                    )
+                    if result:
+                        sent_msg.append(result)
+                        entry["_queue_sent_at"] = time.time()
+                        sent += 1
+                        if msg_id not in confirmed_ids:
+                            remaining.append(entry)
                     else:
                         remaining.append(entry)
                 elif entry["type"] in ("file", "image", "video", "voice"):
@@ -1279,14 +1377,14 @@ class MessagingBackend:
                             fp,
                             entry["type"],
                             transfer_id=entry.get("msg_id"),
-                            target_peer=target_hash,
-                            link=link,
+                            target_peer=peer,
+                            link=send_link,
                         )
                         if result:
                             sent += 1
                             if self.on_queue_sent:
                                 try:
-                                    self.on_queue_sent(result, target_hash, entry)
+                                    self.on_queue_sent(result, peer, entry)
                                 except Exception as e:
                                     print(f"[queue] on_queue_sent error: {e}")
                         else:
@@ -1297,7 +1395,10 @@ class MessagingBackend:
                 print(f"[queue] Failed to send: {e}")
                 remaining.append(entry)
         if sent:
-            print(f"[queue] Drained {sent} queued items for {target_hash[:16] if target_hash else 'peer'}...")
+            print(
+                f"[queue] Drained {sent} queued item(s) for {peer[:16]}... "
+                f"(awaiting receipt)"
+            )
         self.message_queue = remaining
         self._save_queue()
         return sent
@@ -1325,7 +1426,9 @@ class MessagingBackend:
                 targets.add(self.dest_hash_for(self.active_peer_hash))
         sent = 0
         for peer in targets:
-            link = self._link_for_peer(peer)
+            if not self._peer_link_active(peer):
+                continue
+            link = self._best_outgoing_link(peer) or self._link_for_peer(peer)
             if not link:
                 continue
             try:
@@ -1703,7 +1806,9 @@ class MessagingBackend:
         except Exception:
             pass
         print("[connect] Link established")
-        self.drain_queue(link, dest_hex, include_files=not self._failover_in_progress)
+        self._schedule_queue_drain(
+            dest_hex, link=link, include_files=not self._failover_in_progress,
+        )
         return True
 
     def _establish_outbound_link(self, destination, dest_hex, clean, old_link=None,
@@ -2246,7 +2351,7 @@ class MessagingBackend:
             passive=passive_only,
         )
         if not passive_only:
-            self.drain_queue(link, peer_hash)
+            self._schedule_queue_drain(peer_hash, link=link)
 
     def _link_closed(self, link):
         def callback(link):
@@ -2316,6 +2421,7 @@ class MessagingBackend:
                         msg_id = receipt.get("msg_id")
                         status = receipt.get("status", "received")
                         self._pending_sends.pop(msg_id, None)
+                        self._remove_queue_entry(msg_id)
                         cb = self._receipt_callbacks.pop(msg_id, None)
                         if cb:
                             cb(status, receipt)

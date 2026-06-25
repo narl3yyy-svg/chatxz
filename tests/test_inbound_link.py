@@ -162,28 +162,68 @@ class InboundLinkTests(unittest.TestCase):
     def test_finish_connect_drains_queue_on_user_connect(self):
         backend = _make_backend()
         peer = "4a2aa1dbbed382886b0333274e546ba8"
-        link = _FakeLink("55" * 16, "f687bbff423a220af49f04edb8381ab2")
+        ident = "f687bbff423a220af49f04edb8381ab2"
+        link = _FakeLink("55" * 16, ident)
         backend.links[link.link_id] = link
         backend._link_peer_hashes[link.link_id] = peer
         backend.peer_links[peer] = link
+        backend.register_peer_mapping(peer, ident)
         backend.message_queue = [{
             "type": "text",
             "content": "queued hello",
-            "target_hash": peer,
+            "target_hash": ident,
             "msg_id": "abc12345",
         }]
         backend._connect_user_initiated = True
         sent = []
 
-        def fake_send(text, msg_id=None, target_peer=None, link=None, **kwargs):
+        def fake_send(text, msg_id=None, target_peer=None, link=None, receipt_callback=None, **kwargs):
             sent.append(text)
+            from chatxz.core.messaging import ChatMessage
+            msg = ChatMessage("text", text, msg_id=msg_id)
+            if receipt_callback:
+                receipt_callback("received", {"msg_id": msg_id})
+            return msg
+
+        with patch.object(backend, "send_message", side_effect=fake_send):
+            backend._drain_queue_for_peer(peer, link_hint=link)
+        self.assertEqual(sent, ["queued hello"])
+        self.assertEqual(backend.message_queue, [])
+
+    def test_queue_drain_waits_for_receipt_before_removal(self):
+        backend = _make_backend()
+        peer = "4a2aa1dbbed382886b0333274e546ba8"
+        link = _FakeLink("88" * 16, "f687bbff423a220af49f04edb8381ab2")
+        backend.links[link.link_id] = link
+        backend.peer_links[peer] = link
+        backend.message_queue = [{
+            "type": "text",
+            "content": "offline msg",
+            "target_hash": peer,
+            "msg_id": "deadbeef",
+        }]
+        callbacks = {}
+
+        def fake_send(text, msg_id=None, target_peer=None, link=None, receipt_callback=None, **kwargs):
+            if receipt_callback:
+                callbacks[msg_id] = receipt_callback
             from chatxz.core.messaging import ChatMessage
             return ChatMessage("text", text, msg_id=msg_id)
 
         with patch.object(backend, "send_message", side_effect=fake_send):
-            backend._finish_connect(peer, link=link)
-        self.assertEqual(sent, ["queued hello"])
+            backend.drain_queue(link, peer)
+        self.assertEqual(len(backend.message_queue), 1)
+        self.assertIn("_queue_sent_at", backend.message_queue[0])
+        callbacks["deadbeef"]("received", {"msg_id": "deadbeef"})
         self.assertEqual(backend.message_queue, [])
+
+    def test_queue_matches_identity_alias_target(self):
+        backend = _make_backend()
+        peer = "4a2aa1dbbed382886b0333274e546ba8"
+        ident = "f687bbff423a220af49f04edb8381ab2"
+        backend.register_peer_mapping(peer, ident)
+        entry = {"target_hash": ident}
+        self.assertTrue(backend._queue_matches_target(entry, peer))
 
     def test_consolidate_peer_links_closes_duplicates(self):
         backend = _make_backend()
