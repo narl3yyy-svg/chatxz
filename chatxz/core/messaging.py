@@ -2795,7 +2795,7 @@ class MessagingBackend:
                     print(f"[connect] Stale link to {self.active_peer_hash[:16]}... — reconnecting")
                     self._teardown_active_link(preserve_peer=True, handoff=True)
                 elif self._link_path_score(self.active_link) >= 90 and link_ok:
-                    return True
+                    return self._finish_connect(clean, link=self.active_link)
                 else:
                     old_link = self.active_link
                     self._teardown_active_link(preserve_peer=True, handoff=True)
@@ -2892,7 +2892,8 @@ class MessagingBackend:
                     destination, dest_hex, clean, old_link=old_link,
                     timeout_s=QUICK_OUTBOUND_TIMEOUT_S,
                 ):
-                    return True
+                    adopt = self._link_for_peer(dest_hex) or self.active_link
+                    return self._finish_connect(dest_hex, link=adopt)
                 if not physical_lan:
                     scrub_peer_path(dest_hex)
                     request_paths_for_hash(dest_hex, family="serial")
@@ -2901,9 +2902,11 @@ class MessagingBackend:
                         destination, dest_hex, clean, old_link=old_link,
                         timeout_s=SERIAL_LINK_CONNECT_TIMEOUT_S,
                     ):
-                        return True
+                        adopt = self._link_for_peer(dest_hex) or self.active_link
+                        return self._finish_connect(dest_hex, link=adopt)
                     if self._peer_link_active(dest_hex, clean):
-                        return True
+                        adopt = self._link_for_peer(dest_hex) or self._find_active_link_for_peer(dest_hex, clean)
+                        return self._finish_connect(dest_hex, link=adopt)
                     print("[connect] Peer not reachable (serial)")
                     return False
             elif serial_only:
@@ -2916,7 +2919,8 @@ class MessagingBackend:
                         destination, dest_hex, clean, old_link=old_link,
                         timeout_s=QUICK_OUTBOUND_TIMEOUT_S,
                     ):
-                        return True
+                        adopt = self._link_for_peer(dest_hex) or self.active_link
+                        return self._finish_connect(dest_hex, link=adopt)
             elif peer_ip and not respond_to_wake and lan_ready:
                 self._prime_udp_path(dest_hex, peer_ip=peer_ip, timeout_s=2.5)
                 if self._peer_has_path(dest_hex):
@@ -2925,7 +2929,8 @@ class MessagingBackend:
                         destination, dest_hex, clean, old_link=old_link,
                         timeout_s=QUICK_OUTBOUND_TIMEOUT_S,
                     ):
-                        return True
+                        adopt = self._link_for_peer(dest_hex) or self.active_link
+                        return self._finish_connect(dest_hex, link=adopt)
                 print(f"[connect] Waking peer at {peer_ip}:{peer_port or 8742}")
                 self._wake_peer(
                     peer_ip, peer_port, my_hash,
@@ -2937,11 +2942,13 @@ class MessagingBackend:
                 )
                 if self._wait_for_peer_link(dest_hex, alt_hex=clean, timeout_s=1.5):
                     print("[connect] Link established (inbound after wake)")
-                    return True
+                    adopt = self._link_for_peer(dest_hex) or self.active_link
+                    return self._finish_connect(dest_hex, link=adopt)
                 print(f"[connect] Waiting for peer outbound link ({inbound_wait}s)...")
                 if self._wait_for_peer_link(dest_hex, alt_hex=clean, timeout_s=inbound_wait):
                     print("[connect] Link established (inbound after wake)")
-                    return True
+                    adopt = self._link_for_peer(dest_hex) or self.active_link
+                    return self._finish_connect(dest_hex, link=adopt)
                 print("[connect] Peer did not connect back — trying outbound fallback...")
             elif serial_ready and peer_ip and not lan_ready:
                 print("[connect] LAN unreachable — using serial only (no HTTP wake)")
@@ -2979,12 +2986,13 @@ class MessagingBackend:
                 destination, dest_hex, clean, old_link=old_link,
                 timeout_s=connect_timeout,
             ):
-                return True
+                adopt = self._link_for_peer(dest_hex) or self.active_link
+                return self._finish_connect(dest_hex, link=adopt)
 
             if self._peer_link_active(dest_hex, clean):
-                self._adopt_healthy_peer_link(dest_hex)
+                adopt = self._adopt_healthy_peer_link(dest_hex)
                 print("[connect] Link established (inbound after outbound attempt)")
-                return True
+                return self._finish_connect(dest_hex, link=adopt)
 
             if peer_ip and lan_ready and physical_lan:
                 reverse_wait = ANDROID_REVERSE_CONNECT_WAIT_S if is_android() else REVERSE_CONNECT_WAIT_S
@@ -2996,7 +3004,8 @@ class MessagingBackend:
                     )
                 if self._wait_for_reverse_link(dest_hex, alt_hex=clean, timeout_s=reverse_wait):
                     print("[connect] Reverse connect established")
-                    return True
+                    adopt = self._link_for_peer(dest_hex) or self.active_link
+                    return self._finish_connect(dest_hex, link=adopt)
 
             if (
                 serial_ready
@@ -3012,13 +3021,14 @@ class MessagingBackend:
                     destination, dest_hex, clean, old_link=old_link,
                     timeout_s=SERIAL_LINK_CONNECT_TIMEOUT_S,
                 ):
-                    return True
+                    adopt = self._link_for_peer(dest_hex) or self.active_link
+                    return self._finish_connect(dest_hex, link=adopt)
                 if self._wait_for_peer_link(
                     dest_hex, alt_hex=clean, timeout_s=REVERSE_CONNECT_WAIT_S,
                 ):
-                    self._adopt_healthy_peer_link(dest_hex)
+                    adopt = self._adopt_healthy_peer_link(dest_hex)
                     print("[connect] Link established (serial inbound after LAN failure)")
-                    return True
+                    return self._finish_connect(dest_hex, link=adopt)
 
             print("[connect] Peer not reachable")
             return False
