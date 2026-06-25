@@ -2333,17 +2333,18 @@ function renderDiscovered(peers) {
   const prev = window._discoveredPeers || [];
   if (!peers.length && prev.length) {
     const age = Date.now() - (window._discoveredPeersAt || 0);
-    if (age < 45000) {
+    if (age < 120000) {
       console.log('[render] Keeping discovered peers during transient empty poll');
       return;
     }
   }
-  if (peers.length) window._discoveredPeersAt = Date.now();
-  window._discoveredPeers = peers;
+  const merged = mergeDiscoveredPeers(prev, peers);
+  if (merged.length) window._discoveredPeersAt = Date.now();
+  window._discoveredPeers = merged.length ? merged : peers;
   const el = document.getElementById('discovered-list');
   el.innerHTML = '';
   let hasLink = linkedPeers.size > 0;
-  let discovered = peers ? peers.filter(p => !p.connected) : [];
+  let discovered = window._discoveredPeers ? window._discoveredPeers.filter(p => !p.connected) : [];
   let count = discovered.length;
   const linkCount = linkedPeers.size;
   document.getElementById('peer-count').textContent = count + ' peer' + (count !== 1 ? 's' : '') + (linkCount ? ' · ' + linkCount + ' linked' : '');
@@ -2571,6 +2572,11 @@ function announceSelf() {
 
 window.onChatxzFolderPicked = function(path) {
   if (!path) return;
+  if (window._folderPickTarget === 'debug-export') {
+    window._folderPickTarget = null;
+    doExportDebugLogs(path);
+    return;
+  }
   if (window._folderPickTarget === 'setup') {
     const el = document.getElementById('setup-received-dir');
     if (el) el.value = path;
@@ -2991,10 +2997,27 @@ function lanInterfaceSelectHtml(interfaces) {
     const name = iface.name || 'iface';
     const ip = iface.ip && iface.ip !== 'disconnected' ? iface.ip : 'offline';
     const mark = iface.up ? 'up' : 'down';
-    const kind = iface.kind && iface.kind !== 'other' ? ` · ${iface.kind}` : '';
+    const kind = iface.kind && iface.kind !== 'other'
+      ? ` · ${iface.kind === 'vpn' ? 'VPN' : iface.kind}`
+      : '';
     html += `<option value="${escapeHtml(name)}">${escapeHtml(name)} — ${escapeHtml(ip)} (${mark}${kind})</option>`;
   });
   return html;
+}
+
+function mergeDiscoveredPeers(prev, incoming) {
+  if (!incoming || !incoming.length) return prev || [];
+  const byKey = {};
+  (prev || []).forEach(p => {
+    const k = peerKey(p.hash);
+    if (k) byKey[k] = p;
+  });
+  incoming.forEach(p => {
+    const k = peerKey(p.hash);
+    if (!k) return;
+    byKey[k] = {...(byKey[k] || {}), ...p};
+  });
+  return Object.values(byKey);
 }
 
 function populateLanInterfaceSelect(interfaces, selected) {
@@ -4204,7 +4227,37 @@ function updateAndroidDebugLogHint(path) {
     return;
   }
   el.style.display = 'block';
-  el.innerHTML = '<strong>Debug log:</strong> server output is saved on this device.<br><code style="font-size:10px">' + escapeHtml(path) + '</code><br>Check <code>chatxz-debug-latest.txt</code> in the same folder. <a href="#" onclick="viewDebugLog();return false" style="color:var(--accent)">View recent log</a>';
+  el.innerHTML = '<strong>Debug log:</strong> saved in app-private storage on this device.<br><code style="font-size:10px">' + escapeHtml(path) + '</code><br>'
+    + '<a href="#" onclick="viewDebugLog();return false" style="color:var(--accent)">View recent log</a>'
+    + ' · <a href="#" onclick="exportDebugLogs();return false" style="color:var(--accent)">Export logs to folder</a>';
+}
+
+function exportDebugLogs() {
+  if (window.chatxzAndroid?.pickFolder) {
+    window._folderPickTarget = 'debug-export';
+    window.chatxzAndroid.pickFolder();
+    return;
+  }
+  toast('Use the Android app to pick an export folder');
+}
+
+function doExportDebugLogs(destPath) {
+  if (!destPath) return;
+  fetch('/api/debug/export', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: destPath}),
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.status === 'ok') {
+        const msg = `Exported ${d.copied} log file(s) to ${d.path}`;
+        toast(d.warning ? msg + ' — ' + d.warning : msg);
+      } else {
+        toast('Export failed: ' + (d.error || 'unknown'));
+      }
+    })
+    .catch(() => toast('Export failed'));
 }
 
 function viewDebugLog() {
@@ -4223,9 +4276,10 @@ function viewDebugLog() {
       dlg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
       const box = document.createElement('div');
       box.style.cssText = 'background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px;max-width:95vw;max-height:90vh;overflow:auto';
-      box.innerHTML = '<strong>Debug log</strong> <button type="button" style="float:right">Close</button>';
+      box.innerHTML = '<strong>Debug log</strong> <button type="button" id="debug-export-btn" style="margin-right:8px">Export to folder</button><button type="button" style="float:right">Close</button>';
       box.appendChild(wrap);
-      box.querySelector('button').onclick = () => dlg.remove();
+      box.querySelector('#debug-export-btn')?.addEventListener('click', () => exportDebugLogs());
+      box.querySelector('button[style*="float:right"]')?.addEventListener('click', () => dlg.remove());
       dlg.appendChild(box);
       dlg.onclick = e => { if (e.target === dlg) dlg.remove(); };
       document.body.appendChild(dlg);

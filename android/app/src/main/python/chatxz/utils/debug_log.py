@@ -217,6 +217,51 @@ def start_debug_capture():
     return path
 
 
+def list_debug_log_files():
+    """Return readable debug log file paths (active log + recent archives)."""
+    paths = []
+    active = _log_path
+    if active and os.path.isfile(active):
+        paths.append(active)
+    try:
+        logs_dir, _ = resolve_android_debug_dir()
+        if logs_dir and os.path.isdir(logs_dir):
+            for name in sorted(os.listdir(logs_dir)):
+                if not name.startswith("chatxz-debug") or not name.endswith(".txt"):
+                    continue
+                full = os.path.join(logs_dir, name)
+                if os.path.isfile(full) and full not in paths:
+                    paths.append(full)
+    except Exception:
+        pass
+    return paths
+
+
+def export_debug_logs(dest_dir):
+    """Copy debug logs to a user-chosen folder (Android SAF / desktop path)."""
+    dest_dir = os.path.normpath(os.path.expanduser((dest_dir or "").strip()))
+    if not dest_dir:
+        return 0, "Destination folder is empty"
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError as exc:
+        return 0, f"Cannot create folder: {exc}"
+    if not os.path.isdir(dest_dir):
+        return 0, "Destination is not a folder"
+    sources = list_debug_log_files()
+    if not sources:
+        return 0, "No debug log files found — enable Debug mode and restart the app"
+    copied = 0
+    import shutil
+    for src in sources:
+        try:
+            shutil.copy2(src, os.path.join(dest_dir, os.path.basename(src)))
+            copied += 1
+        except OSError as exc:
+            return copied, f"Copied {copied}, failed on {os.path.basename(src)}: {exc}"
+    return copied, None
+
+
 def stop_debug_capture():
     global _log_path, _orig_stdout, _orig_stderr
     for attr, orig in (("stdout", _orig_stdout), ("stderr", _orig_stderr)):

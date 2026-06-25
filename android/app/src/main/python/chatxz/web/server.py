@@ -64,7 +64,12 @@ from chatxz.utils.helpers import (
     safe_path_under,
     safe_rel_path_under,
 )
-from chatxz.utils.debug_log import debug_log_path, debug_log_tail
+from chatxz.utils.debug_log import (
+    debug_log_path,
+    debug_log_tail,
+    export_debug_logs,
+    list_debug_log_files,
+)
 from chatxz.utils.android_notify import show_message_notification
 from chatxz.utils.platform import (
     is_android,
@@ -1529,7 +1534,7 @@ class ChatWebServer:
                 identity_hash=peer.get("identity_hash"),
             )
         if self.discovery and self.websockets and self._loop:
-            peers = self.discovery.get_peers()
+            peers = self._scoped_peers()
             asyncio.run_coroutine_threadsafe(
                 self._broadcast({"type": "peers", "data": peers}),
                 self._loop
@@ -2191,11 +2196,9 @@ class ChatWebServer:
             return
         if self.lan_beacon:
             self.lan_beacon.reset_stats()
-        if self.discovery:
-            self.discovery.clear_peers()
         settings["network_stats_reset_at"] = time.time()
         self.save_settings(settings)
-        print("[network] Auto-reset discovery/beacon counters (weekly)")
+        print("[network] Auto-reset beacon counters (weekly)")
 
     async def handle_network_reset(self, request):
         self._reset_network_state(update_settings=True)
@@ -2959,10 +2962,34 @@ class ChatWebServer:
         }
         if is_android():
             payload["debug_log_path"] = debug_log_path()
+            payload["debug_log_files"] = list_debug_log_files()
             tail = debug_log_tail()
             if tail:
                 payload["debug_log_tail"] = tail
         return web.json_response(payload)
+
+    async def handle_debug_export(self, request):
+        if not is_android():
+            return web.json_response(
+                {"error": "Debug log export is for Android debug builds"},
+                status=400,
+            )
+        try:
+            data = await request.json()
+            dest = (data.get("path") or "").strip()
+            if not dest:
+                return web.json_response({"error": "path required"}, status=400)
+            copied, err = await asyncio.to_thread(export_debug_logs, dest)
+            if err and copied == 0:
+                return web.json_response({"error": err}, status=400)
+            return web.json_response({
+                "status": "ok",
+                "copied": copied,
+                "path": dest,
+                "warning": err,
+            })
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
 
     async def handle_file_upload(self, request):
         if not self.messaging:
@@ -3784,7 +3811,6 @@ class ChatWebServer:
     async def _init_rns_background(self):
         try:
             my_hash = await asyncio.to_thread(self.start_rns)
-            self._maybe_auto_reset_network_stats()
             print(f"[startup] RNS ready, identity: {my_hash}")
             await self._broadcast({"type": "rns_ready", "data": {"hash": my_hash}})
         except SystemExit:
@@ -3867,6 +3893,7 @@ class ChatWebServer:
         app.router.add_delete("/api/history/{msg_id}", self.handle_delete_message)
         app.router.add_get("/api/discover", self.handle_discover)
         app.router.add_get("/api/debug", self.handle_debug)
+        app.router.add_post("/api/debug/export", self.handle_debug_export)
         app.router.add_get("/api/settings", self.handle_settings_get)
         app.router.add_post("/api/settings", self.handle_settings_post)
         app.router.add_get("/api/browse-dir", self.handle_browse_dir)
@@ -3894,7 +3921,6 @@ class ChatWebServer:
         """Start Reticulum after the HTTP server is already listening."""
         try:
             my_hash = await asyncio.to_thread(self.start_rns)
-            self._maybe_auto_reset_network_stats()
             print(f"[embedded] RNS ready, identity: {my_hash}")
         except Exception:
             import traceback

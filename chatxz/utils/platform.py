@@ -101,6 +101,82 @@ def storage_root():
     return os.path.join(os.path.expanduser("~"), ".config", "chatxz")
 
 
+def _android_is_vpn_iface(name):
+    """True for common Android VPN/tunnel interface names."""
+    low = (name or "").lower()
+    if _linux_is_tunnel_iface(name):
+        return True
+    if low.startswith(("vpn", "ppp", "ccmni", "rmnet", "clat", "ipsec")):
+        return True
+    return False
+
+
+def _android_connectivity_interfaces():
+    """Enumerate all Android networks including VPN via ConnectivityManager."""
+    by_name = {}
+    try:
+        from java import jclass
+        python = jclass("com.chaquo.python.Python")
+        ctx = python.getPlatform().getApplication()
+        context = jclass("android.content.Context")
+        cm = ctx.getSystemService(context.CONNECTIVITY_SERVICE)
+        if cm is None:
+            return []
+        caps_cls = jclass("android.net.NetworkCapabilities")
+        transport_vpn = int(caps_cls.TRANSPORT_VPN)
+        transport_wifi = int(caps_cls.TRANSPORT_WIFI)
+        transport_cell = int(caps_cls.TRANSPORT_CELLULAR)
+        transport_eth = int(caps_cls.TRANSPORT_ETHERNET)
+        for network in cm.getAllNetworks():
+            caps = cm.getNetworkCapabilities(network)
+            props = cm.getLinkProperties(network)
+            if caps is None or props is None:
+                continue
+            ifname = str(props.getInterfaceName() or "").strip()
+            if not ifname:
+                continue
+            if caps.hasTransport(transport_vpn):
+                kind = "vpn"
+            elif caps.hasTransport(transport_wifi):
+                kind = "wifi"
+            elif caps.hasTransport(transport_eth):
+                kind = "ethernet"
+            elif caps.hasTransport(transport_cell):
+                kind = "cellular"
+            else:
+                kind = "vpn" if _android_is_vpn_iface(ifname) else "other"
+            ip = None
+            addrs = props.getLinkAddresses()
+            if addrs is not None:
+                it = addrs.iterator()
+                while it.hasNext():
+                    la = it.next()
+                    addr = la.getAddress()
+                    if addr is None:
+                        continue
+                    host = str(addr.getHostAddress())
+                    if ":" in host or host.startswith("127.") or host.startswith("169.254."):
+                        continue
+                    ip = host
+                    break
+            parts = (ip or "").split(".")
+            subnet = (
+                f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+                if len(parts) == 4 else None
+            )
+            by_name[ifname] = {
+                "name": ifname,
+                "kind": kind,
+                "ip": ip if ip else "disconnected",
+                "broadcast": subnet,
+                "subnet_broadcast": subnet,
+                "up": bool(ip),
+            }
+    except Exception:
+        pass
+    return [by_name[k] for k in sorted(by_name)]
+
+
 def _android_connectivity_ip():
     """Best-effort LAN IP via Android ConnectivityManager."""
     try:
@@ -191,7 +267,7 @@ def _java_enumerate_interfaces():
                     f"{parts[0]}.{parts[1]}.{parts[2]}.255"
                     if len(parts) == 4 else None
                 )
-                kind = "vpn" if _linux_is_tunnel_iface(name) else (
+                kind = "vpn" if _android_is_vpn_iface(name) else (
                     "wifi" if name.lower().startswith(("wl", "wlan", "wifi")) else
                     "ethernet" if name.lower().startswith(("en", "eth")) else "other"
                 )
@@ -705,7 +781,26 @@ def _desktop_lan_ip():
 def enumerate_lan_interfaces():
     """All local NICs for the LAN interface picker (ignores preference)."""
     if is_android():
-        entries = _java_enumerate_interfaces()
+        by_name = {}
+        for entry in _android_connectivity_interfaces():
+            name = entry.get("name")
+            if name:
+                by_name[name] = entry
+        for entry in _java_enumerate_interfaces():
+            name = entry.get("name")
+            if not name:
+                continue
+            prev = by_name.get(name)
+            if prev:
+                merged = {**prev, **entry}
+                if entry.get("ip") and entry.get("ip") != "disconnected":
+                    merged["ip"] = entry["ip"]
+                if prev.get("kind") == "vpn" or entry.get("kind") == "vpn":
+                    merged["kind"] = "vpn"
+                by_name[name] = merged
+            else:
+                by_name[name] = entry
+        entries = [by_name[k] for k in sorted(by_name)]
         if not entries:
             ip = _android_connectivity_ip()
             if ip:

@@ -624,6 +624,8 @@ class MessagingBackend:
         if not self._interface_healthy(iface):
             return 0
         fam = interface_family(iface)
+        if fam == "tcp":
+            return 95
         if fam == "lan":
             return 100
         if fam == "serial":
@@ -1156,6 +1158,8 @@ class MessagingBackend:
             fam = interface_family(iface)
             if fam == "serial":
                 score = 85 if not physical_lan_reachable() else 45
+            elif fam == "tcp":
+                score = 95
             elif fam == "lan":
                 score = 100
             elif fam == "udp":
@@ -1338,6 +1342,28 @@ class MessagingBackend:
             except Exception:
                 return link
         return self._link_for_peer(peer)
+
+    def _best_transfer_link(self, peer_hash=None):
+        """Prefer TCP/LAN over UDP for bulk file transfers (higher throughput)."""
+        peer = self.dest_hash_for(
+            peer_hash or self.active_peer_hash or self._session_peer_hash or ""
+        )
+        if not peer or peer == "unknown":
+            return None
+        prefer = ("tcp", "lan", "udp", "serial")
+        best = None
+        best_score = -1
+        for link in self._links_for_peer(peer):
+            if not self._link_interface_healthy(link):
+                continue
+            iface = self._link_attached_interface(link)
+            fam = interface_family(iface)
+            fam_rank = len(prefer) - prefer.index(fam) if fam in prefer else 0
+            score = self._link_path_score(link) + fam_rank * 5
+            if score > best_score:
+                best_score = score
+                best = link
+        return best or self._best_outgoing_link(peer)
 
     def _outgoing_link(self, peer_hash=None):
         if peer_hash:
@@ -3552,7 +3578,7 @@ class MessagingBackend:
     def send_file(self, file_path, msg_type=MESSAGE_TYPE_FILE, progress_callback=None,
                   transfer_id=None, target_peer=None, link=None):
         peer = self.dest_hash_for(target_peer or self.active_peer_hash or "")
-        link = link or self._outgoing_link(peer)
+        link = link or self._best_transfer_link(peer) or self._outgoing_link(peer)
         if not link or not os.path.exists(file_path):
             print(f"[messaging] send_file: no link to {peer[:16] if peer else 'peer'} or missing file")
             return False
@@ -3604,10 +3630,15 @@ class MessagingBackend:
                 f = open(file_path, "rb")
                 self._file_handles[transfer_id] = f
                 ext = os.path.splitext(file_path)[1].lower()
+                xfer_link = link or self._outgoing_link(peer)
+                xfer_iface = self._link_attached_interface(xfer_link)
+                xfer_fam = interface_family(xfer_iface)
+                fast_path = xfer_fam in ("tcp", "lan", "udp")
                 compress = (
                     msg_type not in (MESSAGE_TYPE_IMAGE, MESSAGE_TYPE_VIDEO)
                     and fsize > 65536
                     and ext not in _NO_COMPRESS_SUFFIXES
+                    and not fast_path
                 )
                 resource = RNS.Resource(f, link,
                              callback=self._resource_send_callback(fname, transfer_id, fsize),
@@ -3615,7 +3646,7 @@ class MessagingBackend:
                              auto_compress=compress)
                 resource_holder["resource"] = resource
                 self._active_resources[transfer_id] = resource
-                print(f"[messaging] Sent file: {fname} ({fsize} bytes)")
+                print(f"[messaging] Sent file: {fname} ({fsize} bytes) via {xfer_fam or 'unknown'}")
                 self._sent_messages[chat_msg.msg_id] = chat_msg
                 return chat_msg
             except Exception as e:

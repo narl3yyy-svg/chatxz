@@ -12,9 +12,8 @@ from chatxz.core.discovery import PeerDiscovery, discovery_timeout_s
 
 
 class DiscoveryIdentityTests(unittest.TestCase):
-    def test_desktop_discovery_ttl_is_30_seconds(self):
-        with patch("chatxz.utils.platform.is_android", return_value=False):
-            self.assertEqual(discovery_timeout_s(), 30)
+    def test_discovery_ttl_is_five_minutes(self):
+        self.assertEqual(discovery_timeout_s(), 300)
 
     def test_evict_superseded_peer_on_same_ip_new_hash(self):
         disc = PeerDiscovery()
@@ -99,7 +98,7 @@ class DiscoveryIdentityTests(unittest.TestCase):
         disc.peers["abcdabcdabcdabcdabcdabcdabcdabcd"] = {
             "hash": "abcdabcdabcdabcdabcdabcdabcdabcd",
             "name": "peer",
-            "last_seen": time.time() - 45,
+            "last_seen": time.time() - discovery_timeout_s() - 1,
             "via": "rns",
         }
         peers = disc.get_peers()

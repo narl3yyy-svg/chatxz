@@ -6,16 +6,10 @@ import RNS
 from chatxz.core.lan_rns import register_udp_peer_ip
 
 def discovery_timeout_s():
-    try:
-        from chatxz.utils.platform import is_android
-        if is_android():
-            return 300
-    except Exception:
-        pass
-    return 30
+    return 300
 
 
-DISCOVERY_TIMEOUT = 30
+DISCOVERY_TIMEOUT = 300
 APP_NAME = "chatxz"
 PUBKEY_SIZE = RNS.Identity.KEYSIZE // 8
 
