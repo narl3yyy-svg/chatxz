@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.93
+**Current version:** 0.3.94
 
 ## Download
 
@@ -90,10 +90,11 @@ bash scripts/check.sh
 
 ## Using chatxz
 
-1. **Copy your identity hash** from the sidebar (click to copy).
-2. Tap **Announce** (📡) to discover peers on the LAN (manual only — no auto-broadcast).
-3. **Click a peer** or paste a hash in **Connect**.
-4. When **Link: Active** shows in the dock, chat, send files, images, voice notes, and folders.
+1. On first launch, complete the **setup wizard** (display name, LAN interface, optional auto-announce).
+2. **Copy your identity hash** from the sidebar (click to copy).
+3. Tap **Announce** (📡) to discover peers instantly, or enable **Auto-announce** in Settings → Network.
+4. **Click a peer** on your selected network/interface or paste a hash in **Connect**.
+5. When **Link: Active** shows in the dock, chat, send files, images, voice notes, and folders.
 
 | Feature | Details |
 |---------|---------|
@@ -153,6 +154,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.94** — Linux fresh install defaults to UDP LAN (fixes no discovery until manual config); first-run setup wizard (name, LAN interface, auto-announce off by default); auto-announce setting in Network; instant manual announce (0.4s debounce, 1s peer broadcast); subnet-scoped discovery per selected interface; hub group no longer hijacks 1:1 links (`__hub_group__` leak fix); large hub messages use resource transfer; reorganized Settings → Network layout
 - **v0.3.93** — Immediate peer supersession: one hash per LAN IP, old hash evicted on new Announce (no 30s wait); block Connect/send to stale hashes; migrate or remove saved contacts when peer identity changes; disconnect stale links
 - **v0.3.92** — Live identity regeneration (no server restart); discovered peers expire in 30s and refresh when hash/IP changes; evict stale peer entries after identity swap on same host; folder picker reverted to v0.3.90 native dialogs with Select folder button kept
 - **v0.3.91** — Fix RNS init on Linux when started in background thread (signal handler patch); native folder picker for received-files (zenity/kdialog/tk, not browser upload); per-interface Active toggles + AutoInterface on/off; `scripts/check.sh` pre-push test suite

@@ -121,19 +121,14 @@ def standalone_needs_udp(interfaces, hub_role="off"):
 
 
 def default_interface_list():
+    """Fresh installs get UDP LAN so discovery works without manual TCP hub setup."""
     try:
         from chatxz.utils.platform import is_android
         if is_android():
             return copy.deepcopy(ANDROID_DEFAULT_INTERFACE_LIST)
     except Exception:
         pass
-    if (
-        sys.platform in ("win32", "darwin")
-        or os.environ.get("CHATXZ_PORTABLE")
-        or getattr(sys, "frozen", False)
-    ):
-        return copy.deepcopy(ANDROID_DEFAULT_INTERFACE_LIST)
-    return copy.deepcopy(DEFAULT_INTERFACE_LIST)
+    return copy.deepcopy(ANDROID_DEFAULT_INTERFACE_LIST)
 
 
 def android_standalone_needs_udp(interfaces, hub_role="off"):

@@ -581,6 +581,46 @@ body::before {
 .welcome-step strong { display: block; color: var(--text); font-size: 12px; margin-bottom: 4px; }
 #placeholder .keyhint { font-size: 12px; color: var(--text3); margin-top: 16px; }
 
+#setup-wizard {
+  position: fixed; inset: 0; z-index: 200;
+  display: none; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.72); backdrop-filter: blur(8px);
+  padding: 20px;
+}
+#setup-wizard.open { display: flex; }
+.setup-wizard-card {
+  width: min(480px, 100%); max-height: 90vh; overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-xl); padding: 28px 24px;
+  box-shadow: var(--shadow-lg);
+}
+.setup-wizard-card h2 { font-size: 20px; margin: 0 0 6px; }
+.setup-wizard-card .lead { color: var(--text2); font-size: 13px; line-height: 1.55; margin-bottom: 18px; }
+.setup-step { margin-bottom: 16px; }
+.setup-step label { display: block; font-size: 12px; color: var(--text2); margin-bottom: 6px; }
+.setup-step input, .setup-step select {
+  width: 100%; height: 40px; border-radius: var(--radius-md);
+  border: 1px solid var(--border); background: var(--surface2);
+  color: var(--text); padding: 0 12px; font-family: inherit;
+}
+.setup-toggle {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 12px; border-radius: var(--radius-md);
+  border: 1px solid var(--border); background: rgba(0,0,0,0.15);
+  font-size: 12px; color: var(--text2); line-height: 1.5;
+}
+.setup-toggle input { margin-top: 2px; }
+.setup-toggle strong { display: block; color: var(--text); margin-bottom: 2px; }
+.settings-subhead {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--text3); margin: 14px 0 8px;
+}
+.settings-row-split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 520px) { .settings-row-split { grid-template-columns: 1fr; } }
+.iface-preset-hint {
+  font-size: 11px; color: var(--text3); line-height: 1.45; margin: 6px 0 10px;
+}
+
 #messages {
   flex: 1; overflow-y: auto; padding: 24px 28px;
   display: flex; flex-direction: column; gap: 8px;
@@ -938,6 +978,30 @@ body.sidebar-open #sidebar-backdrop { display: block; }
 </style>
 </head>
 <body>
+<div id="setup-wizard" role="dialog" aria-modal="true" aria-labelledby="setup-wizard-title">
+  <div class="setup-wizard-card">
+    <h2 id="setup-wizard-title">Welcome to chatxz</h2>
+    <p class="lead">Quick setup so you can discover and chat with peers on your chosen network.</p>
+    <div class="setup-step">
+      <label for="setup-name">Your display name</label>
+      <input id="setup-name" placeholder="e.g. arch, ubuntu, phone..." maxlength="50" autocomplete="name">
+    </div>
+    <div class="setup-step">
+      <label for="setup-lan-interface">Network interface for LAN chat</label>
+      <select id="setup-lan-interface">
+        <option value="">Auto (Ethernet/Wi-Fi before VPN)</option>
+      </select>
+    </div>
+    <div class="setup-step">
+      <label class="setup-toggle">
+        <input type="checkbox" id="setup-auto-announce">
+        <span><strong>Auto-announce</strong>Periodically broadcast your presence on the LAN. Leave off to announce manually with the 📡 button.</span>
+      </label>
+    </div>
+    <p class="field-hint" style="margin-bottom:14px">UDP LAN discovery is enabled by default. Adjust RNS interfaces later in Settings → Network.</p>
+    <button class="btn-block primary" onclick="completeSetupWizard()">Get started</button>
+  </div>
+</div>
 <div id="app">
   <div id="workspace">
   <div id="sidebar-backdrop" onclick="closeSidebarOnBackdrop(event)"></div>
@@ -1057,53 +1121,60 @@ body.sidebar-open #sidebar-backdrop { display: block; }
         </div>
         <div class="settings-card" id="network-settings-card">
           <h4>📡 Network</h4>
-          <div style="display:flex;gap:8px;margin-bottom:8px">
-            <button class="btn-block" style="flex:1" onclick="refreshNetworkStatus()">Refresh status</button>
-            <button class="btn-block danger" style="flex:1" onclick="resetNetwork()">Reset network</button>
+          <div class="settings-row-split" style="margin-bottom:10px">
+            <button class="btn-block" onclick="refreshNetworkStatus()">Refresh status</button>
+            <button class="btn-block danger" onclick="resetNetwork()">Reset network</button>
           </div>
+          <div id="network-status-panel" class="network-status">Tap Refresh to load network status.</div>
+
+          <div class="settings-subhead">LAN discovery</div>
           <div class="settings-section">
-            <label>LAN network interface</label>
+            <label>Active network interface</label>
             <select id="settings-lan-interface" onchange="saveLanInterface()">
               <option value="">Auto (Ethernet/Wi-Fi before VPN)</option>
             </select>
-            <p class="field-hint">Pick which NIC chatxz uses for LAN IP, beacon, and UDP discovery — including <strong>VPN tunnels</strong> (WireGuard, OpenVPN, Tailscale). Use <strong>Auto</strong> to prefer physical Ethernet/Wi-Fi over VPN. Restart chatxz after changing if peers stop seeing you.</p>
+            <p class="field-hint">Peers are shown only on this interface's subnet. Pick a VPN tunnel to chat over that network.</p>
           </div>
+          <label class="setup-toggle" style="margin-bottom:10px">
+            <input type="checkbox" id="settings-auto-announce" onchange="saveAutoAnnounce()">
+            <span><strong>Auto-announce</strong>Broadcast your presence on the LAN every ~30s. Off = manual 📡 Announce only.</span>
+          </label>
           <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin-bottom:8px">
             <input type="checkbox" id="settings-network-auto-reset" onchange="saveNetworkAutoReset()">
             Auto-reset beacon counters weekly
           </label>
-          <div id="network-status-panel" class="network-status">Tap Refresh to load network status.</div>
-          <div class="settings-section" style="margin-top:12px">
+
+          <div class="settings-subhead">RNS transport</div>
+          <p class="iface-preset-hint"><strong>UDP LAN</strong> — Wi-Fi/Ethernet peers on your subnet. <strong>TCP Hub</strong> — relay through one machine. <strong>Serial</strong> — USB radio/cable link.</p>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+            <button class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('udp_lan')" title="LAN broadcast discovery">+ UDP LAN</button>
+            <button class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('tcp_client')">+ TCP Client</button>
+            <button class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('tcp_server')">+ TCP Hub</button>
+            <button class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('serial')">+ Serial</button>
+          </div>
+          <div id="serial-devices-panel" class="serial-devices-panel" style="display:none"></div>
+          <div id="rns-interfaces-list" style="font-size:11px;color:var(--text2)">Loading...</div>
+          <label id="auto-interface-toggle" style="display:none;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin-top:10px">
+            <input type="checkbox" id="settings-auto-interface" onchange="saveAutoInterface()">
+            RNS AutoInterface (IPv6 LAN mesh — Linux/macOS when UDP LAN is active)
+          </label>
+          <div id="serial-permission-hint" style="display:none;margin-top:6px;font-size:10px;color:var(--warn,#e8a838);line-height:1.45"></div>
+          <div id="serial-setup-hint" style="margin-top:6px;font-size:10px;color:var(--text3)">Serial: plug in USB, pick device + baud (57600), click Apply. Restart after changes.</div>
+
+          <div class="settings-subhead">Hub group chat (optional)</div>
+          <div class="settings-section">
             <label>Hub mode</label>
             <select id="settings-hub-role" onchange="saveHubSettings()">
-              <option value="off">Off (direct P2P)</option>
-              <option value="server">Hub server (main node)</option>
-              <option value="client">Hub client</option>
+              <option value="off">Off — direct P2P only</option>
+              <option value="server">Hub server (relay for all clients)</option>
+              <option value="client">Hub client (connect to hub IP)</option>
             </select>
-            <p class="field-hint">Server: run TCP hub and relay group chat. Client: connect to hub IP below.</p>
           </div>
           <div id="hub-client-fields" class="settings-section" style="display:none">
             <label>Hub host (IP)</label>
             <input id="settings-hub-host" placeholder="10.10.100.1" spellcheck="false">
             <label style="margin-top:8px">Hub port</label>
             <input id="settings-hub-port" type="number" min="1" max="65535" value="4242">
-          </div>
-          <div style="margin-top:12px">
-            <h4 style="margin:0 0 8px;font-size:12px;color:var(--text2)">RNS interface presets</h4>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-              <button class="btn-block" style="flex:1;min-width:80px" onclick="addRnsInterface('udp_lan')">+ UDP</button>
-              <button class="btn-block" style="flex:1;min-width:80px" onclick="addRnsInterface('tcp_client')">+ TCP</button>
-              <button class="btn-block" style="flex:1;min-width:80px" onclick="addRnsInterface('tcp_server')">+ TCP Hub</button>
-              <button class="btn-block" style="flex:1;min-width:80px" onclick="addRnsInterface('serial')">+ Serial</button>
-            </div>
-            <div id="serial-devices-panel" class="serial-devices-panel" style="display:none"></div>
-            <div id="rns-interfaces-list" style="font-size:11px;color:var(--text2)">Loading...</div>
-            <label id="auto-interface-toggle" style="display:none;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin-top:10px">
-              <input type="checkbox" id="settings-auto-interface" onchange="saveAutoInterface()">
-              RNS AutoInterface (IPv6 LAN mesh — Linux/macOS when UDP LAN is active)
-            </label>
-            <div id="serial-permission-hint" style="display:none;margin-top:6px;font-size:10px;color:var(--warn,#e8a838);line-height:1.45"></div>
-            <div id="serial-setup-hint" style="margin-top:6px;font-size:10px;color:var(--text3)">Plug in USB serial, pick device + baud (default 57600), click Apply. Restart chatxz after applying.</div>
           </div>
         </div>
         <div class="settings-card danger">
@@ -1404,13 +1475,76 @@ function init() {
   fetchIdentity();
   fetch('/api/settings').then(r => r.json()).then(s => {
     window._hubRole = s.hub_role || 'off';
+    window._appSettings = s;
     updateHubUi();
+    if (!s.setup_complete) openSetupWizard(s);
   }).catch(() => {});
   connectWS();
   buildEmojiPicker();
   startPeerPolling();
   setupGlobalHandlers();
   setupVisibilitySync();
+}
+
+function openSetupWizard(settings) {
+  const wiz = document.getElementById('setup-wizard');
+  if (!wiz) return;
+  const nameEl = document.getElementById('setup-name');
+  if (nameEl) nameEl.value = (settings && settings.name) || '';
+  const autoEl = document.getElementById('setup-auto-announce');
+  if (autoEl) autoEl.checked = !!(settings && settings.auto_announce);
+  fetch('/api/network').then(r => r.json()).then(d => {
+    populateLanInterfaceSelect(d.interfaces || d.available_interfaces, settings?.lan_interface);
+    const setupSel = document.getElementById('setup-lan-interface');
+    const mainSel = document.getElementById('settings-lan-interface');
+    if (setupSel && mainSel) setupSel.innerHTML = mainSel.innerHTML;
+    if (setupSel && settings?.lan_interface) setupSel.value = settings.lan_interface;
+  }).catch(() => {});
+  wiz.classList.add('open');
+}
+
+function completeSetupWizard() {
+  const name = document.getElementById('setup-name')?.value.trim() || '';
+  if (!name) {
+    toast('Enter a display name');
+    document.getElementById('setup-name')?.focus();
+    return;
+  }
+  const lan_interface = document.getElementById('setup-lan-interface')?.value || '';
+  const auto_announce = !!document.getElementById('setup-auto-announce')?.checked;
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      name,
+      lan_interface,
+      auto_announce,
+      setup_complete: true,
+    }),
+  }).then(r => r.json()).then(d => {
+    if (d.status !== 'ok') {
+      toast('Setup failed: ' + (d.error || 'unknown'));
+      return;
+    }
+    window._appSettings = d.settings || {};
+    document.getElementById('setup-wizard')?.classList.remove('open');
+    toast('Setup complete — discovering peers…');
+    announceSelf();
+  }).catch(() => toast('Setup failed'));
+}
+
+function saveAutoAnnounce() {
+  const enabled = !!document.getElementById('settings-auto-announce')?.checked;
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({auto_announce: enabled}),
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') {
+      window._appSettings = d.settings || {};
+      toast('Auto-announce ' + (enabled ? 'enabled' : 'disabled'));
+    } else toast('Save failed: ' + (d.error || ''));
+  }).catch(() => toast('Save failed'));
 }
 
 function setupVisibilitySync() {
@@ -2957,6 +3091,8 @@ function toggleSettings() {
         if (hubPort) hubPort.value = s.hub_port || 4242;
         const autoIface = document.getElementById('settings-auto-interface');
         if (autoIface) autoIface.checked = s.auto_interface_enabled !== false;
+        const autoAnn = document.getElementById('settings-auto-announce');
+        if (autoAnn) autoAnn.checked = !!s.auto_announce;
         onHubRoleChange();
         updateHubUi();
         const sh = document.getElementById('settings-hash');
@@ -3018,10 +3154,11 @@ function saveSettings() {
   const hub_role = document.getElementById('settings-hub-role')?.value || 'off';
   const hub_host = document.getElementById('settings-hub-host')?.value.trim() || '';
   const hub_port = parseInt(document.getElementById('settings-hub-port')?.value, 10) || 4242;
+  const auto_announce = !!document.getElementById('settings-auto-announce')?.checked;
   fetch('/api/settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name, history_retention: retention, received_dir, hub_role, hub_host, hub_port})
+    body: JSON.stringify({name, history_retention: retention, received_dir, hub_role, hub_host, hub_port, auto_announce})
   }).then(async r => {
     const d = await r.json();
     if (r.ok && d.status === 'ok') {

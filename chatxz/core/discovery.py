@@ -328,7 +328,7 @@ class PeerDiscovery:
         )
         return True
 
-    def _log_once(self, key, message, interval=30):
+    def _log_once(self, key, message, interval=5):
         now = time.time()
         if now - self._last_log.get(key, 0) < interval:
             return
@@ -348,7 +348,17 @@ class PeerDiscovery:
             score += 1
         return score
 
-    def get_peers(self):
+    @staticmethod
+    def _same_subnet(ip_a, ip_b):
+        if not ip_a or not ip_b:
+            return True
+        parts_a = str(ip_a).split(".")
+        parts_b = str(ip_b).split(".")
+        if len(parts_a) != 4 or len(parts_b) != 4:
+            return True
+        return parts_a[:3] == parts_b[:3]
+
+    def get_peers(self, scope_ip=None):
         if not self.accept_peers:
             return []
         now = time.time()
@@ -359,6 +369,8 @@ class PeerDiscovery:
 
         deduped = {}
         for peer in self.peers.values():
+            if scope_ip and peer.get("ip") and not self._same_subnet(peer["ip"], scope_ip):
+                continue
             ip = peer.get("ip")
             key = f"{ip}:{peer.get('port', 8742)}" if ip else peer["hash"]
             existing = deduped.get(key)

@@ -70,6 +70,23 @@ class LanBeacon:
             self._periodic_thread = None
         print(f"[beacon] Listening on UDP {BEACON_PORT} (periodic={'on' if self.periodic else 'off'})")
 
+    def set_periodic(self, enabled, on_periodic=None):
+        """Enable or disable background beacon announces without restarting."""
+        enabled = bool(enabled)
+        if on_periodic is not None:
+            self.on_periodic = on_periodic
+        if enabled == self.periodic:
+            return
+        self.periodic = enabled
+        if enabled and self.running:
+            if self._periodic_thread and self._periodic_thread.is_alive():
+                return
+            self._periodic_thread = threading.Thread(
+                target=self._periodic, name="chatxz-beacon-tx", daemon=True,
+            )
+            self._periodic_thread.start()
+            print(f"[beacon] Periodic announces enabled (every {self._interval}s)")
+
     def stop(self):
         self.running = False
         for sock in (self._rx_sock, self._tx_sock):

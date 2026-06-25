@@ -10,7 +10,7 @@ if getattr(sys, "frozen", False):
     ensure_rns_interfaces()
 
 from chatxz.core.identity import IdentityManager
-from chatxz.core.messaging import HUB_GROUP_PEER, MessagingBackend
+from chatxz.core.messaging import HUB_GROUP_PEER, MessagingBackend, is_hub_peer_hash
 from chatxz.core.voice import VoiceRecorder, VoicePlayer
 from chatxz.core.discovery import PeerDiscovery
 from chatxz.core.lan_beacon import LanBeacon, BEACON_PORT
@@ -410,21 +410,33 @@ class ChatWebServer:
 
     def _session_chat_peer(self, sender_hash=None):
         viewing = self._ui_state.get("viewing_peer")
-        if viewing:
+        if viewing and not is_hub_peer_hash(viewing):
             resolved = self._peer_dest_hash(viewing)
-            if resolved and resolved != "unknown":
+            if resolved and resolved != "unknown" and not is_hub_peer_hash(resolved):
                 return resolved
         if self.messaging and self.messaging.active_peer_hash:
-            resolved = self._peer_dest_hash(self.messaging.active_peer_hash)
-            if resolved and resolved != "unknown":
-                return resolved
-        if self.active_peer:
+            if not is_hub_peer_hash(self.messaging.active_peer_hash):
+                resolved = self._peer_dest_hash(self.messaging.active_peer_hash)
+                if resolved and resolved != "unknown" and not is_hub_peer_hash(resolved):
+                    return resolved
+        if self.active_peer and not is_hub_peer_hash(self.active_peer):
             resolved = self._peer_dest_hash(self.active_peer)
-            if resolved and resolved != "unknown":
+            if resolved and resolved != "unknown" and not is_hub_peer_hash(resolved):
                 return resolved
-        if sender_hash:
+        if sender_hash and not is_hub_peer_hash(sender_hash):
             return self._peer_dest_hash(sender_hash)
         return ""
+
+    def _discovery_scope_ip(self):
+        settings = self.load_settings()
+        if not lan_discovery_configured(settings.get("rns_interfaces")):
+            return None
+        return detect_lan_ip()
+
+    def _scoped_peers(self):
+        if not self.discovery:
+            return []
+        return self.discovery.get_peers(scope_ip=self._discovery_scope_ip())
 
     def _resolve_incoming_peer(self, ident_hex=None, computed_dest=None, fallback=None, link=None):
         from chatxz.core.discovery import normalize_hash
@@ -449,7 +461,11 @@ class ChatWebServer:
                 return mapped
 
         session_peer = self._session_chat_peer()
-        if session_peer and not self._is_self_hash(session_peer):
+        if (
+            session_peer
+            and not self._is_self_hash(session_peer)
+            and not is_hub_peer_hash(session_peer)
+        ):
             if not ident_hex or self.messaging and self.messaging.hashes_equivalent(
                 ident_hex, session_peer
             ):
@@ -660,6 +676,8 @@ class ChatWebServer:
             "hub_port": 4242,
             "hub_server_hash": "",
             "auto_interface_enabled": True,
+            "auto_announce": False,
+            "setup_complete": False,
         }
         try:
             with open(SETTINGS_FILE) as f:
@@ -670,12 +688,7 @@ class ChatWebServer:
                 needs_udp = standalone_needs_udp(
                     s.get("rns_interfaces"), s.get("hub_role", "off")
                 )
-                if needs_udp and (
-                    is_android()
-                    or sys.platform in ("win32", "darwin")
-                    or os.environ.get("CHATXZ_PORTABLE")
-                    or getattr(sys, "frozen", False)
-                ):
+                if needs_udp:
                     s["rns_interfaces"] = normalize_interface_list(None)
                     self.save_settings(s)
                 apply_lan_interface_preference(self.config_dir)
@@ -871,6 +884,10 @@ class ChatWebServer:
         elif configured_serial_enabled(interfaces) and not lan_discovery_configured(interfaces):
             print("[network] Serial-only transport — LAN IP detection skipped")
         received_dir = settings.get("received_dir", os.path.join(self.config_dir, "received"))
+        auto_announce = bool(settings.get("auto_announce", False)) or (
+            configured_serial_enabled(interfaces)
+            and not lan_discovery_configured(interfaces)
+        )
         self.messaging = MessagingBackend(
             self.identity, self.config_dir,
             on_message=self._on_message,
@@ -879,7 +896,7 @@ class ChatWebServer:
             on_link_closed=self._on_link_closed,
             on_queue_sent=self._on_queue_sent,
             display_name=settings.get("name", ""),
-            auto_announce=configured_serial_enabled(interfaces),
+            auto_announce=auto_announce,
             receive_dir=received_dir,
             peer_resolver=self._resolve_incoming_peer,
         )
@@ -902,6 +919,8 @@ class ChatWebServer:
             on_peer_evicted=self._on_peer_evicted,
         )
         self.discovery.start()
+        if lan_discovery_configured(interfaces):
+            self.discovery.enable_discovery(clear=False)
         identity_pubkey = None
         if self.identity:
             try:
@@ -915,16 +934,19 @@ class ChatWebServer:
                 display_name=settings.get("name", ""),
                 ip=my_ip,
                 port=self.port,
-                periodic=False,
+                periodic=auto_announce,
                 identity_hash=self.identity_mgr.get_hex_hash(),
                 identity_pubkey=identity_pubkey,
-                on_periodic=None,
+                on_periodic=self._on_beacon_periodic if auto_announce else None,
             )
             self.lan_beacon.start()
         else:
             self.lan_beacon = None
             print("[network] Serial/other-only mode — LAN beacon disabled")
-        print("[network] One startup announce; manual Announce or Connect after that")
+        if auto_announce:
+            print("[network] Auto-announce on — periodic LAN discovery active")
+        else:
+            print("[network] Auto-announce off — tap Announce to discover peers")
 
         serial_hot = None
         for attempt in range(3):
@@ -954,7 +976,8 @@ class ChatWebServer:
                 self.lan_beacon.send(1, subnet_probe=False)
             elif configured_serial_enabled(interfaces):
                 print("[network] Startup RNS announce burst on serial")
-            print("[network] Startup announce sent once (tap Announce for more)")
+            if not auto_announce:
+                print("[network] Startup announce sent once (tap Announce for more)")
         except Exception as exc:
             print(f"[network] Startup announce failed: {exc}")
 
@@ -1041,6 +1064,25 @@ class ChatWebServer:
     def _enable_discovery(self, clear=False):
         if self.discovery:
             self.discovery.enable_discovery(clear=clear)
+
+    def _on_beacon_periodic(self):
+        if self.messaging and not self.messaging.shutdown_requested:
+            try:
+                self.messaging._silent_announce()
+            except Exception:
+                pass
+
+    def _apply_auto_announce_settings(self, settings):
+        enabled = bool(settings.get("auto_announce", False))
+        if self.messaging:
+            self.messaging.auto_announce = enabled
+        if enabled and self.discovery:
+            self.discovery.enable_discovery(clear=False)
+        if self.lan_beacon:
+            self.lan_beacon.set_periodic(
+                enabled,
+                on_periodic=self._on_beacon_periodic if enabled else None,
+            )
 
     def _contact_name_for(self, peer_hash):
         for contact in list_contacts(self.config_dir):
@@ -1224,7 +1266,7 @@ class ChatWebServer:
                 }),
                 self._loop,
             )
-            peers = self.discovery.get_peers() if self.discovery else []
+            peers = self._scoped_peers()
             asyncio.run_coroutine_threadsafe(
                 self._broadcast({"type": "peers", "data": peers}),
                 self._loop,
@@ -2035,7 +2077,7 @@ class ChatWebServer:
                 })
         except Exception:
             pass
-        peers = self.discovery.get_peers() if self.discovery else []
+        peers = self._scoped_peers()
         linked_peers = self.messaging.linked_peers() if self.messaging else []
         link_active = False
         active_peer = None
@@ -2158,7 +2200,7 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
-    ANNOUNCE_DEBOUNCE_SEC = 1.5
+    ANNOUNCE_DEBOUNCE_SEC = 0.4
 
     async def _perform_announce(self):
         ok, err = await self._wait_for_rns()
@@ -2199,7 +2241,7 @@ class ChatWebServer:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-        peers = self.discovery.get_peers() if self.discovery else []
+        peers = self._scoped_peers()
         await self._broadcast({"type": "peers", "data": peers})
         if debounced and self.lan_beacon:
             beacon_sent = self.lan_beacon.last_announce_sent
@@ -2401,8 +2443,14 @@ class ChatWebServer:
             if "auto_interface_enabled" in data:
                 settings["auto_interface_enabled"] = bool(data["auto_interface_enabled"])
                 self._write_rns_config(settings)
+            if "auto_announce" in data:
+                settings["auto_announce"] = bool(data["auto_announce"])
+            if "setup_complete" in data:
+                settings["setup_complete"] = bool(data["setup_complete"])
             settings = self._apply_hub_settings(settings)
             self.save_settings(settings)
+            if "auto_announce" in data:
+                self._apply_auto_announce_settings(settings)
             if self.messaging:
                 self.messaging.display_name = settings.get("name", "")
             self._apply_received_dir(settings)
@@ -2464,7 +2512,7 @@ class ChatWebServer:
             })
             if self.messaging:
                 await self._perform_announce()
-            peers = self.discovery.get_peers() if self.discovery else []
+            peers = self._scoped_peers()
             await self._broadcast({"type": "peers", "data": peers})
 
         print(
@@ -2523,7 +2571,7 @@ class ChatWebServer:
         return web.json_response({"cpu_percent": None})
 
     async def handle_debug(self, request):
-        peers = self.discovery.get_peers() if self.discovery else []
+        peers = self._scoped_peers()
         settings = self.load_settings()
         received_dir = settings.get("received_dir", os.path.join(self.config_dir, "received"))
         payload = {
@@ -3139,10 +3187,10 @@ class ChatWebServer:
         print("[broadcaster] Started")
         last_snapshot = None
         while True:
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
             if not self.websockets or not self.discovery:
                 continue
-            peers = self.discovery.get_peers()
+            peers = self._scoped_peers()
             snapshot = tuple(
                 sorted(
                     (
@@ -3161,7 +3209,7 @@ class ChatWebServer:
                 await self._broadcast({"type": "peers", "data": peers})
 
     async def handle_discover(self, request):
-        peers = self.discovery.get_peers() if self.discovery else []
+        peers = self._scoped_peers()
         if self.active_peer and not any(p.get("hash", "").replace(":", "") == self.active_peer for p in peers):
             peers.append({
                 "hash": self.active_peer,

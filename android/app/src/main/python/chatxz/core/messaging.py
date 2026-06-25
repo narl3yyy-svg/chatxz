@@ -88,6 +88,12 @@ MESSAGE_TYPE_EMOJI = "emoji"
 MESSAGE_TYPE_LONGTEXT = "longtext"
 HUB_GROUP_PEER = "__hub_group__"
 
+
+def is_hub_peer_hash(peer_hash):
+    clean = normalize_hash(peer_hash)
+    return clean in (HUB_GROUP_PEER, "__hub_group__")
+
+
 class ChatMessage:
     def __init__(self, msg_type, content, sender=None, timestamp=None, file_name=None, file_size=None, msg_id=None):
         self.msg_type = msg_type
@@ -898,6 +904,8 @@ class MessagingBackend:
         if identity_peer and identity_peer != "unknown" and not self._is_self_hash(identity_peer):
             return identity_peer
         peer_hash = self.dest_hash_for(peer_hash)
+        if is_hub_peer_hash(peer_hash):
+            peer_hash = ""
         if peer_hash and peer_hash != "unknown" and not self._is_self_hash(peer_hash):
             if identity_peer and not self.hashes_equivalent(peer_hash, identity_peer):
                 peer_hash = ""
@@ -922,7 +930,7 @@ class MessagingBackend:
         if resolved and resolved != "unknown" and not self._is_self_hash(resolved):
             return self.dest_hash_for(resolved)
         if self.active_peer_hash and not self._is_self_hash(self.active_peer_hash):
-            if self._incoming_matches_active_session(link):
+            if not is_hub_peer_hash(self.active_peer_hash) and self._incoming_matches_active_session(link):
                 return self.dest_hash_for(self.active_peer_hash)
         return peer_hash or "unknown"
 
@@ -1063,10 +1071,12 @@ class MessagingBackend:
             return not target_hash
         if not target_hash:
             return False
+        if is_hub_peer_hash(tgt) != is_hub_peer_hash(target_hash):
+            return False
         return self.hashes_equivalent(tgt, target_hash)
 
     def drain_queue(self, link, target_hash, include_files=True):
-        if not link or not target_hash:
+        if not link or not target_hash or is_hub_peer_hash(target_hash):
             return 0
         remaining = []
         sent = 0
@@ -1869,8 +1879,12 @@ class MessagingBackend:
             peer = self.dest_hash_for(self._peer_hash_from_link_identity(link))
         if not peer or peer == "unknown":
             peer = self.dest_hash_for(self._peer_destination_hash(link, fallback=peer_hash))
+        if is_hub_peer_hash(peer):
+            return
         if not peer or peer == "unknown":
-            peer = self.dest_hash_for(self.active_peer_hash or "")
+            session_peer = self.dest_hash_for(self._session_peer_hash or "")
+            if session_peer and not is_hub_peer_hash(session_peer):
+                peer = session_peer
         if not peer or peer == "unknown":
             return
         self._register_peer_link(link, peer)
@@ -1953,9 +1967,19 @@ class MessagingBackend:
 
     def _link_callback(self, link):
         peer_hash = self._resolve_incoming_link_peer(link, self._peer_destination_hash(link))
+        if is_hub_peer_hash(peer_hash):
+            identity_peer = self.dest_hash_for(self._peer_hash_from_link_identity(link))
+            peer_hash = identity_peer if identity_peer and not is_hub_peer_hash(identity_peer) else "unknown"
         self._cache_link_peer(link, peer_hash)
+        if is_hub_peer_hash(peer_hash):
+            try:
+                link.teardown()
+            except Exception:
+                pass
+            print("[messaging] Rejected inbound link — hub group is not a real peer")
+            return
 
-        if self.active_link and self.active_peer_hash:
+        if self.active_link and self.active_peer_hash and not is_hub_peer_hash(self.active_peer_hash):
             same_peer = (
                 self.hashes_equivalent(peer_hash, self.active_peer_hash)
                 or (peer_hash == "unknown" and self._incoming_matches_active_session(link))
@@ -2059,7 +2083,10 @@ class MessagingBackend:
                 self.active_link = None
                 self.active_peer_hash = None
                 self._last_link_lost_at = time.time()
-                remaining = self.linked_peers()
+                remaining = [
+                    p for p in self.linked_peers()
+                    if p and not is_hub_peer_hash(p)
+                ]
                 if remaining:
                     next_peer = remaining[0]
                     next_link = self._link_for_peer(next_peer)
@@ -2765,21 +2792,33 @@ class MessagingBackend:
         msg.hub_group = True
         data = msg.to_json().encode("utf-8")
         if hub_server_mode:
-            targets = self.linked_peers()
+            targets = [
+                p for p in self.linked_peers()
+                if p and not is_hub_peer_hash(p)
+            ]
         elif hub_server_hash:
             targets = [self.dest_hash_for(hub_server_hash)]
         else:
-            targets = self.linked_peers()[:1]
+            targets = [
+                p for p in self.linked_peers()[:1]
+                if p and not is_hub_peer_hash(p)
+            ]
         sent = False
         for peer in targets:
-            if not peer:
+            if not peer or is_hub_peer_hash(peer):
                 continue
             link = self._link_for_peer(peer)
             if not link:
                 continue
             try:
-                packet = RNS.Packet(link, data)
-                packet.send()
+                mtu = getattr(link, "mtu", 500)
+                if len(data) > mtu - 50:
+                    if not self._send_long_text(msg, text, data, receipt_callback, link):
+                        print(f"[hub] send failed to {peer[:16]}: long text transfer failed")
+                        continue
+                else:
+                    packet = RNS.Packet(link, data)
+                    packet.send()
                 sent = True
             except Exception as e:
                 print(f"[hub] send failed to {peer[:16]}: {e}")
@@ -2798,7 +2837,7 @@ class MessagingBackend:
             return
         data = chat_msg.to_json().encode("utf-8")
         for peer in self.linked_peers():
-            if self.hashes_equivalent(peer, sender_hash):
+            if is_hub_peer_hash(peer) or self.hashes_equivalent(peer, sender_hash):
                 continue
             link = self._link_for_peer(peer)
             if not link:
