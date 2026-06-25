@@ -108,6 +108,65 @@ class HubSettingsTests(unittest.TestCase):
         self.assertTrue(client.get("enabled"))
 
 
+class TcpLanTests(unittest.TestCase):
+    def test_tcp_lan_enables_lan_discovery(self):
+        ifaces = ri.normalize_interface_list([{
+            "id": "tcp-lan",
+            "preset": "tcp_lan",
+            "enabled": True,
+        }])
+        self.assertTrue(ri.configured_tcp_lan_enabled(ifaces))
+        self.assertTrue(ri.lan_discovery_configured(ifaces))
+        self.assertFalse(ri.configured_udp_lan_enabled(ifaces))
+
+    def test_standalone_accepts_tcp_lan_without_udp(self):
+        ifaces = ri.normalize_interface_list([{
+            "id": "tcp-lan",
+            "preset": "tcp_lan",
+            "enabled": True,
+        }])
+        self.assertFalse(ri.standalone_needs_udp(ifaces))
+
+    def test_render_tcp_lan_config(self):
+        ifaces = ri.normalize_interface_list([{
+            "id": "tcp-lan",
+            "preset": "tcp_lan",
+            "name": "TCP LAN",
+            "enabled": True,
+            "listen_ip": "0.0.0.0",
+            "listen_port": 4242,
+        }])
+        cfg = ri.render_rns_config(ifaces, android=False)
+        self.assertIn("TCPServerInterface", cfg)
+        self.assertIn("listen_port = 4242", cfg)
+        self.assertNotIn("UDPInterface", cfg)
+        self.assertNotIn("AutoInterface", cfg)
+
+    def test_apply_hub_server_reuses_tcp_lan_listener(self):
+        from chatxz.web.server import ChatWebServer
+
+        server = ChatWebServer.__new__(ChatWebServer)
+        settings = {
+            "hub_role": "server",
+            "hub_port": 4242,
+            "rns_interfaces": [{
+                "id": "tcp-lan",
+                "preset": "tcp_lan",
+                "type": "TCPServerInterface",
+                "enabled": True,
+                "listen_ip": "0.0.0.0",
+                "listen_port": 4242,
+            }],
+        }
+        out = server._apply_hub_settings(settings)
+        servers = [
+            i for i in out["rns_interfaces"]
+            if i.get("type") == "TCPServerInterface"
+        ]
+        self.assertEqual(len(servers), 1)
+        self.assertTrue(servers[0].get("enabled"))
+
+
 class TcpFamilyTests(unittest.TestCase):
     def test_interface_family_recognizes_tcp(self):
         class TCPClientInterface:

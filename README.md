@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.106
+**Current version:** 0.3.107
 
 ## Download
 
@@ -21,7 +21,7 @@ Portable Windows, macOS, and Android builds are published automatically on every
 
 ## Windows (portable)
 
-1. Download **`chatxz-0.3.106-windows-portable.zip`** from [Releases](https://github.com/narl3yyy-svg/chatxz/releases).
+1. Download **`chatxz-0.3.107-windows-portable.zip`** from [Releases](https://github.com/narl3yyy-svg/chatxz/releases).
 2. Unzip anywhere (e.g. `C:\Users\You\chatxz`).
 3. Open the `chatxz` folder and double-click **`chatxz.exe`**.
 4. Browser opens at **http://127.0.0.1:8742**. Allow Windows Firewall on **private** networks if prompted (UDP 4242, TCP 8742).
@@ -100,7 +100,7 @@ bash scripts/check.sh
 |---------|---------|
 | Messaging | Per-peer threads, delivery receipts, offline queue, emoji |
 | Files | Any size via encrypted RNS resources; drag & drop; live speed in dock |
-| Network | LAN discovery, USB serial ↔ UDP failover (no manual Announce), saved contacts |
+| Network | LAN discovery (UDP LAN or **TCP LAN**), USB serial failover, pinned NIC/VPN, saved contacts |
 | Privacy | E2E encrypted links (AES-256-CBC); HTTP :8742 is local UI only |
 
 ---
@@ -154,6 +154,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.107** — **TCP LAN** transport preset: same LAN beacon discovery, Announce, pinned NIC, serial failover, and peer wake as UDP LAN — but RNS links use direct TCP (listen on 4242, dial discovered peer IPs on connect). Add via Settings → Network → **+ TCP LAN**
 - **v0.3.106** — Android VPN interfaces in picker (ConnectivityManager); discovery peers no longer flash away on startup; 5‑min discovery TTL; file transfers prefer TCP/LAN over UDP with compression off on fast paths; Android debug log export to user-chosen folder
 - **v0.3.105** — First-run setup wizard (retention + received folder); Arch auto-discovery shows all subnets; Android interface retry + announce burst fixes
 - **v0.3.104** — Hub/TCP audit: Arch as hub server, Ubuntu/Android as clients; TCP failover; group chat sender names; hub queue drain; settings modal stays open on save

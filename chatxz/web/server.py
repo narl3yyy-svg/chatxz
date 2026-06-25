@@ -40,7 +40,9 @@ from chatxz.core.rns_interfaces import (
     ensure_runtime_serial,
     lan_discovery_configured,
     configured_serial_enabled,
+    configured_tcp_lan_enabled,
     configured_udp_lan_enabled,
+    ensure_runtime_tcp_lan_server,
     remove_serial_interfaces,
     prune_dead_serial_interfaces,
     list_serial_ports,
@@ -708,7 +710,7 @@ class ChatWebServer:
     def _is_tcp_server_iface(iface):
         return (
             iface.get("type") == "TCPServerInterface"
-            or iface.get("preset") == "tcp_server"
+            or iface.get("preset") in ("tcp_server", "tcp_lan")
         )
 
     @staticmethod
@@ -1051,8 +1053,10 @@ class ChatWebServer:
         interfaces = settings.get("rns_interfaces")
         if configured_udp_lan_enabled(interfaces):
             patch_udp_interface_unicast()
+        elif configured_tcp_lan_enabled(interfaces):
+            print("[network] TCP LAN mode — beacon discovery active, direct TCP dial on connect")
         else:
-            print("[network] UDP LAN not configured — skipping LAN beacon/unicast helpers")
+            print("[network] LAN transport not configured — skipping beacon/unicast helpers")
         self.identity = self.identity_mgr.load_or_create()
         my_ip = detect_lan_ip()
         if my_ip and lan_discovery_configured(interfaces):
@@ -1157,6 +1161,10 @@ class ChatWebServer:
         except Exception as exc:
             print(f"[network] Startup announce failed: {exc}")
 
+        if configured_tcp_lan_enabled(interfaces) and settings.get("hub_role", "off") == "off":
+            tcp_srv = ensure_runtime_tcp_lan_server(settings, self.config_dir)
+            if tcp_srv:
+                print(f"[tcp-lan] TCP LAN server listening on 0.0.0.0:{getattr(tcp_srv, 'listen_port', 4242)}")
         self._apply_hub_runtime(settings)
         if is_android() and lan_discovery_configured(interfaces):
             self._schedule_android_lan_announce_retries()
@@ -2363,6 +2371,8 @@ class ChatWebServer:
                 continue
             if configured_udp_lan_enabled(interfaces):
                 await self._run_blocking(patch_udp_interface_unicast)
+            if configured_tcp_lan_enabled(interfaces) and hub_role == "off":
+                await self._run_blocking(ensure_runtime_tcp_lan_server, settings, self.config_dir)
             await self._run_blocking(ensure_runtime_serial, interfaces)
 
             peer_ip, peer_port = self._peer_connect_meta(peer)
@@ -2592,7 +2602,7 @@ class ChatWebServer:
                     elif configured_serial_enabled(configured) and lan_discovery_configured(configured):
                         print("[network] RNS announce on serial + LAN paths")
                     elif not lan_discovery_configured(configured):
-                        print("[network] No UDP LAN configured — RNS announce on active paths only")
+                        print("[network] No LAN transport configured — RNS announce on active paths only")
                     elif not lan_ip_reachable():
                         print("[network] LAN disconnected — RNS announce on serial/other paths only")
         except Exception as e:

@@ -1197,6 +1197,7 @@ body.sidebar-open #sidebar-backdrop { display: block; }
           <p class="iface-preset-hint"><strong>UDP LAN</strong> — Wi-Fi/Ethernet peers on your subnet. <strong>TCP Hub</strong> — relay through one machine. <strong>Serial</strong> — USB radio/cable link.</p>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
             <button class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('udp_lan')" title="LAN broadcast discovery">+ UDP LAN</button>
+            <button class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('tcp_lan')" title="LAN discovery + direct TCP peer links">+ TCP LAN</button>
             <button class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('tcp_client')">+ TCP Client</button>
             <button class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('tcp_server')">+ TCP Hub</button>
             <button class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('serial')">+ Serial</button>
@@ -2701,7 +2702,9 @@ function renderRnsInterfaceRow(iface, serialPorts, baudRates) {
   const label = escapeHtml(iface.name || iface.type || iface.preset || 'iface');
   const isSerial = iface.preset === 'serial' || iface.type === 'SerialInterface';
   const isTcpClient = iface.preset === 'tcp_client' || iface.type === 'TCPClientInterface';
-  const isTcpServer = iface.preset === 'tcp_server' || iface.type === 'TCPServerInterface';
+  const isTcpLan = iface.preset === 'tcp_lan';
+  const isTcpServer = iface.preset === 'tcp_server' || (iface.type === 'TCPServerInterface' && !isTcpLan);
+  const isTcpListen = isTcpLan || isTcpServer;
   let metaBits = iface.type || '';
   if (isSerial) {
     if (iface.serial_active) metaBits += ' · active';
@@ -2742,7 +2745,8 @@ function renderRnsInterfaceRow(iface, serialPorts, baudRates) {
     <div class="rns-iface-serial-actions">
       <button type="button" class="btn-block" onclick="saveTcpInterface('${id}')">Apply</button>
     </div>`;
-  } else if (isTcpServer) {
+  } else if (isTcpListen) {
+    const lanHint = isTcpLan ? ' · peers dial this port on connect' : '';
     body += `<div class="rns-iface-serial-fields">
       <div><label>Listen IP</label>
         <input data-tcp-listen-ip="${id}" value="${escapeHtml(iface.listen_ip || '0.0.0.0')}" spellcheck="false">
@@ -2753,6 +2757,7 @@ function renderRnsInterfaceRow(iface, serialPorts, baudRates) {
     </div>
     <div class="rns-iface-serial-actions">
       <button type="button" class="btn-block" onclick="saveTcpInterface('${id}')">Apply</button>
+      ${isTcpLan ? `<span style="font-size:10px;color:var(--text3);align-self:center">Beacon discovery + TCP transport${lanHint}</span>` : ''}
     </div>`;
   }
   return `<div class="rns-iface-card">${body}</div>`;

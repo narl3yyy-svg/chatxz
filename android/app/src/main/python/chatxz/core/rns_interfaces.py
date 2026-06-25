@@ -20,6 +20,16 @@ INTERFACE_PRESETS = {
             "ifac_size": 16,
         },
     },
+    "tcp_lan": {
+        "label": "TCP LAN",
+        "type": "TCPServerInterface",
+        "defaults": {
+            "enabled": True,
+            "listen_ip": "0.0.0.0",
+            "listen_port": 4242,
+            "ifac_size": 16,
+        },
+    },
     "tcp_client": {
         "label": "TCP Client",
         "type": "TCPClientInterface",
@@ -143,6 +153,9 @@ def android_standalone_needs_udp(interfaces, hub_role="off"):
     has_udp = any(i.get("type") == "UDPInterface" for i in items)
     if has_udp:
         return False
+    has_tcp_lan = any(i.get("preset") == "tcp_lan" for i in items)
+    if has_tcp_lan:
+        return False
     if len(items) != 1:
         return False
     only = items[0]
@@ -180,6 +193,30 @@ def configured_udp_lan_enabled(interfaces=None, config_dir=None):
     )
 
 
+def configured_tcp_lan_enabled(interfaces=None, config_dir=None):
+    """True when TCP LAN preset is present and enabled in settings."""
+    items = normalize_interface_list(interfaces or load_settings_interfaces(config_dir))
+    return any(
+        i.get("preset") == "tcp_lan" and i.get("enabled", True)
+        for i in items
+    )
+
+
+def configured_tcp_lan_listen(interfaces=None, config_dir=None):
+    """Return (listen_ip, listen_port, ifac_size) for the enabled TCP LAN preset."""
+    listen_ip = "0.0.0.0"
+    listen_port = 4242
+    ifac_size = 16
+    for iface in normalize_interface_list(interfaces or load_settings_interfaces(config_dir)):
+        if iface.get("preset") != "tcp_lan" or not iface.get("enabled", True):
+            continue
+        listen_ip = (iface.get("listen_ip") or listen_ip).strip() or "0.0.0.0"
+        listen_port = int(iface.get("listen_port") or listen_port)
+        ifac_size = int(iface.get("ifac_size") or ifac_size)
+        break
+    return listen_ip, listen_port, ifac_size
+
+
 def configured_serial_enabled(interfaces=None, config_dir=None):
     """True when a serial port is configured and accessible."""
     items = normalize_interface_list(interfaces or load_settings_interfaces(config_dir))
@@ -192,8 +229,11 @@ def configured_serial_enabled(interfaces=None, config_dir=None):
 
 
 def lan_discovery_configured(interfaces=None, config_dir=None):
-    """True when LAN discovery/beacon/AutoInterface should be active."""
-    return configured_udp_lan_enabled(interfaces, config_dir)
+    """True when LAN discovery/beacon should be active (UDP LAN or TCP LAN)."""
+    return (
+        configured_udp_lan_enabled(interfaces, config_dir)
+        or configured_tcp_lan_enabled(interfaces, config_dir)
+    )
 
 
 def user_has_serial_group_access():
@@ -462,8 +502,7 @@ def tcp_client_target_warning(target_host):
         return None
     return (
         "TCP Client target is this machine. For LAN peers, use TCP Hub Server here "
-        "and TCP Client on the remote device (or rely on UDP LAN when both sides "
-        "have UDP Interface enabled)."
+        "and TCP Client on the remote device (or use UDP LAN / TCP LAN for subnet peers)."
     )
 
 
@@ -491,7 +530,7 @@ def update_interface(items, iface_id, updates):
             if "speed" in updates and updates["speed"] is not None:
                 updated["speed"] = int(updates["speed"])
             updated = _sync_serial_enabled(updated)
-        elif preset in ("tcp_client", "tcp_server") or itype in ("TCPClientInterface", "TCPServerInterface"):
+        elif preset in ("tcp_client", "tcp_server", "tcp_lan") or itype in ("TCPClientInterface", "TCPServerInterface"):
             if "target_host" in updates and updates["target_host"]:
                 updated["target_host"] = str(updates["target_host"]).strip()
             if "target_port" in updates and updates["target_port"] is not None:
@@ -737,15 +776,17 @@ def tcp_client_interface_online():
     return None
 
 
-def hot_add_tcp_server_interface(listen_ip="0.0.0.0", listen_port=4242, ifac_size=16):
-    """Attach TCPServerInterface when hub server mode is enabled after RNS already started."""
+def hot_add_tcp_server_interface(
+    listen_ip="0.0.0.0", listen_port=4242, ifac_size=16, name=None, log_tag="hub",
+):
+    """Attach TCPServerInterface when hub server or TCP LAN is enabled after RNS started."""
     listen_ip = (listen_ip or "0.0.0.0").strip()
     listen_port = int(listen_port or 4242)
     try:
         import RNS
         from RNS.Interfaces.TCPInterface import TCPServerInterface
     except Exception as exc:
-        print(f"[hub] TCP server hot-add unavailable: {exc}")
+        print(f"[{log_tag}] TCP server hot-add unavailable: {exc}")
         return None
 
     existing = tcp_server_interface_online(listen_port)
@@ -760,20 +801,20 @@ def hot_add_tcp_server_interface(listen_ip="0.0.0.0", listen_port=4242, ifac_siz
         except Exception:
             pass
 
-    name = f"TCP Hub {listen_port}"
+    iface_name = name or f"TCP Hub {listen_port}"
     try:
         iface = TCPServerInterface(RNS.Transport, {
-            "name": name,
+            "name": iface_name,
             "listen_ip": listen_ip,
             "listen_port": listen_port,
             "ifac_size": ifac_size,
         })
         _finalize_rns_interface(iface, ifac_size=ifac_size)
         RNS.Transport.add_interface(iface)
-        print(f"[hub] Hot-added TCP hub server on {listen_ip}:{listen_port}")
+        print(f"[{log_tag}] Hot-added TCP server on {listen_ip}:{listen_port}")
         return iface
     except Exception as exc:
-        print(f"[hub] TCP server hot-add failed for {listen_ip}:{listen_port}: {exc}")
+        print(f"[{log_tag}] TCP server hot-add failed for {listen_ip}:{listen_port}: {exc}")
         return None
 
 
@@ -796,8 +837,8 @@ def remove_tcp_client_interfaces():
     return removed
 
 
-def hot_add_tcp_client_interface(target_host, target_port=4242, ifac_size=16):
-    """Attach TCPClientInterface when hub client mode is enabled after RNS already started."""
+def hot_add_tcp_client_interface(target_host, target_port=4242, ifac_size=16, log_tag="hub"):
+    """Attach TCPClientInterface for hub client or TCP LAN peer dial."""
     target_host = (target_host or "").strip()
     target_port = int(target_port or 4242)
     if not target_host:
@@ -806,7 +847,7 @@ def hot_add_tcp_client_interface(target_host, target_port=4242, ifac_size=16):
         import RNS
         from RNS.Interfaces.TCPInterface import TCPClientInterface
     except Exception as exc:
-        print(f"[hub] TCP client hot-add unavailable: {exc}")
+        print(f"[{log_tag}] TCP client hot-add unavailable: {exc}")
         return None
 
     for iface in list(getattr(RNS.Transport, "interfaces", []) or []):
@@ -839,10 +880,10 @@ def hot_add_tcp_client_interface(target_host, target_port=4242, ifac_size=16):
         })
         _finalize_rns_interface(iface, ifac_size=ifac_size)
         RNS.Transport.add_interface(iface)
-        print(f"[hub] Hot-added TCP hub client to {target_host}:{target_port}")
+        print(f"[{log_tag}] Hot-added TCP client to {target_host}:{target_port}")
         return iface
     except Exception as exc:
-        print(f"[hub] TCP client hot-add failed for {target_host}:{target_port}: {exc}")
+        print(f"[{log_tag}] TCP client hot-add failed for {target_host}:{target_port}: {exc}")
         return None
 
 
@@ -879,6 +920,79 @@ def ensure_runtime_tcp_client(settings=None, config_dir=None):
         break
     return hot_add_tcp_client_interface(
         target_host=host, target_port=port, ifac_size=ifac_size,
+    )
+
+
+def ensure_runtime_tcp_lan_server(settings=None, config_dir=None):
+    """Start TCP LAN listener when tcp_lan preset is enabled (not hub mode)."""
+    if not settings:
+        try:
+            from chatxz.utils.helpers import get_config_dir
+            import json
+            path = os.path.join(config_dir or get_config_dir(), "settings.json")
+            with open(path, encoding="utf-8") as fh:
+                settings = json.load(fh)
+        except Exception:
+            return None
+    if (settings.get("hub_role") or "off") != "off":
+        return None
+    if not configured_tcp_lan_enabled(settings.get("rns_interfaces")):
+        return None
+    try:
+        import RNS
+        if RNS.Reticulum.get_instance() is None:
+            return None
+    except Exception:
+        return None
+    listen_ip, listen_port, ifac_size = configured_tcp_lan_listen(
+        settings.get("rns_interfaces"), config_dir,
+    )
+    return hot_add_tcp_server_interface(
+        listen_ip=listen_ip,
+        listen_port=listen_port,
+        ifac_size=ifac_size,
+        name=f"TCP LAN {listen_port}",
+        log_tag="tcp-lan",
+    )
+
+
+def ensure_tcp_client_to_peer(peer_ip, port=None, settings=None, config_dir=None):
+    """Dial a discovered peer over TCP LAN (runtime hot-add)."""
+    peer_ip = (peer_ip or "").strip()
+    if not peer_ip:
+        return None
+    if not settings:
+        try:
+            from chatxz.utils.helpers import get_config_dir
+            import json
+            path = os.path.join(config_dir or get_config_dir(), "settings.json")
+            with open(path, encoding="utf-8") as fh:
+                settings = json.load(fh)
+        except Exception:
+            return None
+    if (settings.get("hub_role") or "off") == "client":
+        return None
+    if not configured_tcp_lan_enabled(settings.get("rns_interfaces")):
+        return None
+    try:
+        import RNS
+        if RNS.Reticulum.get_instance() is None:
+            return None
+    except Exception:
+        return None
+    if port is None:
+        _, port, ifac_size = configured_tcp_lan_listen(
+            settings.get("rns_interfaces"), config_dir,
+        )
+    else:
+        _, _, ifac_size = configured_tcp_lan_listen(
+            settings.get("rns_interfaces"), config_dir,
+        )
+    return hot_add_tcp_client_interface(
+        target_host=peer_ip,
+        target_port=int(port or 4242),
+        ifac_size=ifac_size,
+        log_tag="tcp-lan",
     )
 
 
@@ -977,9 +1091,10 @@ def render_rns_config(
         i.get("type") == "UDPInterface" and i.get("enabled", True)
         for i in normalized
     )
-    # Android needs transport enabled for serial/UDP path discovery (not only TCP hub).
+    has_tcp_lan = configured_tcp_lan_enabled(normalized)
+    # Android needs transport enabled for serial/UDP/TCP LAN path discovery.
     enable_transport = "Yes" if (
-        not android or has_tcp_server or has_serial or has_udp
+        not android or has_tcp_server or has_serial or has_udp or has_tcp_lan
     ) else "No"
     lines = [
         "[reticulum]",
