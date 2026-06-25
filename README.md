@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.119
+**Current version:** 0.3.120
 
 ## Download
 
@@ -11,46 +11,32 @@ Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum
 | Platform | Run |
 |----------|-----|
 | **Android** | `chatxz-X.Y.Z.apk` from Releases — sideload (arm64) |
-| **Windows** | `git clone` → **cmd** → `install.bat` → `run.bat web --share` |
+| **Windows** | `git clone` → **cmd** → `run.bat web --share` |
 | **macOS / Linux** | `git clone` → `./run.sh web --share` |
 
 ---
 
-## Windows (cmd + `.bat` files)
+## Windows (cmd)
 
-Use **Command Prompt (cmd)** in the repo folder. Three batch files:
-
-| File | Purpose |
-|------|---------|
-| `install.bat` | Install Python venv + dependencies (one time, or after `uninstall.bat`) |
-| `run.bat` | Start web server — all logs print in the same cmd window |
-| `uninstall.bat` | Stop server, remove `.venv`, optionally delete app data |
-
-**Prerequisite:** [Python 3.10+](https://www.python.org/downloads/windows/) (check **Add python.exe to PATH**). [Git](https://git-scm.com/download/win) for `git clone` / `git pull`.
+Use **Command Prompt (cmd)** in the repo folder. Clone, then run — no separate install step:
 
 ```cmd
 git clone https://github.com/narl3yyy-svg/chatxz.git
 cd chatxz
-install.bat
 run.bat web --share
 ```
 
-Install and start in one step:
+| File | Purpose |
+|------|---------|
+| `run.bat` | Start server from this folder (first run auto-fetches rns + aiohttp into local `.venv`) |
+| `uninstall.bat` | Stop server, remove `.venv`, optionally delete app data |
 
-```cmd
-install.bat --start
-```
+**Prerequisite:** [Python 3.10+](https://www.python.org/downloads/windows/) (check **Add python.exe to PATH**). [Git](https://git-scm.com/download/win) for `git clone` / `git pull`.
 
 Debug logs:
 
 ```cmd
 run.bat web --share --debug
-```
-
-Uninstall everything chatxz installed (venv + optional identity/chats):
-
-```cmd
-uninstall.bat
 ```
 
 All server logs stay in the cmd window where you ran `run.bat`. Press **Ctrl+C** to stop.
@@ -59,7 +45,7 @@ Browser: **http://127.0.0.1:8742**. Allow Windows Firewall on **private** networ
 
 **Data:** `%USERPROFILE%\.config\chatxz\`. Portable/repo-local: `set CHATXZ_PORTABLE=C:\path\to\chatxz` before starting.
 
-**Update:** `git pull` then `run.bat web --share` (re-run `install.bat` only if dependencies changed).
+**Update:** `git pull` then `run.bat web --share`.
 
 **Git Bash on Windows** (alternative): `./run.sh web --share`
 
@@ -186,6 +172,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.120** — Windows: **`run.bat web --share`** only — runs from git clone folder, no separate install step; first run auto-fetches deps into local `.venv`
 - **v0.3.119** — Windows: **`install.bat`**, **`run.bat`**, **`uninstall.bat`** only (removed PowerShell runners); pure cmd workflow with live logs
 - **v0.3.118** — Windows: run from **cmd** with **`run.bat web --share`**; live logs in your cmd window; startup announce deferred for faster boot
 - **v0.3.117** — Windows cmd: **`run.cmd web --share`** runs server in foreground with live logs (`python -u`); fix `.\run.ps1` in cmd opening VS Code instead of starting server; faster setup wizard save

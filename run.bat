@@ -1,19 +1,20 @@
 @echo off
-REM Run chatxz web server from cmd. Install first with install.bat if needed.
-setlocal EnableExtensions
+REM Run chatxz from this git clone folder. No separate install step.
+setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 set "CHATXZ_ROOT=%CD%"
 set "PYTHONPATH=%CD%"
 set "PYTHONUNBUFFERED=1"
 
-if "%~1"=="" goto :usage
-if /I "%~1"=="help" goto :usage
-if /I "%~1"=="-h" goto :usage
-if /I "%~1"=="--help" goto :usage
-if /I "%~1"=="cli" goto :cli
-if /I "%~1"=="web" goto :web
-if /I "%~1"=="server" goto :web
-if "%~1:~0,1%"=="-" goto :web
+if "%~1"=="" goto usage
+if /I "%~1"=="help" goto usage
+if /I "%~1"=="-h" goto usage
+if /I "%~1"=="--help" goto usage
+if /I "%~1"=="cli" goto cli
+if /I "%~1"=="web" goto web
+if /I "%~1"=="server" goto web
+if "%~1:~0,1%"=="-" goto web
+goto usage
 
 :usage
 echo.
@@ -22,34 +23,90 @@ echo   run.bat web --share
 echo   run.bat web --share --debug
 echo   run.bat cli [options]
 echo.
-echo First time:  install.bat
-echo Remove all:  uninstall.bat
+echo Runs from this folder. First start auto-downloads rns + aiohttp into .venv
+echo Remove local setup:  uninstall.bat
 echo.
 exit /b 1
 
 :cli
-call :ensure_install
+call :ensure_python
 if errorlevel 1 exit /b 1
-".venv\Scripts\python.exe" -u -m chatxz.app %2 %3 %4 %5 %6 %7 %8 %9
+call :ensure_deps
+if errorlevel 1 exit /b 1
+"%CHATXZ_PYTHON%" -u -m chatxz.app %2 %3 %4 %5 %6 %7 %8 %9
 exit /b %ERRORLEVEL%
 
 :web
-call :ensure_install
+call :ensure_python
+if errorlevel 1 exit /b 1
+call :ensure_deps
 if errorlevel 1 exit /b 1
 echo.
 echo chatxz web server
 echo Web UI:  http://127.0.0.1:8742
-echo Logs below — press Ctrl+C to stop
+echo Logs below - press Ctrl+C to stop
 echo.
-".venv\Scripts\python.exe" -u -m chatxz.web.server %2 %3 %4 %5 %6 %7 %8 %9
+"%CHATXZ_PYTHON%" -u -m chatxz.web.server %2 %3 %4 %5 %6 %7 %8 %9
 exit /b %ERRORLEVEL%
 
-:ensure_install
-if not exist ".venv\Scripts\python.exe" goto :do_install
-".venv\Scripts\python.exe" -m pip --version >nul 2>&1
-if not errorlevel 1 exit /b 0
-echo Broken install ^(pip missing^). Re-running install.bat ...
-:do_install
-if not exist ".venv\Scripts\python.exe" echo Not installed. Running install.bat ...
-call "%~dp0install.bat"
-exit /b %ERRORLEVEL%
+:ensure_python
+call "%~dp0scripts\windows-python.bat"
+if errorlevel 1 (
+  echo.
+  echo Python 3.10+ not found.
+  echo Install from https://www.python.org/downloads/windows/
+  echo Check "Add python.exe to PATH", then run:  run.bat web --share
+  echo.
+  exit /b 1
+)
+exit /b 0
+
+:ensure_deps
+set "CHATXZ_PYTHON="
+set "VENV_PY=%CD%\.venv\Scripts\python.exe"
+
+if exist "%VENV_PY%" (
+  "%VENV_PY%" -m pip --version >nul 2>&1
+  if not errorlevel 1 (
+    "%VENV_PY%" -c "import rns, aiohttp" >nul 2>&1
+    if not errorlevel 1 (
+      set "CHATXZ_PYTHON=%VENV_PY%"
+      exit /b 0
+    )
+  )
+)
+
+if exist "%VENV_PY%" (
+  echo Refreshing local .venv ...
+  call :stop_server
+  rmdir /s /q ".venv" 2>nul
+  ping -n 3 127.0.0.1 >nul
+)
+
+echo First run: setting up rns + aiohttp in .venv (stays in this folder) ...
+if defined USE_PY_LAUNCHER (
+  py -3 -m venv ".venv"
+) else (
+  "%PYTHON_EXE%" -m venv ".venv"
+)
+if errorlevel 1 (
+  echo Failed to create .venv
+  exit /b 1
+)
+
+set "VENV_PY=%CD%\.venv\Scripts\python.exe"
+"%VENV_PY%" -m pip install --upgrade pip >nul 2>&1
+"%VENV_PY%" -m pip install "rns>=1.3.0" "aiohttp>=3.9.0"
+if errorlevel 1 (
+  echo Failed to install dependencies.
+  exit /b 1
+)
+
+set "CHATXZ_PYTHON=%VENV_PY%"
+exit /b 0
+
+:stop_server
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":8742" ^| findstr "LISTENING"') do (
+  taskkill /F /PID %%a >nul 2>&1
+)
+exit /b 0

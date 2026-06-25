@@ -55,7 +55,6 @@ if defined PORTABLE_DIR if exist "!PORTABLE_DIR!" (
 
 echo [4/4] Cleanup complete.
 echo.
-echo To reinstall:  install.bat
 echo To run again:  run.bat web --share
 echo.
 endlocal

@@ -87,7 +87,7 @@ jobs:
             | Platform | Install |
             |----------|---------|
             | **Android** | `${{ steps.version.outputs.apk }}` — sideload (arm64) |
-            | **Windows** | `git clone` → `install.bat` → `run.bat web --share` |
+            | **Windows** | `git clone` → `run.bat web --share` |
             | **macOS / Linux** | `git clone` → `bash scripts/install-macos.sh` or `install-arch.sh` → `./run.sh web --share` |
 
             Desktop builds are **source-only** (no portable exe / mac zip). Releases ship the Android APK only.
