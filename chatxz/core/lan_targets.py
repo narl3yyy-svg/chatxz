@@ -1,12 +1,35 @@
 """Shared LAN broadcast and unicast target lists (beacon + RNS)."""
 
-from chatxz.utils.platform import is_android, lan_ip, list_network_interfaces
+from chatxz.utils.platform import (
+    _filter_interfaces_for_lan,
+    is_android,
+    lan_ip,
+    list_network_interfaces,
+)
+
+
+def _broadcast_interface_entries():
+    """NICs used for beacon/RNS broadcast — avoid spamming every stale subnet."""
+    entries = list_network_interfaces()
+    if is_android():
+        return entries
+    scoped = _filter_interfaces_for_lan(entries)
+    active = [
+        iface for iface in scoped
+        if iface.get("up") and iface.get("broadcast")
+    ]
+    if active:
+        return active
+    return [
+        iface for iface in entries
+        if iface.get("gateway_iface") and iface.get("up") and iface.get("broadcast")
+    ]
 
 
 def directed_broadcasts(ip=None):
     """Subnet and interface broadcast addresses."""
     targets = []
-    for iface in list_network_interfaces():
+    for iface in _broadcast_interface_entries():
         for candidate in (iface.get("broadcast"), iface.get("subnet_broadcast")):
             if candidate and candidate not in targets:
                 targets.append(candidate)

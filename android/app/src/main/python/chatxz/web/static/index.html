@@ -581,6 +581,31 @@ body::before {
 .welcome-step strong { display: block; color: var(--text); font-size: 12px; margin-bottom: 4px; }
 #placeholder .keyhint { font-size: 12px; color: var(--text3); margin-top: 16px; }
 
+#rns-error-banner {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+  background: linear-gradient(90deg, #5c1a24, #7a2030);
+  color: #fff;
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.45;
+  border-bottom: 1px solid rgba(255,255,255,0.15);
+  box-shadow: var(--shadow-md);
+}
+#rns-error-banner.show { display: block; }
+#rns-error-banner button {
+  margin-top: 8px;
+  background: rgba(255,255,255,0.14);
+  border: 1px solid rgba(255,255,255,0.25);
+  color: #fff;
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
 #setup-wizard {
   position: fixed; inset: 0; z-index: 200;
   display: none; align-items: center; justify-content: center;
@@ -1006,6 +1031,11 @@ body.sidebar-open #sidebar-backdrop { display: block; }
 </style>
 </head>
 <body>
+<div id="rns-error-banner" role="alert">
+  <strong>Network stack failed to start.</strong>
+  <span id="rns-error-text"></span>
+  <div><button type="button" onclick="repairNetworkInterfaces()">Repair interfaces &amp; restart</button></div>
+</div>
 <div id="setup-wizard" role="dialog" aria-modal="true" aria-labelledby="setup-wizard-title">
   <div class="setup-wizard-card">
     <h2 id="setup-wizard-title">Welcome to chatxz</h2>
@@ -1551,12 +1581,57 @@ window.onChatxzOpenPeer = function(hash) {
   openChat(String(hash).replace(/:/g, ''), false);
 };
 
+function showRnsErrorBanner(message) {
+  const banner = document.getElementById('rns-error-banner');
+  const text = document.getElementById('rns-error-text');
+  if (!banner || !text) return;
+  text.textContent = message || 'Duplicate LAN interface or port 4242 in use.';
+  banner.classList.add('show');
+}
+
+function hideRnsErrorBanner() {
+  document.getElementById('rns-error-banner')?.classList.remove('show');
+}
+
+function pollRnsHealth(attempt) {
+  const n = attempt || 0;
+  fetch('/api/health')
+    .then(r => r.json())
+    .then(h => {
+      if (h.rns_ready) {
+        hideRnsErrorBanner();
+        fetchIdentity();
+        return;
+      }
+      if (h.rns_error) showRnsErrorBanner(h.rns_error);
+      if (n < 30) setTimeout(() => pollRnsHealth(n + 1), 2000);
+    })
+    .catch(() => {
+      if (n < 30) setTimeout(() => pollRnsHealth(n + 1), 2000);
+    });
+}
+
+function repairNetworkInterfaces() {
+  fetch('/api/network/repair', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.status === 'ok') {
+        toast('Interfaces repaired — restarting...');
+        restartServer();
+      } else {
+        toast('Repair failed: ' + (d.error || 'unknown'));
+      }
+    })
+    .catch(() => toast('Repair failed'));
+}
+
 function init() {
   loadUnreadCounts();
   requestNotificationPermission();
   initMobileLayout();
   showWelcome();
   fetchIdentity();
+  pollRnsHealth(0);
   fetch('/api/settings').then(r => r.json()).then(s => {
     window._hubRole = s.hub_role || 'off';
     window._appSettings = s;
@@ -2172,8 +2247,13 @@ function handleWSMessage(msg) {
   } else if (msg.type === 'message_deleted') {
     const id = msg.data?.msg_id;
     if (id) document.querySelector(`.msg[data-msgid="${id}"]`)?.remove();
+  } else if (msg.type === 'rns_ready') {
+    hideRnsErrorBanner();
+    fetchIdentity();
   } else if (msg.type === 'info') {
-    toast(msg.data || '');
+    const text = msg.data || '';
+    if (text.toLowerCase().includes('network stack failed')) showRnsErrorBanner(text);
+    toast(text);
   }
 }
 

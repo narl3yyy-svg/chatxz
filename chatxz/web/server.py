@@ -985,6 +985,11 @@ class ChatWebServer:
                 if needs_udp:
                     s["rns_interfaces"] = normalize_interface_list(None)
                     self.save_settings(s)
+                repaired = normalize_interface_list(s.get("rns_interfaces"))
+                if repaired != s.get("rns_interfaces"):
+                    s["rns_interfaces"] = repaired
+                    self.save_settings(s)
+                    self._write_rns_config(s)
                 apply_lan_interface_preference(self.config_dir)
                 return s
         except:
@@ -1141,29 +1146,43 @@ class ChatWebServer:
         if getattr(sys, "frozen", False):
             from chatxz.utils.rns_frozen import ensure_rns_interfaces
             ensure_rns_interfaces()
+        def _start_reticulum():
+            return RNS.Reticulum(self.config_dir, loglevel=loglevel)
+
         try:
-            RNS.Reticulum(self.config_dir, loglevel=loglevel)
-        except OSError as e:
+            _start_reticulum()
+        except (OSError, Exception) as e:
             err = str(e)
             if "reinitialise" in err and self.messaging and self.messaging.destination:
                 print("[RNS] Already running - reusing existing instance")
                 return RNS.hexrep(self.messaging.destination.hash)
-            print(f"[RNS] Bind error: {e}")
+            print(f"[RNS] Startup error: {e}")
             if is_android():
                 raise RuntimeError(f"RNS failed to start: {e}") from e
+            if any(
+                token in err.lower()
+                for token in ("address already in use", "errno 48", "errno 10048", "eaddrinuse")
+            ):
+                print("[RNS] Duplicate interface or port conflict — repairing config...")
+                settings = self.load_settings()
+                settings["rns_interfaces"] = normalize_interface_list(
+                    settings.get("rns_interfaces")
+                )
+                self._write_rns_config(settings)
             print("[RNS] Retrying after stopping stale instances...")
-            stop_stale_chatxz_servers()
+            stop_stale_chatxz_servers(exclude_pid=os.getpid())
             time.sleep(1)
             if not ensure_rns_ports_free(force=True):
-                msg = "UDP port 4242 is already in use"
+                msg = "UDP port 4242 is already in use — close other chatxz windows"
                 if self.embedded:
                     raise RuntimeError(msg)
                 _rns_startup_failure(msg)
-            RNS.Reticulum(self.config_dir, loglevel=loglevel)
-        except Exception as e:
-            if self.embedded:
-                raise RuntimeError(f"RNS init failed: {e}") from e
-            raise
+            try:
+                _start_reticulum()
+            except Exception as retry_exc:
+                if self.embedded:
+                    raise RuntimeError(f"RNS init failed: {retry_exc}") from retry_exc
+                _rns_startup_failure(f"RNS init failed: {retry_exc}")
         settings = self.load_settings()
         apply_lan_interface_preference(self.config_dir)
         interfaces = settings.get("rns_interfaces")
@@ -2335,6 +2354,25 @@ class ChatWebServer:
             "beacon": beacon,
             "discovery_active": bool(self.discovery and self.discovery.accept_peers),
         })
+
+    async def handle_network_repair(self, request):
+        """Dedupe duplicate UDP/TCP LAN interfaces and rewrite RNS config."""
+        try:
+            settings = self.load_settings()
+            raw = settings.get("rns_interfaces") or []
+            before = len(raw)
+            settings["rns_interfaces"] = normalize_interface_list(raw)
+            after = len(settings["rns_interfaces"])
+            self.save_settings(settings)
+            self._write_rns_config(settings)
+            return web.json_response({
+                "status": "ok",
+                "removed": max(0, before - after),
+                "interfaces": self._interfaces_for_api(settings["rns_interfaces"]),
+                "message": "Repaired LAN interfaces — restart chatxz to apply.",
+            })
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
 
     def _disable_rns_serial_interfaces(self):
         try:
@@ -4097,6 +4135,7 @@ class ChatWebServer:
         app.router.add_get("/api/network", self.handle_network)
         app.router.add_get("/api/interfaces", self.handle_interfaces_get)
         app.router.add_post("/api/network/reset", self.handle_network_reset)
+        app.router.add_post("/api/network/repair", self.handle_network_repair)
         app.router.add_post("/api/disconnect", self.handle_disconnect)
         app.router.add_post("/api/file", self.handle_file_upload)
         app.router.add_post("/api/folder", self.handle_folder_upload)

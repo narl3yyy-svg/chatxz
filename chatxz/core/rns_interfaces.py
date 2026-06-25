@@ -391,6 +391,15 @@ def add_interface(items, preset_key):
     if not preset:
         raise ValueError(f"Unknown preset: {preset_key}")
     items = normalize_interface_list(items)
+    if preset_key == "udp_lan":
+        if any(
+            i.get("preset") == "udp_lan" or i.get("type") == "UDPInterface"
+            for i in items
+        ):
+            return items
+    if preset_key == "tcp_lan":
+        if any(i.get("preset") == "tcp_lan" for i in items):
+            return items
     entry = {
         "id": _new_id(),
         "preset": preset_key,

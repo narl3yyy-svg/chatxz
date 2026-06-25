@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.112
+**Current version:** 0.3.113
 
 ## Download
 
@@ -153,6 +153,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.113** — Mac/Windows: auto-repair duplicate UDP LAN interfaces on startup (`Address already in use` / errno 48); beacon broadcasts scoped to pinned/default NIC (fixes multi-subnet spam freeze); UI error banner + **Repair interfaces** button; block adding duplicate UDP/TCP LAN presets
 - **v0.3.112** — Windows crash fix: dedupe duplicate UDP LAN interfaces (two on port 4242 killed RNS after ~12s); RNS init errors no longer `sys.exit` the whole server; Windows stale `chatxz.exe` cleanup via `netstat`/`taskkill`; safer Windows restart (spawn new process instead of `execv`)
 - **v0.3.111** — macOS/Linux source: `run.sh` uses `python3 -m pip` (fixes `pip: command not found` on Mac when running `./run.sh web --share`)
 - **v0.3.110** — Windows folder picker runs on main thread (dialog actually appears); PowerShell WinForms picker with visible window; Windows NIC list merges ipconfig + `Get-NetAdapter` (all adapters shown); `/api/interfaces?refresh=1` + ↻ rescan; simplified Network settings (step 1: NIC, step 2: transport); macOS releases ship as `.zip` only (no `.dmg`)
