@@ -7,23 +7,36 @@ export PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 # Check for virtual env (:- avoids nounset error when VIRTUAL_ENV is unset)
 if [ -n "${VIRTUAL_ENV:-}" ]; then
-    PIP="$VIRTUAL_ENV/bin/pip"
     PYTHON="$VIRTUAL_ENV/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="$(command -v python3)"
 else
-    PIP="pip"
     PYTHON="python3"
 fi
 
+pip_cmd() {
+    "$PYTHON" -m pip "$@"
+}
+
 install_deps() {
     echo "Installing dependencies..."
-    $PIP install --user --break-system-packages rns aiohttp 2>/dev/null || \
-    $PIP install rns aiohttp
+    if ! "$PYTHON" -m pip --version >/dev/null 2>&1; then
+        echo "pip not found for $PYTHON"
+        echo "Fix: $PYTHON -m ensurepip --upgrade"
+        echo "Or run: bash scripts/install-macos.sh"
+        exit 1
+    fi
+    pip_cmd install --user --break-system-packages rns aiohttp 2>/dev/null || \
+    pip_cmd install --user rns aiohttp 2>/dev/null || \
+    pip_cmd install rns aiohttp
 }
 
 case "${1:-}" in
     install)
         install_deps
-        $PIP install --user --break-system-packages -e . 2>/dev/null || $PIP install -e .
+        pip_cmd install --user --break-system-packages -e . 2>/dev/null || \
+        pip_cmd install --user -e . 2>/dev/null || \
+        pip_cmd install -e .
         echo "Done. Run ./run.sh web"
         ;;
     web|server)
