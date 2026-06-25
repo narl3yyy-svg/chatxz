@@ -19,7 +19,12 @@ class PeerIdentityTests(unittest.TestCase):
         identity_hex = normalize_hash(RNS.hexrep(ident.hash))
         connect = message_dest_hash_for_identity(ident)
         self.assertTrue(connect)
+        self.assertEqual(len(connect), 32)
         self.assertNotEqual(connect, identity_hex)
+        dest = RNS.Destination(
+            ident, RNS.Destination.OUT, RNS.Destination.SINGLE, "chatxz", "messages"
+        )
+        self.assertEqual(connect, normalize_hash(dest.hash.hex()))
 
     def test_discovery_dedupe_prefers_rns_over_beacon(self):
         from chatxz.core.discovery import PeerDiscovery

@@ -43,11 +43,12 @@ def register_identity_from_peer(peer):
 
 
 def message_dest_hash_for_identity(ident):
+    """32-char RNS destination hash (must match Destination.hash / announces)."""
     if not ident or not getattr(ident, "hash", None):
         return ""
     try:
-        hash_input = ident.hash + APP_NAME.encode("utf-8") + b"messages"
-        return normalize_hash(RNS.hexrep(RNS.Identity.full_hash(hash_input)))
+        dest_hash = RNS.Destination.hash(ident, APP_NAME, "messages")
+        return normalize_hash(dest_hash.hex())
     except Exception:
         return ""
 
