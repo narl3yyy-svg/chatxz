@@ -2584,6 +2584,7 @@ function renderDiscovered(peers) {
     el.innerHTML = '<div class="empty-state small"><span class="empty-icon">📡</span><span>No peers on LAN yet</span><span class="empty-hint">Try Announce to broadcast</span></div>';
     if (!hasLink) return;
   }
+  syncContactIpsFromDiscovered(window._discoveredPeers);
   discovered.forEach(p => {
     if (p.identity_hash) registerPeerAliases(p.hash, p.identity_hash);
     const div = document.createElement('div');
@@ -3317,17 +3318,42 @@ function lanInterfaceSelectHtml(interfaces) {
   return html;
 }
 
+function peerMergeKey(p) {
+  if (!p) return '';
+  return peerKey(p.identity_hash) || peerKey(p.hash) || (p.pubkey ? String(p.pubkey).slice(0, 48) : '');
+}
+
+function syncContactIpsFromDiscovered(peers) {
+  let changed = false;
+  (peers || []).forEach(p => {
+    if (!p || !p.ip) return;
+    allContacts = allContacts.map(c => {
+      const same = peersMatch(c.hash, p.hash)
+        || (p.identity_hash && peersMatch(c.identity_hash, p.hash))
+        || (p.identity_hash && peersMatch(c.hash, p.identity_hash));
+      if (!same) return c;
+      const port = p.port || c.port || 8742;
+      if (c.ip === p.ip && (c.port || 8742) === port) return c;
+      changed = true;
+      return {...c, ip: p.ip, port, identity_hash: p.identity_hash || c.identity_hash};
+    });
+  });
+  if (changed) renderContacts(allContacts);
+}
+
 function mergeDiscoveredPeers(prev, incoming) {
   if (!incoming || !incoming.length) return prev || [];
   const byKey = {};
   (prev || []).forEach(p => {
-    const k = peerKey(p.hash);
+    const k = peerMergeKey(p);
     if (k) byKey[k] = p;
   });
   incoming.forEach(p => {
-    const k = peerKey(p.hash);
+    const k = peerMergeKey(p);
     if (!k) return;
-    byKey[k] = {...(byKey[k] || {}), ...p};
+    const merged = {...(byKey[k] || {}), ...p};
+    if (p.identity_hash) registerPeerAliases(p.hash, p.identity_hash);
+    byKey[k] = merged;
   });
   return Object.values(byKey);
 }

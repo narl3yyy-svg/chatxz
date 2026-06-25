@@ -20,7 +20,9 @@ from chatxz.core.contacts import (
     migrate_contact_by_ip,
     list_contacts,
     save_contact,
+    update_contact_endpoint,
 )
+from chatxz.utils.file_serve import stream_file_response
 from chatxz.core.lan_rns import (
     lan_ip_reachable,
     patch_udp_interface_unicast,
@@ -1792,6 +1794,14 @@ class ChatWebServer:
                 port=peer.get("port"),
                 identity_hash=peer.get("identity_hash"),
             )
+        contact_updated = update_contact_endpoint(
+            self.config_dir,
+            dest,
+            ip=peer.get("ip"),
+            port=peer.get("port"),
+            identity_hash=peer.get("identity_hash"),
+            peers_equivalent=self._peers_equivalent,
+        )
         if self.discovery and self.websockets and self._loop:
             peers = self._scoped_peers()
             asyncio.run_coroutine_threadsafe(
@@ -3913,12 +3923,10 @@ class ChatWebServer:
                     "mpeg": "video/mpeg",
                     "mpg": "video/mpeg",
                 }.get(ext)
-        resp = web.FileResponse(full_path)
-        if ct:
-            resp.headers['Content-Type'] = ct
-        if ct and ct.startswith("video/"):
-            resp.headers['Accept-Ranges'] = 'bytes'
-        return resp
+        resp = await stream_file_response(request, full_path, content_type=ct)
+        if resp is not None:
+            return resp
+        return web.Response(text="Not found", status=404)
 
     async def handle_queue(self, request):
         if not self.messaging:

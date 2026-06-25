@@ -195,9 +195,17 @@ class PeerDiscovery:
             self._notify_peer_evicted(removed, peer)
         existing = self.peers.get(hash_hex)
         if existing:
-            if peer.get("ip") and not existing.get("ip"):
+            new_ip = (peer.get("ip") or "").strip()
+            if new_ip and new_ip != (existing.get("ip") or "").strip():
+                existing["ip"] = new_ip
+                existing["port"] = peer.get("port", existing.get("port", 8742))
+            elif peer.get("ip") and not existing.get("ip"):
                 existing["ip"] = peer["ip"]
                 existing["port"] = peer.get("port", 8742)
+            if peer.get("identity_hash") and not existing.get("identity_hash"):
+                existing["identity_hash"] = peer["identity_hash"]
+            if peer.get("pubkey") and not existing.get("pubkey"):
+                existing["pubkey"] = peer["pubkey"]
             if peer.get("name") and peer["name"] != hash_hex[:8]:
                 existing["name"] = peer["name"]
             if peer.get("via") != "beacon" or existing.get("via") == "beacon":
@@ -343,6 +351,16 @@ class PeerDiscovery:
             return True
         return parts_a[:3] == parts_b[:3]
 
+    @staticmethod
+    def _peer_dedup_key(peer):
+        ident = normalize_hash(peer.get("identity_hash"))
+        if ident:
+            return f"ident:{ident}"
+        pubkey = (peer.get("pubkey") or "").strip()
+        if pubkey:
+            return f"pk:{pubkey[:48]}"
+        return f"hash:{normalize_hash(peer.get('hash'))}"
+
     def get_peers(self, scope_ip=None):
         if not self.accept_peers:
             return []
@@ -356,8 +374,7 @@ class PeerDiscovery:
         for peer in self.peers.values():
             if scope_ip and peer.get("ip") and not self._same_subnet(peer["ip"], scope_ip):
                 continue
-            ip = peer.get("ip")
-            key = f"{ip}:{peer.get('port', 8742)}" if ip else peer["hash"]
+            key = self._peer_dedup_key(peer)
             existing = deduped.get(key)
             if not existing:
                 deduped[key] = peer

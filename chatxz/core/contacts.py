@@ -105,6 +105,37 @@ def migrate_contact_by_ip(config_dir, ip, new_hash, name=None, port=None, identi
     return removed
 
 
+def update_contact_endpoint(config_dir, peer_hash, ip=None, port=None, identity_hash=None, peers_equivalent=None):
+    """Refresh saved contact LAN endpoint when the same peer moves to a new IP."""
+    clean = (peer_hash or "").strip().replace(":", "")
+    if not clean:
+        return None
+    target_ip = (ip or "").strip()
+    updated = None
+    for contact in list_contacts(config_dir):
+        ch = (contact.get("hash") or "").replace(":", "")
+        ih = (contact.get("identity_hash") or "").replace(":", "")
+        same = ch == clean
+        if not same and peers_equivalent:
+            same = peers_equivalent(ch, clean) or (ih and peers_equivalent(ih, clean))
+        if not same and identity_hash:
+            ident = str(identity_hash).strip().replace(":", "")
+            same = ih == ident or ch == ident
+        if not same:
+            continue
+        if target_ip and target_ip != (contact.get("ip") or "").strip():
+            updated = save_contact(
+                config_dir,
+                ch,
+                name=contact.get("name"),
+                ip=target_ip,
+                port=port if port is not None else contact.get("port"),
+                identity_hash=identity_hash or ih or None,
+            )
+        break
+    return updated
+
+
 def contact_connect_meta(config_dir, peer_hash, peers_equivalent):
     """Return (ip, port) stored on a saved contact, if any."""
     clean = (peer_hash or "").strip().replace(":", "")

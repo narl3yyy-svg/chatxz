@@ -193,6 +193,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.131** — Windows: fix large-file preview/send (`WinError 87` sendfile); CPU/temp status bar on Windows + macOS; discovered peer IP updates in GUI when same identity moves subnet
 - **v0.3.130** — TCP LAN fix: hot-added TCP server no longer crashes on incoming connections (`ifac_netname`); UDP preferred over TCP when both enabled; less TCP client reconnect spam
 - **v0.3.129** — Windows: graceful **Ctrl+C** shutdown (no traceback, no “Terminate batch job”, in-flight transfers cancelled cleanly)
 - **v0.3.128** — LAN file speed: HTTP fast path for files 2MB+ with `--share`; RNS link MTU raised to 1064 + `link_mtu_discovery` (fixes 500B links and 114 slow segments)

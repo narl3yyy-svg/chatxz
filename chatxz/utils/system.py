@@ -1,9 +1,11 @@
 """System metrics helpers for the web UI status bar."""
 
 import os
+import re
 import json
 import time
 import subprocess
+import sys
 
 from chatxz.utils.platform import is_android
 
@@ -122,8 +124,162 @@ def _collect_sensors_temps():
     return readings
 
 
+def _windows_cpu_percent():
+    try:
+        ps = (
+            "(Get-Counter '\\Processor(_Total)\\% Processor Time' -ErrorAction Stop)"
+            ".CounterSamples[0].CookedValue"
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return round(float(result.stdout.strip()), 1)
+    except Exception:
+        pass
+    try:
+        import ctypes
+
+        class FILETIME(ctypes.Structure):
+            _fields_ = [
+                ("dwLowDateTime", ctypes.c_uint32),
+                ("dwHighDateTime", ctypes.c_uint32),
+            ]
+
+        def _ft_to_int(ft):
+            return (ft.dwHighDateTime << 32) + ft.dwLowDateTime
+
+        idle1, kernel1, user1 = FILETIME(), FILETIME(), FILETIME()
+        idle2, kernel2, user2 = FILETIME(), FILETIME(), FILETIME()
+        ctypes.windll.kernel32.GetSystemTimes(
+            ctypes.byref(idle1), ctypes.byref(kernel1), ctypes.byref(user1),
+        )
+        time.sleep(0.25)
+        ctypes.windll.kernel32.GetSystemTimes(
+            ctypes.byref(idle2), ctypes.byref(kernel2), ctypes.byref(user2),
+        )
+        idle = _ft_to_int(idle2) - _ft_to_int(idle1)
+        total = (
+            (_ft_to_int(kernel2) - _ft_to_int(kernel1))
+            + (_ft_to_int(user2) - _ft_to_int(user1))
+            + idle
+        )
+        if total > 0:
+            return round(100.0 * (1.0 - idle / total), 1)
+    except Exception:
+        pass
+    return None
+
+
+def _windows_cpu_temperature():
+    readings = []
+    try:
+        ps = (
+            "Get-CimInstance -Namespace root/WMI -ClassName MSAcpi_ThermalZoneTemperature "
+            "| ForEach-Object { [math]::Round(($_.CurrentTemperature - 2732) / 10.0, 1) }"
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    c = float(line)
+                    if 0 < c < 120:
+                        readings.append(c)
+                except ValueError:
+                    pass
+    except Exception:
+        pass
+    if readings:
+        return round(sum(readings) / len(readings), 1)
+    return None
+
+
+def _darwin_cpu_percent():
+    try:
+        result = subprocess.run(
+            ["top", "-l", "1", "-n", "0", "-s", "0"],
+            capture_output=True, text=True, timeout=4,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if "CPU usage" not in line:
+                    continue
+                m = re.search(
+                    r"(\d+(?:\.\d+)?)%\s+user.*?(\d+(?:\.\d+)?)%\s+sys",
+                    line,
+                )
+                if m:
+                    return round(float(m.group(1)) + float(m.group(2)), 1)
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ["ps", "-A", "-o", "%cpu"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0:
+            total = 0.0
+            for line in result.stdout.splitlines()[1:]:
+                try:
+                    total += float(line.strip())
+                except ValueError:
+                    pass
+            cores = os.cpu_count() or 1
+            return min(round(total / cores, 1), 100.0)
+    except Exception:
+        pass
+    return None
+
+
+def _darwin_cpu_temperature():
+    readings = []
+    try:
+        result = subprocess.run(
+            ["powermetrics", "--samplers", "smc", "-n", "1", "-i", "100"],
+            capture_output=True, text=True, timeout=4,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                m = re.search(r"CPU die temperature:\s*([\d.]+)\s*C", line, re.I)
+                if m:
+                    readings.append(float(m.group(1)))
+                m = re.search(r"GPU die temperature:\s*([\d.]+)\s*C", line, re.I)
+                if m:
+                    readings.append(float(m.group(1)))
+    except Exception:
+        pass
+    if readings:
+        return round(sum(readings) / len(readings), 1)
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", 'do shell script "sysctl -n machdep.xcpm.cpu_thermal_level"'],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0 and result.stdout.strip().isdigit():
+            level = int(result.stdout.strip())
+            if level > 0:
+                return round(35.0 + min(level, 50) * 0.8, 1)
+    except Exception:
+        pass
+    return None
+
+
 def get_avg_cpu_temperature():
     """Return average CPU temperature in °C across detected cores, or None."""
+    if sys.platform == "win32":
+        return _windows_cpu_temperature()
+    if sys.platform == "darwin" and not is_android():
+        return _darwin_cpu_temperature()
+
     if is_android():
         readings = _collect_thermal_zone_temps()
     else:
@@ -146,6 +302,11 @@ def get_avg_cpu_temperature():
 
 def get_cpu_percent():
     """Return CPU usage percent, or None on failure."""
+    if sys.platform == "win32":
+        return _windows_cpu_percent()
+    if sys.platform == "darwin" and not is_android():
+        return _darwin_cpu_percent()
+
     try:
         with open("/proc/stat") as f:
             parts = [int(x) for x in f.readline().split()[1:]]
