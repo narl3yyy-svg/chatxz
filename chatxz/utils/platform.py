@@ -12,6 +12,28 @@ _android = None
 _files_dir = None
 _signals_patched = False
 _lan_interface_pref = None
+_lan_ip_pref = None
+
+
+def parse_lan_interface_value(value):
+    """Parse picker value: 'NIC|ip', bare NIC name, or bare IPv4."""
+    raw = (value or "").strip()
+    if not raw:
+        return "", ""
+    if "|" in raw:
+        name, ip = raw.split("|", 1)
+        return name.strip(), ip.strip()
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", raw):
+        return "", raw
+    return raw, ""
+
+
+def format_lan_interface_value(name, ip):
+    name = (name or "").strip()
+    ip = (ip or "").strip()
+    if name and ip and ip != "disconnected":
+        return f"{name}|{ip}"
+    return name or ip or ""
 _desktop_if_cache = {"entries": None, "expires": 0.0}
 _desktop_if_cache_lock = threading.Lock()
 DESKTOP_IF_CACHE_TTL = 45.0
@@ -211,16 +233,22 @@ def _android_connectivity_ip():
     return None
 
 
-def set_lan_interface_preference(ifname):
-    """Pin LAN discovery/chat to one NIC (empty/None = auto)."""
-    global _lan_interface_pref
-    name = (ifname or "").strip()
-    _lan_interface_pref = name or None
+def set_lan_interface_preference(value):
+    """Pin LAN discovery/chat to one NIC or IPv4 (empty/None = auto)."""
+    global _lan_interface_pref, _lan_ip_pref
+    raw = (value or "").strip()
+    name, ip = parse_lan_interface_value(raw)
+    _lan_interface_pref = raw or None
+    _lan_ip_pref = ip or None
     invalidate_desktop_interface_cache()
 
 
 def get_lan_interface_preference():
     return _lan_interface_pref
+
+
+def get_lan_ip_preference():
+    return _lan_ip_pref
 
 
 def load_lan_interface_preference(config_dir=None):
@@ -429,7 +457,10 @@ def _linux_lan_ip():
     """LAN IP from preferred or best link-up interface (physical LAN before VPN)."""
     pref = get_lan_interface_preference()
     if pref:
-        return _linux_lan_ip_from_name(pref)
+        name, ip = parse_lan_interface_value(pref)
+        if ip:
+            return ip
+        return _linux_lan_ip_from_name(name or pref)
 
     best_ip = None
     best_score = -1
@@ -583,7 +614,7 @@ def _windows_enumerate_interfaces_ipconfig():
 
 
 def _windows_enumerate_interfaces_powershell():
-    """Windows NIC scan via Get-NetAdapter — includes all adapters (even without IPv4)."""
+    """Windows NIC scan — every IPv4 on each adapter (incl. custom aliases)."""
     script = r"""
 $gwIndex = $null
 $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
@@ -594,16 +625,27 @@ if ($route) { $gwIndex = $route.InterfaceIndex }
 $rows = @()
 Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
   $adapter = $_
-  $ip = $null
+  $up = ($adapter.Status -eq 'Up')
+  $ips = @()
   Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
     Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' } |
-    ForEach-Object { if (-not $ip) { $ip = $_.IPAddress } }
-  $up = ($adapter.Status -eq 'Up')
-  [PSCustomObject]@{
-    name = $adapter.Name
-    ip = $(if ($ip) { $ip } else { $null })
-    up = $up
-    gateway_iface = ($adapter.InterfaceIndex -eq $gwIndex)
+    ForEach-Object { $ips += $_.IPAddress }
+  if ($ips.Count -eq 0) {
+    $rows += [PSCustomObject]@{
+      name = $adapter.Name
+      ip = $null
+      up = $up
+      gateway_iface = ($adapter.InterfaceIndex -eq $gwIndex)
+    }
+  } else {
+    foreach ($ip in $ips) {
+      $rows += [PSCustomObject]@{
+        name = $adapter.Name
+        ip = $ip
+        up = $up
+        gateway_iface = ($adapter.InterfaceIndex -eq $gwIndex)
+      }
+    }
   }
 }
 if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress }
@@ -665,22 +707,7 @@ def _windows_merge_interface_entries(*groups):
 def _windows_enumerate_interfaces():
     ipconfig_entries = _windows_enumerate_interfaces_ipconfig()
     ps_entries = _windows_enumerate_interfaces_powershell()
-    if ps_entries:
-        by_name = {e.get("name"): e for e in ps_entries if e.get("name")}
-        for entry in ipconfig_entries:
-            name = entry.get("name")
-            if not name:
-                continue
-            prev = by_name.get(name)
-            if not prev:
-                by_name[name] = entry
-                continue
-            if entry.get("gateway_iface") and not prev.get("gateway_iface"):
-                by_name[name] = {**prev, **entry, "gateway_iface": True}
-            elif entry.get("up") and not prev.get("up"):
-                by_name[name] = {**prev, **entry}
-        return [by_name[k] for k in sorted(by_name)]
-    return ipconfig_entries
+    return _windows_merge_interface_entries(ps_entries, ipconfig_entries)
 
 
 def _darwin_is_vpn_iface(name):
@@ -788,21 +815,30 @@ def _desktop_iface_auto_priority(entry):
     return 50
 
 
-def _desktop_lan_ip_from_name(ifname):
+def _desktop_lan_ip_from_name(ifname, ip_hint=None):
+    if ip_hint:
+        for entry in _desktop_enumerate_interfaces():
+            if entry.get("ip") == ip_hint:
+                return ip_hint
     for entry in _desktop_enumerate_interfaces():
         if entry.get("name") != ifname:
             continue
         if entry.get("up") and entry.get("ip") not in (None, "disconnected"):
             ip = str(entry.get("ip") or "")
+            if ip_hint and ip != ip_hint:
+                continue
             if not ip.startswith("169.254."):
                 return ip
-    return None
+    return ip_hint or None
 
 
 def _desktop_lan_ip():
     pref = get_lan_interface_preference()
     if pref:
-        return _desktop_lan_ip_from_name(pref)
+        name, ip = parse_lan_interface_value(pref)
+        if ip:
+            return ip
+        return _desktop_lan_ip_from_name(name or pref, ip)
 
     best_ip = None
     best_score = -1
@@ -887,19 +923,25 @@ def enumerate_lan_interfaces():
 
 
 def _filter_interfaces_for_lan(entries):
-    """Restrict LAN beacon/chat to the user-selected interface when set."""
+    """Restrict LAN beacon/chat to the user-selected NIC/IPv4 when set."""
     pref = get_lan_interface_preference()
     if not pref:
         return entries
-    for entry in entries:
-        if entry.get("name") == pref:
-            return [entry]
+    name, ip = parse_lan_interface_value(pref)
+    if ip:
+        for entry in entries:
+            if entry.get("ip") == ip:
+                return [entry]
+    if name:
+        matching = [e for e in entries if e.get("name") == name]
+        if matching:
+            return matching
     return [{
-        "name": pref,
-        "ip": "disconnected",
-        "broadcast": None,
-        "subnet_broadcast": None,
-        "up": False,
+        "name": name or pref,
+        "ip": ip or "disconnected",
+        "broadcast": _host_ipv4_broadcast(ip) if ip else None,
+        "subnet_broadcast": _host_ipv4_broadcast(ip) if ip else None,
+        "up": bool(ip),
     }]
 
 
@@ -1020,6 +1062,7 @@ def desktop_lan_status():
     """Single-pass LAN status for API handlers (reuses cached interface list)."""
     entries = _desktop_enumerate_interfaces()
     pref = get_lan_interface_preference()
+    pref_name, pref_ip = parse_lan_interface_value(pref or "")
     physical = False
     connected = False
     best_ip = None
@@ -1035,8 +1078,14 @@ def desktop_lan_status():
         if not ip or ip == "disconnected" or str(ip).startswith("169.254."):
             continue
         physical = True
-        if pref and entry.get("name") != pref:
-            continue
+        if pref:
+            entry_name = entry.get("name")
+            entry_ip = str(ip)
+            if pref_ip:
+                if entry_ip != pref_ip:
+                    continue
+            elif pref_name and entry_name != pref_name:
+                continue
         connected = True
         score = _desktop_iface_auto_priority(entry)
         if score > best_score:

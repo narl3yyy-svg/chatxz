@@ -75,6 +75,29 @@ class LinuxInterfaceHelpers(unittest.TestCase):
                 self.assertTrue(plat.physical_lan_reachable())
 
 
+class LanInterfaceValueParsing(unittest.TestCase):
+    def test_parse_name_ip_pair(self):
+        name, ip = plat.parse_lan_interface_value("Ethernet 2|10.0.47.37")
+        self.assertEqual(name, "Ethernet 2")
+        self.assertEqual(ip, "10.0.47.37")
+
+    def test_parse_bare_ip(self):
+        name, ip = plat.parse_lan_interface_value("192.168.1.5")
+        self.assertEqual(name, "")
+        self.assertEqual(ip, "192.168.1.5")
+
+    def test_parse_bare_nic_name(self):
+        name, ip = plat.parse_lan_interface_value("wg0")
+        self.assertEqual(name, "wg0")
+        self.assertEqual(ip, "")
+
+    def test_format_lan_interface_value(self):
+        self.assertEqual(
+            plat.format_lan_interface_value("Ethernet", "10.0.0.1"),
+            "Ethernet|10.0.0.1",
+        )
+
+
 class WindowsInterfaceHelpers(unittest.TestCase):
     def test_windows_enumerate_parses_ipconfig(self):
         ipconfig = (
@@ -141,6 +164,57 @@ class WindowsInterfaceHelpers(unittest.TestCase):
         with patch.object(plat, "get_lan_interface_preference", return_value=None):
             with patch.object(plat, "_desktop_enumerate_interfaces", return_value=entries):
                 self.assertEqual(plat._desktop_lan_ip(), "10.0.47.37")
+
+    def test_windows_merge_keeps_all_ipv4_on_same_adapter(self):
+        ipconfig = (
+            "Ethernet adapter Ethernet 2:\r\n"
+            "\r\n"
+            "   IPv4 Address. . . . . . . . . . . : 10.0.47.37\r\n"
+            "   IPv4 Address. . . . . . . . . . . : 192.168.1.37\r\n"
+        )
+        ps_entries = [
+            {"name": "Ethernet 2", "ip": "10.0.47.37", "up": True, "gateway_iface": True},
+            {"name": "Ethernet 2", "ip": "192.168.1.37", "up": True, "gateway_iface": False},
+        ]
+
+        def fake_run(cmd, *args, **kwargs):
+            result = type("R", (), {"stdout": "", "returncode": 0})()
+            if cmd and cmd[0] == "ipconfig":
+                result.stdout = ipconfig
+            return result
+
+        with patch.object(plat.subprocess, "run", side_effect=fake_run):
+            with patch.object(plat, "_windows_enumerate_interfaces_powershell", return_value=ps_entries):
+                entries = plat._windows_enumerate_interfaces()
+        ips = sorted(e["ip"] for e in entries)
+        self.assertEqual(ips, ["10.0.47.37", "192.168.1.37"])
+
+    def test_pinned_ipv4_resolution(self):
+        plat.set_lan_interface_preference("Ethernet 2|192.168.1.37")
+        try:
+            entries = [
+                {
+                    "name": "Ethernet 2",
+                    "kind": "ethernet",
+                    "ip": "10.0.47.37",
+                    "up": True,
+                    "gateway_iface": True,
+                },
+                {
+                    "name": "Ethernet 2",
+                    "kind": "ethernet",
+                    "ip": "192.168.1.37",
+                    "up": True,
+                    "gateway_iface": False,
+                },
+            ]
+            with patch.object(plat, "_desktop_enumerate_interfaces", return_value=entries):
+                self.assertEqual(plat._desktop_lan_ip(), "192.168.1.37")
+                filtered = plat._filter_interfaces_for_lan(entries)
+                self.assertEqual(len(filtered), 1)
+                self.assertEqual(filtered[0]["ip"], "192.168.1.37")
+        finally:
+            plat.set_lan_interface_preference(None)
 
     def test_physical_lan_true_on_windows_entries(self):
         entries = [

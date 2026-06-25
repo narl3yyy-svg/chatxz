@@ -1,4 +1,4 @@
 """App version — keep in sync with version.properties via scripts/bump-version.sh."""
 
-__version__ = "0.3.113"
-__version_code__ = 113
+__version__ = "0.3.114"
+__version_code__ = 114

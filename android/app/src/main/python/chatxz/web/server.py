@@ -85,6 +85,7 @@ from chatxz.utils.platform import (
     physical_lan_reachable,
     desktop_lan_status,
     invalidate_desktop_interface_cache,
+    parse_lan_interface_value,
     set_lan_interface_preference,
     android_storage_dirs,
     patch_embedded_signals,
@@ -567,43 +568,50 @@ class ChatWebServer:
         pinned = (settings.get("lan_interface") or "").strip()
         if not pinned:
             return None
+        name, ip = parse_lan_interface_value(pinned)
+        if ip:
+            return ip
         for entry in enumerate_lan_interfaces():
-            if entry.get("name") == pinned:
-                ip = entry.get("ip")
-                if ip and ip != "disconnected":
-                    return ip
+            if entry.get("name") == (name or pinned):
+                entry_ip = entry.get("ip")
+                if entry_ip and entry_ip != "disconnected":
+                    return entry_ip
         return detect_lan_ip()
 
     def _interfaces_for_picker(self, refresh=False):
-        """All local NICs for setup/settings dropdowns (unfiltered)."""
+        """All local NICs/IPv4 addresses for setup/settings dropdowns (unfiltered)."""
         if refresh:
             invalidate_desktop_interface_cache()
-        by_name = {}
+        seen = set()
+        entries = []
         for entry in enumerate_lan_interfaces():
             name = entry.get("name")
-            if name:
-                by_name[name] = entry
-        for entry in list_network_interfaces():
-            name = entry.get("name")
-            if name and name not in by_name:
-                by_name[name] = entry
+            ip = entry.get("ip") or "disconnected"
+            if not name:
+                continue
+            key = (name, ip)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(entry)
         if is_android():
             ip = detect_lan_ip()
-            if ip and "active" not in by_name:
+            if ip and not any(e.get("ip") == ip for e in entries):
                 parts = ip.split(".")
                 subnet = (
                     f"{parts[0]}.{parts[1]}.{parts[2]}.255"
                     if len(parts) == 4 else None
                 )
-                by_name["active"] = {
+                entries.append({
                     "name": "active",
                     "kind": "wifi",
                     "ip": ip,
                     "broadcast": subnet,
                     "subnet_broadcast": subnet,
                     "up": True,
-                }
-        return [by_name[k] for k in sorted(by_name)]
+                })
+        entries.sort(key=lambda e: (e.get("name") or "", e.get("ip") or ""))
+        return entries
 
     def _scoped_peers(self):
         if not self.discovery:
@@ -2760,7 +2768,7 @@ class ChatWebServer:
                         and self.lan_beacon
                     ):
                         beacon_sent = await asyncio.to_thread(
-                            self.lan_beacon.send, 3, True
+                            self.lan_beacon.send, 1, is_android()
                         )
                     elif configured_serial_enabled(configured) and lan_discovery_configured(configured):
                         print("[network] RNS announce on serial + LAN paths")
@@ -3003,20 +3011,21 @@ class ChatWebServer:
                     pass
             if "hub_server_hash" in data:
                 settings["hub_server_hash"] = (data.get("hub_server_hash") or "").strip()
+            config_dirty = False
             if "lan_transport" in data:
                 preset = (data.get("lan_transport") or "").strip()
                 if preset in ("udp_lan", "tcp_lan"):
                     settings["rns_interfaces"] = set_primary_lan_transport(
                         settings.get("rns_interfaces"), preset
                     )
-                    self._write_rns_config(settings)
+                    config_dirty = True
             if "lan_interface" in data:
                 settings["lan_interface"] = (data.get("lan_interface") or "").strip()
                 set_lan_interface_preference(settings["lan_interface"])
-                self._write_rns_config(settings)
+                config_dirty = True
             if "auto_interface_enabled" in data:
                 settings["auto_interface_enabled"] = bool(data["auto_interface_enabled"])
-                self._write_rns_config(settings)
+                config_dirty = True
             if "auto_announce" in data:
                 settings["auto_announce"] = bool(data["auto_announce"])
             if "setup_complete" in data:
@@ -3031,8 +3040,9 @@ class ChatWebServer:
                 )
             settings = self._apply_hub_settings(settings)
             self.save_settings(settings)
-            if hub_changed:
+            if config_dirty or hub_changed:
                 self._write_rns_config(settings)
+            if hub_changed:
                 await asyncio.to_thread(self._apply_hub_runtime, settings)
             if "auto_announce" in data:
                 self._apply_auto_announce_settings(settings)

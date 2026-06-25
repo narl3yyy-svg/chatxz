@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.113
+**Current version:** 0.3.114
 
 ## Download
 
@@ -11,7 +11,7 @@ Pre-built binaries are on **[GitHub Releases](https://github.com/narl3yyy-svg/ch
 | Platform | File | Install |
 |----------|------|---------|
 | **Windows 11** | `chatxz-X.Y.Z-windows-portable.zip` | Unzip → double-click `chatxz.exe` |
-| **macOS** | `chatxz-X.Y.Z-macos.zip` | Unzip → open `chatxz.app` |
+| **macOS** | `chatxz-X.Y.Z-macos.zip` *(optional)* | Unzip → open `chatxz.app`, **or** clone repo and `./run.sh web --share` (same as Linux) |
 | **Android** | `chatxz-X.Y.Z.apk` | Sideload (arm64) |
 | **Linux / macOS (source)** | Git clone | `./run.sh web --share` |
 
@@ -153,6 +153,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.114** — Windows: setup wizard **Get started** no longer hangs (single config write, lighter announce); IPv4 picker lists **every address** on each adapter (custom aliases included), stored as `NIC|ip`; faster first-run interface scan
 - **v0.3.113** — Mac/Windows: auto-repair duplicate UDP LAN interfaces on startup (`Address already in use` / errno 48); beacon broadcasts scoped to pinned/default NIC (fixes multi-subnet spam freeze); UI error banner + **Repair interfaces** button; block adding duplicate UDP/TCP LAN presets
 - **v0.3.112** — Windows crash fix: dedupe duplicate UDP LAN interfaces (two on port 4242 killed RNS after ~12s); RNS init errors no longer `sys.exit` the whole server; Windows stale `chatxz.exe` cleanup via `netstat`/`taskkill`; safer Windows restart (spawn new process instead of `execv`)
 - **v0.3.111** — macOS/Linux source: `run.sh` uses `python3 -m pip` (fixes `pip: command not found` on Mac when running `./run.sh web --share`)

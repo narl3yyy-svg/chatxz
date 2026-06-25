@@ -1045,10 +1045,11 @@ body.sidebar-open #sidebar-backdrop { display: block; }
       <input id="setup-name" placeholder="e.g. arch, ubuntu, phone..." maxlength="50" autocomplete="name">
     </div>
     <div class="setup-step">
-      <label for="setup-lan-interface">Network interface for LAN chat</label>
+      <label for="setup-lan-interface">IPv4 address for LAN chat</label>
       <select id="setup-lan-interface">
         <option value="">Auto (Ethernet/Wi-Fi before VPN)</option>
       </select>
+      <p class="field-hint">Each IPv4 on your PC is listed separately — pick the address peers should reach you on.</p>
     </div>
     <div class="setup-step">
       <label for="setup-retention">Chat history retention</label>
@@ -1209,19 +1210,19 @@ body.sidebar-open #sidebar-backdrop { display: block; }
         </div>
         <div class="settings-card" id="network-settings-card">
           <h4>📡 Network</h4>
-          <p class="field-hint" style="margin-bottom:12px">Pick which network card to use for discovery, then how chat connects over that network.</p>
+          <p class="field-hint" style="margin-bottom:12px">Pick which IPv4 address to use for discovery, then how chat connects over that network.</p>
 
-          <div class="settings-subhead">1. Your network card</div>
+          <div class="settings-subhead">1. Your IPv4 address</div>
           <div class="settings-section">
-            <label>Network interface</label>
+            <label>IPv4 address</label>
             <div class="field-row">
               <select id="settings-lan-interface" onchange="saveLanInterface()">
                 <option value="">Auto — prefer Wi-Fi / Ethernet over VPN</option>
               </select>
-              <button type="button" class="btn-block" onclick="refreshLanInterfaces(true)" style="width:auto;white-space:nowrap;padding:0 12px;height:40px" title="Rescan network cards">↻</button>
+              <button type="button" class="btn-block" onclick="refreshLanInterfaces(true)" style="width:auto;white-space:nowrap;padding:0 12px;height:40px" title="Rescan IPv4 addresses">↻</button>
             </div>
             <div id="lan-interface-summary" class="field-hint" style="margin-top:8px"></div>
-            <p class="field-hint">Choose <strong>Auto</strong> on most PCs. Pin a VPN adapter only when you want peers on that tunnel.</p>
+            <p class="field-hint">Each IPv4 on your PC is listed separately. Choose <strong>Auto</strong> on most PCs, or pin a specific address (including VPN/custom aliases).</p>
           </div>
 
           <div class="settings-subhead">2. Chat transport</div>
@@ -1756,6 +1757,12 @@ function completeSetupWizard() {
     document.getElementById('setup-name')?.focus();
     return;
   }
+  const btn = document.querySelector('#setup-wizard .btn-block.primary');
+  if (btn?.disabled) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+  }
   const lan_interface = document.getElementById('setup-lan-interface')?.value || '';
   const auto_announce = !!document.getElementById('setup-auto-announce')?.checked;
   const history_retention = document.getElementById('setup-retention')?.value || 'never';
@@ -1782,11 +1789,16 @@ function completeSetupWizard() {
     window._hubRole = d.settings?.hub_role || 'off';
     updateHubUi();
     document.getElementById('setup-wizard')?.classList.remove('open');
-    toast('Setup complete — discovering peers…');
-    announceSelf();
-    setTimeout(announceSelf, 1500);
-    if (appPlatform === 'android') setTimeout(announceSelf, 4500);
-  }).catch(() => toast('Setup failed'));
+    toast('Setup complete');
+    if (auto_announce) announceSelf();
+    else toast('Tap 📡 Announce when ready to discover peers');
+  }).catch(() => toast('Setup failed'))
+  .finally(() => {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Get started';
+    }
+  });
 }
 
 function saveAutoAnnounce() {
@@ -3194,9 +3206,54 @@ function saveNetworkAutoReset() {
   }).catch(() => {});
 }
 
+function lanInterfaceOptionValue(iface) {
+  const name = iface?.name || 'iface';
+  const ip = iface?.ip && iface.ip !== 'disconnected' ? iface.ip : '';
+  return ip ? `${name}|${ip}` : name;
+}
+
+function lanInterfaceMatchesPinned(iface, pinned) {
+  if (!pinned || !iface) return false;
+  const value = lanInterfaceOptionValue(iface);
+  if (value === pinned) return true;
+  const sep = pinned.indexOf('|');
+  const name = sep >= 0 ? pinned.slice(0, sep) : pinned;
+  const ip = sep >= 0 ? pinned.slice(sep + 1) : '';
+  if (ip && iface.ip === ip) return true;
+  if (!ip && iface.name === name) return true;
+  return false;
+}
+
+function formatLanInterfacePinned(pinned) {
+  if (!pinned) return 'auto';
+  const sep = pinned.indexOf('|');
+  if (sep >= 0) {
+    const name = pinned.slice(0, sep);
+    const ip = pinned.slice(sep + 1);
+    return ip ? `${name} — ${ip} (pinned)` : `${pinned} (pinned)`;
+  }
+  return `${pinned} (pinned)`;
+}
+
+function selectLanInterfaceValue(sel, interfaces, selected) {
+  if (!sel) return;
+  sel.innerHTML = lanInterfaceSelectHtml(interfaces);
+  if (!selected) {
+    sel.value = '';
+    return;
+  }
+  const match = (interfaces || []).find(i => lanInterfaceMatchesPinned(i, selected));
+  sel.value = match ? lanInterfaceOptionValue(match) : selected;
+}
+
 function lanInterfaceSelectHtml(interfaces) {
   let html = '<option value="">Auto — prefer Wi-Fi / Ethernet over VPN</option>';
-  (interfaces || []).forEach(iface => {
+  const items = (interfaces || []).filter(i => i?.name);
+  if (!items.length) {
+    html += '<option value="" disabled>(no IPv4 found — click ↻ to rescan)</option>';
+    return html;
+  }
+  items.forEach(iface => {
     const name = iface.name || 'iface';
     const ip = iface.ip && iface.ip !== 'disconnected' ? iface.ip : 'no IP';
     const mark = iface.up ? 'up' : 'down';
@@ -3204,7 +3261,8 @@ function lanInterfaceSelectHtml(interfaces) {
       ? ` · ${iface.kind === 'vpn' ? 'VPN' : iface.kind}`
       : '';
     const gw = iface.gateway_iface ? ' · default route' : '';
-    html += `<option value="${escapeHtml(name)}">${escapeHtml(name)} — ${escapeHtml(ip)} (${mark}${kind}${gw})</option>`;
+    const value = lanInterfaceOptionValue(iface);
+    html += `<option value="${escapeHtml(value)}">${escapeHtml(name)} — ${escapeHtml(ip)} (${mark}${kind}${gw})</option>`;
   });
   return html;
 }
@@ -3228,16 +3286,14 @@ function populateLanInterfaceSelect(interfaces, selected) {
   const sel = document.getElementById('settings-lan-interface');
   if (!sel) return;
   const pinned = selected !== undefined ? selected : sel.value;
-  sel.innerHTML = lanInterfaceSelectHtml(interfaces);
-  sel.value = pinned || '';
+  selectLanInterfaceValue(sel, interfaces, pinned || '');
   renderLanInterfaceSummary(interfaces);
 }
 
 function populateSetupLanSelect(interfaces, selected) {
   const sel = document.getElementById('setup-lan-interface');
   if (!sel) return;
-  sel.innerHTML = lanInterfaceSelectHtml(interfaces);
-  if (selected) sel.value = selected;
+  selectLanInterfaceValue(sel, interfaces, selected || '');
 }
 
 function saveLanInterface() {
@@ -3305,9 +3361,9 @@ function refreshNetworkStatus(silent) {
         populateLanInterfaceSelect(d.available_interfaces, d.lan_interface || '');
       }
       if (d.lan_interface) {
-        html += row('LAN interface', d.lan_interface + ' (pinned)', !!d.lan_connected);
+        html += row('LAN IPv4', formatLanInterfacePinned(d.lan_interface), !!d.lan_connected);
       } else {
-        html += row('LAN interface', 'auto', true);
+        html += row('LAN IPv4', 'auto', true);
       }
       const lanDiscovery = d.lan_discovery_configured !== false;
       const serialOnly = !!d.serial_only_mode;
@@ -3393,7 +3449,7 @@ function refreshNetworkStatus(silent) {
       if (Array.isArray(allIfaces) && allIfaces.length) {
         html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Interfaces</div>';
         allIfaces.forEach(iface => {
-          const pinned = d.lan_interface && iface.name === d.lan_interface;
+          const pinned = d.lan_interface && lanInterfaceMatchesPinned(iface, d.lan_interface);
           const active = !d.lan_interface || pinned;
           const kind = iface.kind && iface.kind !== 'other' ? ` · ${iface.kind}` : '';
           const label = pinned ? ' (pinned for LAN)' : (active ? '' : ' (not used for LAN)');
@@ -3435,19 +3491,18 @@ function toggleSettings() {
     panel.classList.add('open');
     btn?.classList.add('active');
     refreshNetworkStatus();
-    refreshLanInterfaces(false);
     startNetworkAutoRefresh();
     loadRnsInterfaces();
-    fetch('/api/settings')
-      .then(r => r.json())
-      .then(s => {
+    Promise.all([
+      fetch('/api/settings').then(r => r.json()),
+      refreshLanInterfaces(false),
+    ]).then(([s, ifaces]) => {
         document.getElementById('settings-name').value = s.name || '';
         document.getElementById('settings-retention').value = s.history_retention || 'never';
         document.getElementById('settings-received-dir').value = s.received_dir || '';
         const autoReset = document.getElementById('settings-network-auto-reset');
         if (autoReset) autoReset.checked = s.network_stats_auto_reset !== false;
-        const lanSel = document.getElementById('settings-lan-interface');
-        if (lanSel && s.lan_interface) lanSel.value = s.lan_interface;
+        populateLanInterfaceSelect(ifaces, s.lan_interface || '');
         window._hubRole = s.hub_role || 'off';
         const hubRole = document.getElementById('settings-hub-role');
         if (hubRole) hubRole.value = window._hubRole;
