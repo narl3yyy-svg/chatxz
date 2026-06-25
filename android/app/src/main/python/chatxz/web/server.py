@@ -682,6 +682,25 @@ class ChatWebServer:
             return []
         return self.discovery.get_peers(scope_ip=self._discovery_scope_ip())
 
+    def _peer_endpoint_for_transfer(self, peer_hash):
+        from chatxz.core.discovery import normalize_hash
+
+        target = normalize_hash(peer_hash or "")
+        if not target:
+            return None
+        for peer in self._scoped_peers():
+            ph = normalize_hash(peer.get("hash") or "")
+            ih = normalize_hash(peer.get("identity_hash") or "")
+            if target in (ph, ih):
+                ip = (peer.get("ip") or "").strip()
+                if ip:
+                    return ip, int(peer.get("port") or self.port)
+        for contact in list_contacts(self.config_dir):
+            ph = normalize_hash(contact.get("hash") or "")
+            if ph == target and contact.get("ip"):
+                return str(contact["ip"]).strip(), int(contact.get("port") or self.port)
+        return None
+
     def _resolve_incoming_peer(self, ident_hex=None, computed_dest=None, fallback=None, link=None):
         from chatxz.core.discovery import normalize_hash
 
@@ -1226,6 +1245,8 @@ class ChatWebServer:
             from chatxz.utils.rns_frozen import ensure_rns_interfaces
             ensure_rns_interfaces()
         def _start_reticulum():
+            from chatxz.core.rns_tuning import apply_chatxz_rns_tuning
+            apply_chatxz_rns_tuning()
             return RNS.Reticulum(self.config_dir, loglevel=loglevel)
 
         try:
@@ -1293,6 +1314,9 @@ class ChatWebServer:
             auto_announce=auto_announce,
             receive_dir=received_dir,
             peer_resolver=self._resolve_incoming_peer,
+            http_port=self.port,
+            lan_transfer_enabled=(self.host in ("0.0.0.0", "::")),
+            peer_endpoint_resolver=self._peer_endpoint_for_transfer,
         )
         self.voice_recorder = VoiceRecorder(self.config_dir)
         dest = self.messaging.start()
@@ -2823,6 +2847,56 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
+    async def handle_lan_transfer(self, request):
+        from chatxz.core.lan_transfer import peek_offer, pop_offer, set_offer_progress
+
+        transfer_id = request.match_info.get("transfer_id", "")
+        token = request.query.get("token", "")
+        offer = peek_offer(transfer_id, token)
+        if not offer:
+            return web.Response(status=404, text="offer not found")
+        path = offer.get("path")
+        if not path or not os.path.isfile(path):
+            pop_offer(transfer_id, token)
+            return web.Response(status=404, text="file missing")
+
+        total = os.path.getsize(path)
+        range_hdr = request.headers.get("Range", "")
+        start = 0
+        if range_hdr.startswith("bytes="):
+            part = range_hdr.split("=", 1)[1].split("-", 1)[0]
+            try:
+                start = max(0, int(part))
+            except ValueError:
+                start = 0
+
+        resp = web.StreamResponse(status=206 if start else 200)
+        resp.headers["Content-Type"] = "application/octet-stream"
+        resp.headers["Accept-Ranges"] = "bytes"
+        resp.headers["Content-Length"] = str(max(0, total - start))
+        if start:
+            resp.headers["Content-Range"] = f"bytes {start}-{total - 1}/{total}"
+        await resp.prepare(request)
+
+        sent = start
+        try:
+            with open(path, "rb") as src:
+                if start:
+                    src.seek(start)
+                while True:
+                    chunk = src.read(256 * 1024)
+                    if not chunk:
+                        break
+                    await resp.write(chunk)
+                    sent += len(chunk)
+                    set_offer_progress(transfer_id, sent)
+        except Exception:
+            pop_offer(transfer_id, token)
+            raise
+        await resp.write_eof()
+        pop_offer(transfer_id, token)
+        return resp
+
     ANNOUNCE_DEBOUNCE_SEC = 0.4
 
     async def _perform_announce(self):
@@ -3503,7 +3577,8 @@ class ChatWebServer:
                 target_peer=queue_target,
             )
             if result:
-                return web.json_response({"status": "ok", "name": fname, "size": size, "method": "resource"})
+                method = "lan_http" if size >= 2 * 1024 * 1024 and self.host in ("0.0.0.0", "::") else "resource"
+                return web.json_response({"status": "ok", "name": fname, "size": size, "method": method})
             return web.json_response({"error": "send failed"}, status=400)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -4306,6 +4381,7 @@ class ChatWebServer:
         app.router.add_post("/api/serial-ports/permission", self.handle_serial_usb_permission)
         app.router.add_post("/api/announce", self.handle_announce)
         app.router.add_post("/api/path_wake", self.handle_path_wake)
+        app.router.add_get("/api/lan-transfer/{transfer_id}", self.handle_lan_transfer)
         app.router.add_get("/api/network-status", self.handle_network_status)
         app.router.add_get("/api/network", self.handle_network)
         app.router.add_get("/api/interfaces", self.handle_interfaces_get)

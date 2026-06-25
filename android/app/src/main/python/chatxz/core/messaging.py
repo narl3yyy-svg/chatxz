@@ -32,7 +32,8 @@ from chatxz.core.lan_rns import (
     wait_for_peer_path,
     wait_for_peer_path_families,
 )
-from chatxz.utils.platform import is_android, physical_lan_reachable
+from chatxz.utils.platform import is_android, lan_ip, physical_lan_reachable
+from chatxz.core.lan_transfer import register_offer, remove_offer
 from chatxz.core.rns_interfaces import (
     configured_serial_enabled,
     configured_tcp_lan_enabled,
@@ -95,6 +96,9 @@ MESSAGE_TYPE_VOICE = "voice"
 MESSAGE_TYPE_VIDEO = "video"
 MESSAGE_TYPE_EMOJI = "emoji"
 MESSAGE_TYPE_LONGTEXT = "longtext"
+MESSAGE_TYPE_LAN_HTTP = "__lan_http_offer"
+LAN_HTTP_MIN_BYTES = 2 * 1024 * 1024
+LAN_HTTP_CHUNK = 256 * 1024
 HUB_GROUP_PEER = "__hub_group__"
 
 
@@ -156,7 +160,9 @@ class MessagingBackend:
     def __init__(self, identity, config_dir, on_message=None, on_file=None,
                  on_progress=None, on_link_established=None, on_link_closed=None,
                  display_name="", auto_announce=False,
-                 receive_dir=None, peer_resolver=None, on_queue_sent=None):
+                 receive_dir=None, peer_resolver=None, on_queue_sent=None,
+                 http_port=8742, lan_transfer_enabled=False,
+                 peer_endpoint_resolver=None):
         self.identity = identity
         self.config_dir = config_dir
         self.receive_dir = receive_dir or os.path.join(config_dir, "received")
@@ -197,6 +203,9 @@ class MessagingBackend:
         self.dest_to_identity = {}
         self._send_link = None
         self.peer_resolver = peer_resolver
+        self.http_port = int(http_port or 8742)
+        self.lan_transfer_enabled = bool(lan_transfer_enabled)
+        self.peer_endpoint_resolver = peer_endpoint_resolver
         self._link_peer_hashes = {}
         self._link_handoff = False
         self._last_handoff = False
@@ -2631,8 +2640,36 @@ class MessagingBackend:
             return True
         return callback
 
+    def _optimise_link_mtu(self, link):
+        try:
+            iface = self._link_attached_interface(link)
+            hw_mtu = getattr(iface, "HW_MTU", None) if iface else None
+            current = int(getattr(link, "mtu", 500) or 500)
+            if hw_mtu and current < hw_mtu:
+                link.mtu = int(hw_mtu)
+                link.update_mdu()
+                print(
+                    f"[messaging] Link MTU upgraded {current} -> {link.mtu} "
+                    f"({type(iface).__name__ if iface else 'iface'})"
+                )
+        except Exception as exc:
+            print(f"[messaging] Link MTU upgrade skipped: {exc}")
+
+    def _peer_endpoint(self, peer_hash):
+        if self.peer_endpoint_resolver:
+            try:
+                endpoint = self.peer_endpoint_resolver(peer_hash)
+                if endpoint:
+                    ip, port = endpoint[0], endpoint[1] if len(endpoint) > 1 else self.http_port
+                    if ip:
+                        return str(ip).strip(), int(port or self.http_port)
+            except Exception:
+                pass
+        return None, self.http_port
+
     def _setup_link(self, link):
         self.links[link.link_id] = link
+        self._optimise_link_mtu(link)
         link.set_link_closed_callback(self._link_closed(link))
         link.set_packet_callback(self._packet_callback(link))
         try:
@@ -2849,6 +2886,10 @@ class MessagingBackend:
                         print(f"[receipt] Read receipt for msg {msg_id[:8]} from {remote_hash[:16]}")
                     except Exception as e:
                         print(f"[receipt] Read receipt error: {e}")
+                    return
+
+                if chat_msg.msg_type == MESSAGE_TYPE_LAN_HTTP:
+                    self._handle_lan_http_offer(chat_msg, remote_hash)
                     return
 
                 chat_msg.sender = remote_hash
@@ -3727,6 +3768,138 @@ class MessagingBackend:
             time.sleep(0.15)
         return True
 
+    def _watch_lan_http_send(self, transfer_id, fname, fsize):
+        from chatxz.core.lan_transfer import get_offer_state
+
+        deadline = time.time() + max(7200, fsize / (200 * 1024))
+        while time.time() < deadline:
+            if transfer_id in self._cancelled_transfers:
+                remove_offer(transfer_id)
+                self._emit_progress(fname, 0, fsize, status="cancelled", direction="send", transfer_id=transfer_id)
+                if self._current_transfer_id == transfer_id:
+                    self._current_transfer_id = None
+                return
+            offer = get_offer_state(transfer_id)
+            if offer is None:
+                self._emit_progress(fname, 100, fsize, status="complete", direction="send", transfer_id=transfer_id)
+                if self._current_transfer_id == transfer_id:
+                    self._current_transfer_id = None
+                return
+            sent = int(offer.get("bytes_sent") or 0)
+            pct = int((sent / fsize) * 100) if fsize else 0
+            speed = self._calc_transfer_speed(transfer_id, sent)
+            self._emit_progress(fname, pct, fsize, speed=speed, direction="send", transfer_id=transfer_id)
+            time.sleep(0.2)
+
+    def _send_file_lan_http(self, file_path, msg_type, fname, fsize, transfer_id, link, peer, progress_callback):
+        peer_ip, _peer_port = self._peer_endpoint(peer)
+        host_ip = lan_ip()
+        if not peer_ip or not host_ip:
+            return None
+        token = register_offer(
+            transfer_id, file_path, peer,
+            host=host_ip, port=self.http_port,
+        )
+        offer = {
+            "transfer_id": transfer_id,
+            "token": token,
+            "host": host_ip,
+            "port": self.http_port,
+            "file_name": fname,
+            "file_size": fsize,
+            "msg_type": msg_type,
+        }
+        meta = ChatMessage(
+            MESSAGE_TYPE_LAN_HTTP,
+            json.dumps(offer),
+            file_name=fname,
+            file_size=fsize,
+            msg_id=transfer_id,
+        )
+        packet = RNS.Packet(link, meta.to_json().encode("utf-8"))
+        packet.send()
+        print(
+            f"[transfer] LAN HTTP offer {fname} ({fsize} bytes) "
+            f"http://{host_ip}:{self.http_port}/api/lan-transfer/{transfer_id}"
+        )
+        threading.Thread(
+            target=self._watch_lan_http_send,
+            args=(transfer_id, fname, fsize),
+            name=f"lan-http-send-{transfer_id[:8]}",
+            daemon=True,
+        ).start()
+        return meta
+
+    def _handle_lan_http_offer(self, chat_msg, remote_hash):
+        threading.Thread(
+            target=self._download_lan_http_offer,
+            args=(chat_msg, remote_hash),
+            name=f"lan-http-rx-{chat_msg.msg_id[:8]}",
+            daemon=True,
+        ).start()
+
+    def _download_lan_http_offer(self, chat_msg, remote_hash):
+        from chatxz.utils.helpers import safe_basename, safe_path_under
+
+        try:
+            offer = json.loads(chat_msg.content or "{}")
+        except Exception as exc:
+            print(f"[transfer] Invalid LAN HTTP offer: {exc}")
+            return
+        host = (offer.get("host") or "").strip()
+        port = int(offer.get("port") or self.http_port)
+        transfer_id = offer.get("transfer_id") or chat_msg.msg_id
+        token = offer.get("token") or ""
+        fname = safe_basename(offer.get("file_name") or chat_msg.file_name or f"file_{int(time.time())}")
+        fsize = int(offer.get("file_size") or chat_msg.file_size or 0)
+        if not host or not token:
+            print("[transfer] LAN HTTP offer missing host/token")
+            return
+        url = f"http://{host}:{port}/api/lan-transfer/{transfer_id}?token={token}"
+        os.makedirs(self.receive_dir, exist_ok=True)
+        save_path = safe_path_under(self.receive_dir, fname)
+        if not save_path:
+            print(f"[transfer] Rejected unsafe LAN HTTP filename: {fname!r}")
+            return
+        self._emit_progress(fname, 0, fsize, direction="receive", transfer_id=transfer_id, status="active")
+        received = 0
+        try:
+            req = urlrequest.Request(url, method="GET")
+            with urlrequest.urlopen(req, timeout=max(60, fsize // (512 * 1024))) as resp:
+                with open(save_path, "wb") as out:
+                    while True:
+                        chunk = resp.read(LAN_HTTP_CHUNK)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        received += len(chunk)
+                        pct = int((received / fsize) * 100) if fsize else 0
+                        speed = self._calc_transfer_speed(transfer_id, received)
+                        self._emit_progress(
+                            fname, pct, fsize, speed=speed,
+                            direction="receive", transfer_id=transfer_id,
+                        )
+            print(f"[transfer] LAN HTTP saved {fname} -> {save_path} ({received} bytes)")
+            self._emit_progress(fname, 100, fsize, direction="receive", transfer_id=transfer_id, status="complete")
+            if self.on_message:
+                done = ChatMessage(
+                    offer.get("msg_type", MESSAGE_TYPE_FILE),
+                    save_path,
+                    sender=remote_hash,
+                    file_name=fname,
+                    file_size=received or fsize,
+                    msg_id=transfer_id,
+                )
+                self.on_message(done, remote_hash)
+        except Exception as exc:
+            print(f"[transfer] LAN HTTP download failed: {exc}")
+            self._emit_progress(fname, 0, fsize, direction="receive", transfer_id=transfer_id, status="failed")
+            try:
+                if os.path.isfile(save_path) and os.path.getsize(save_path) == 0:
+                    os.remove(save_path)
+            except OSError:
+                pass
+
     def send_file(self, file_path, msg_type=MESSAGE_TYPE_FILE, progress_callback=None,
                   transfer_id=None, target_peer=None, link=None):
         peer = self.dest_hash_for(target_peer or self.active_peer_hash or "")
@@ -3751,6 +3924,19 @@ class MessagingBackend:
             cancel_ev = threading.Event()
             self._cancel_events[transfer_id] = cancel_ev
             try:
+                if (
+                    self.lan_transfer_enabled
+                    and fsize >= LAN_HTTP_MIN_BYTES
+                    and physical_lan_reachable()
+                    and not self._hub_transport_active()
+                ):
+                    lan_msg = self._send_file_lan_http(
+                        file_path, msg_type, fname, fsize, transfer_id, link, peer, progress_callback,
+                    )
+                    if lan_msg:
+                        self._sent_messages[chat_msg.msg_id] = chat_msg
+                        return chat_msg
+
                 packet = RNS.Packet(link, chat_msg.to_json().encode("utf-8"))
                 packet.send()
 

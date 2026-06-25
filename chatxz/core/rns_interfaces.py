@@ -1147,6 +1147,7 @@ def render_rns_config(
         "[reticulum]",
         f"enable_transport = {enable_transport}",
         "share_instance = No",
+        "link_mtu_discovery = Yes",
         "",
         "[logging]",
         "loglevel = 3" if not android else "loglevel = 4",

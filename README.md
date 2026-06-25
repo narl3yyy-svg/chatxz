@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.127
+**Current version:** 0.3.128
 
 ## Download
 
@@ -38,7 +38,9 @@ Open **http://127.0.0.1:8742**. Logs stay in that cmd window.
 
 **Select folder** (received files): opens Windows Explorer — pick a folder, then click **Save settings**.
 
-**Tip:** `--debug` is very slow on Windows; use it only when troubleshooting.
+**Tip:** `--debug` is very slow (especially large file transfers); use it only when troubleshooting.
+
+**Large files (same LAN):** with `--share`, files over 2 MB use a direct HTTP LAN transfer (much faster than RNS UDP segments). Both sides need v0.3.128+ and `run.bat web --share` / `./run.sh web --share`.
 
 | File | Purpose |
 |------|---------|
@@ -191,6 +193,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.128** — LAN file speed: HTTP fast path for files 2MB+ with `--share`; RNS link MTU raised to 1064 + `link_mtu_discovery` (fixes 500B links and 114 slow segments)
 - **v0.3.127** — macOS/Linux: `scripts/stop-chatxz.sh` + `lsof` port cleanup (fixes errno 48 / port 4242 in use); settings display name shows instantly after restart (no 5s wait)
 - **v0.3.126** — Windows: beacon broadcasts scoped to default-route NIC (fixes slowness on PCs with many virtual adapters); **v0.3.125** restart fix included
 - **v0.3.125** — Windows: fix **Restart server** 500 error (`UnboundLocalError` on `sys`); restart reloads network stack in-process without closing cmd
