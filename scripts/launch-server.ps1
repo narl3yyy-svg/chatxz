@@ -33,7 +33,7 @@ if (Test-Path $venvPy) {
 } elseif (Get-Command python -ErrorAction SilentlyContinue) {
     $python = (Get-Command python).Source
 } else {
-    Write-Host 'Python not found. Run: powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1'
+    Write-Host 'Python not found. Run:  run.cmd web --share'
     exit 1
 }
 

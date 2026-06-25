@@ -2,40 +2,45 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.115
+**Current version:** 0.3.116
 
 ## Download
 
-**Android APK** builds are on **[GitHub Releases](https://github.com/narl3yyy-svg/chatxz/releases)**. Windows, macOS, and Linux run from a **git clone** (same workflow everywhere).
+**Android APK** on **[GitHub Releases](https://github.com/narl3yyy-svg/chatxz/releases)**. Desktop (Windows, macOS, Linux): **clone the repo and run one command** — no separate web-server install step.
 
-| Platform | Install |
-|----------|---------|
+| Platform | Run |
+|----------|-----|
 | **Android** | `chatxz-X.Y.Z.apk` from Releases — sideload (arm64) |
-| **Windows** | `git clone` → `install-windows.ps1` → `.\run.ps1 web --share` |
-| **macOS** | `git clone` → `install-macos.sh` → `./run.sh web --share` |
-| **Linux** | `git clone` → `install-arch.sh` / `install-debian.sh` → `./run.sh web --share` |
+| **Windows (cmd)** | `git clone` → `run.cmd web --share` |
+| **Windows / macOS / Linux (bash)** | `git clone` → `./run.sh web --share` |
+
+First run auto-installs Python dependencies (`rns`, `aiohttp`) into a local `.venv` on Windows, or via `pip` on Linux/macOS.
 
 ---
 
-## Windows (from source)
+## Windows
 
-1. Install [Git for Windows](https://git-scm.com/download/win) and ensure **Python 3.10+** is on PATH ([python.org](https://www.python.org/downloads/windows/) — check **Add python.exe to PATH**), or let the installer use `winget`.
-2. Clone and install:
+**Prerequisite:** [Python 3.10+](https://www.python.org/downloads/windows/) on PATH (check **Add python.exe to PATH** during setup). [Git](https://git-scm.com/download/win) is optional (needed for `git clone` / `git pull`).
 
-```powershell
+```cmd
 git clone https://github.com/narl3yyy-svg/chatxz.git
 cd chatxz
-powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
-.\run.ps1 web --share
+run.cmd web --share
 ```
 
-Or double-click **`install-windows.cmd`** once, then run `.\run.ps1 web --share` from PowerShell in the repo folder.
+From **PowerShell** instead of cmd: `.\run.ps1 web --share` (same thing).
 
-3. Browser opens at **http://127.0.0.1:8742**. Allow Windows Firewall on **private** networks (UDP 4242, 8743; TCP 8742).
+From **Git Bash** (same script as Linux/Mac): `./run.sh web --share`
 
-**Data:** `%USERPROFILE%\.config\chatxz\` (same layout as Linux). For repo-local data like the old portable exe, set `CHATXZ_PORTABLE` to the repo folder before starting.
+No separate install step — first `run.cmd web --share` creates `.venv` and pulls deps automatically.
 
-**Update:** `git pull` then `.\run.ps1 web --share` (re-run `install-windows.ps1` only if dependencies changed).
+Browser: **http://127.0.0.1:8742**. Allow Windows Firewall on **private** networks (UDP 4242, 8743; TCP 8742).
+
+**Data:** `%USERPROFILE%\.config\chatxz\`. Old portable data: `$env:CHATXZ_PORTABLE = "C:\path\to\folder"` before starting.
+
+**Update:** `git pull` then `run.cmd web --share`
+
+**Optional:** `install-windows.cmd` — voice notes (`pyaudio`) only; not required for chat.
 
 ---
 
@@ -54,11 +59,12 @@ Reinstalling the app creates a **new identity** — update saved contacts after 
 ```bash
 git clone https://github.com/narl3yyy-svg/chatxz.git
 cd chatxz
-bash scripts/install-macos.sh
 ./run.sh web --share
 ```
 
 Open **http://localhost:8742**. Config in `~/.config/chatxz/`.
+
+**Optional:** `bash scripts/install-macos.sh` — system-wide setup or voice support.
 
 ---
 
@@ -67,10 +73,10 @@ Open **http://localhost:8742**. Config in `~/.config/chatxz/`.
 ```bash
 git clone https://github.com/narl3yyy-svg/chatxz.git
 cd chatxz
-bash scripts/install-arch.sh    # Arch
-# bash scripts/install-debian.sh  # Ubuntu / Debian
 ./run.sh web --share
 ```
+
+**Optional:** `bash scripts/install-arch.sh` (Arch) or `install-debian.sh` (Ubuntu/Debian) for system packages / voice / serial permissions.
 
 If `git pull` fails with local changes (e.g. `tests/test_platform_interfaces.py`), stash first:
 
@@ -132,9 +138,9 @@ Chat and file payloads never leave the RNS encrypted link. Port 8742 serves only
 ## Development
 
 ```bash
-./run.sh web --share --verbose   # RNS debug logs (Linux/macOS)
+./run.sh web --share --verbose   # RNS debug logs (Linux/macOS/Git Bash)
 ./run.sh web --share --debug     # Extreme RNS + chat trace
-.\run.ps1 web --share --verbose  # Windows
+run.cmd web --share --verbose    # Windows cmd
 ./scripts/bump-version.sh 0.3.52 # Bump version
 bash scripts/sync-android.sh     # Before Android builds
 ```
@@ -151,7 +157,8 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
-- **v0.3.115** — Windows/macOS desktop: **source-only** (`run.ps1` / `run.sh`); `scripts/install-windows.ps1` + `install-windows.cmd`; CI releases **Android APK only** (no Windows exe zip, no macOS zip)
+- **v0.3.116** — Windows: **`run.cmd web --share`** from cmd (no separate install); auto-setup `.venv` on first run; Git Bash can use `./run.sh` like Linux/Mac
+- **v0.3.115** — Windows/macOS desktop: **source-only** (`run.ps1` / `run.sh`); CI releases **Android APK only** (no Windows exe zip, no macOS zip)
 - **v0.3.114** — Windows: setup wizard **Get started** no longer hangs (single config write, lighter announce); IPv4 picker lists **every address** on each adapter (custom aliases included), stored as `NIC|ip`; faster first-run interface scan
 - **v0.3.113** — Mac/Windows: auto-repair duplicate UDP LAN interfaces on startup (`Address already in use` / errno 48); beacon broadcasts scoped to pinned/default NIC (fixes multi-subnet spam freeze); UI error banner + **Repair interfaces** button; block adding duplicate UDP/TCP LAN presets
 - **v0.3.112** — Windows crash fix: dedupe duplicate UDP LAN interfaces (two on port 4242 killed RNS after ~12s); RNS init errors no longer `sys.exit` the whole server; Windows stale `chatxz.exe` cleanup via `netstat`/`taskkill`; safer Windows restart (spawn new process instead of `execv`)

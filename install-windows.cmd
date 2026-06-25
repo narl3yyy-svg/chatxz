@@ -1,7 +1,5 @@
 @echo off
-REM First-time chatxz setup on Windows (same role as install.sh on Linux).
+REM Optional setup (voice extras). To run the server:  run.cmd web --share
+cd /d "%~dp0"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-windows.ps1" %*
-if errorlevel 1 exit /b 1
-echo.
-echo Start server:  run.ps1 web --share
-pause
+exit /b %ERRORLEVEL%
