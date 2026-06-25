@@ -45,6 +45,11 @@ launch_with_group() {
 main() {
     ensure_serial_groups
 
+    STOP_SCRIPT="$DIR/scripts/stop-chatxz.sh"
+    if [ -x "$STOP_SCRIPT" ]; then
+        bash "$STOP_SCRIPT" || true
+    fi
+
     for grp in dialout uucp; do
         if getent group "$grp" >/dev/null 2>&1 \
             && user_has_group "$grp" \

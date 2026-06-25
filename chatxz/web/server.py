@@ -261,6 +261,26 @@ def _port_holder_pids(port, udp=True):
         except (subprocess.TimeoutExpired, OSError):
             pass
         return list(dict.fromkeys(pids))
+    if sys.platform == "darwin" and shutil.which("lsof"):
+        try:
+            proto = f"UDP:{port}" if udp else f"TCP:{port}"
+            args = ["lsof", "-n", "-P", "-t", "-i", proto]
+            if not udp:
+                args = ["lsof", "-n", "-P", "-t", "-iTCP:%d" % port, "-sTCP:LISTEN"]
+            result = subprocess.run(
+                args,
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            for pid_str in (result.stdout or "").split():
+                try:
+                    pid = int(pid_str)
+                except ValueError:
+                    continue
+                if pid > 0:
+                    pids.append(pid)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return list(dict.fromkeys(pids))
     try:
         flag = "-u" if udp else "-t"
         result = subprocess.run(
@@ -1960,10 +1980,12 @@ class ChatWebServer:
         link_active = bool(self.messaging and self.messaging.active_link)
         connected = self.active_peer if link_active and self.active_peer else None
         linked_peers = self.messaging.linked_peers() if self.messaging else []
+        settings = self.load_settings()
         return web.json_response({
             "hash": connect,
             "connect_hash": connect,
             "identity_hash": identity_raw,
+            "name": settings.get("name", ""),
             "connected": connected,
             "linked_peers": linked_peers,
             "contacts": contacts,
@@ -4370,18 +4392,38 @@ class ChatWebServer:
 
         asyncio.run(_serve())
 
+    def _prepare_listen_ports(self):
+        """Stop stale chatxz instances before binding HTTP/RNS ports."""
+        if is_android():
+            return
+        http_holders = [
+            p for p in _port_holder_pids(self.port, udp=False)
+            if p != os.getpid()
+        ]
+        rns_holders = [
+            p for p in _port_holder_pids(4242, udp=True)
+            if p != os.getpid()
+        ]
+        if not (http_holders or rns_holders or self.force):
+            return
+        stop_stale_chatxz_servers(exclude_pid=os.getpid())
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            busy = any(
+                p != os.getpid()
+                for p in _port_holder_pids(self.port, udp=False)
+            ) or any(
+                p != os.getpid()
+                for p in _port_holder_pids(4242, udp=True)
+            )
+            if not busy:
+                break
+            time.sleep(0.25)
+
     def run(self):
         from aiohttp.web_runner import GracefulExit
 
-        if not is_android():
-            holders = _port_holder_pids(self.port, udp=False)
-            stale = [
-                p for p in holders
-                if p != os.getpid() and _is_chatxz_process(p)
-            ]
-            if stale or (self.force and holders):
-                stop_stale_chatxz_servers(exclude_pid=os.getpid())
-                time.sleep(0.4)
+        self._prepare_listen_ports()
 
         app = web.Application()
         self._register_routes(app)

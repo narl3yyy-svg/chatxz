@@ -1221,7 +1221,7 @@ body.sidebar-open #sidebar-backdrop { display: block; }
               <select id="settings-lan-interface" onchange="saveLanInterface()">
                 <option value="">Auto — prefer Wi-Fi / Ethernet over VPN</option>
               </select>
-              <button type="button" id="lan-refresh-btn" class="btn-block" onclick="refreshLanInterfaces(true, this)" style="width:auto;white-space:nowrap;padding:0 12px;height:40px" title="Rescan IPv4 addresses">↻</button>
+              <button type="button" id="lan-refresh-btn" class="btn-block" onclick="refreshLanInterfaces(true, this, true)" style="width:auto;white-space:nowrap;padding:0 12px;height:40px" title="Rescan IPv4 addresses">↻</button>
             </div>
             <div id="lan-interface-summary" class="field-hint" style="margin-top:8px"></div>
             <p class="field-hint">Each IPv4 on your PC is listed separately. Choose <strong>Auto</strong> on most PCs, or pin a specific address (including VPN/custom aliases).</p>
@@ -1638,6 +1638,7 @@ function init() {
   fetch('/api/settings').then(r => r.json()).then(s => {
     window._hubRole = s.hub_role || 'off';
     window._appSettings = s;
+    applySettingsToForm(s);
     updateHubUi();
     if (!s.setup_complete) openSetupWizard(s);
   }).catch(() => {});
@@ -1688,13 +1689,43 @@ function renderLanInterfaceSummary(interfaces) {
   el.innerHTML = lines.map(l => `<div>${escapeHtml(l)}</div>`).join('');
 }
 
-function refreshLanInterfaces(showToast, btn) {
+function applySettingsToForm(s, ifaces) {
+  if (!s) return;
+  const nameEl = document.getElementById('settings-name');
+  if (nameEl) nameEl.value = s.name || '';
+  const retentionEl = document.getElementById('settings-retention');
+  if (retentionEl) retentionEl.value = s.history_retention || 'never';
+  const receivedEl = document.getElementById('settings-received-dir');
+  if (receivedEl) receivedEl.value = s.received_dir || '';
+  const autoReset = document.getElementById('settings-network-auto-reset');
+  if (autoReset) autoReset.checked = s.network_stats_auto_reset !== false;
+  if (Array.isArray(ifaces)) {
+    populateLanInterfaceSelect(ifaces, s.lan_interface || '');
+    renderLanInterfaceSummary(ifaces);
+  }
+  window._hubRole = s.hub_role || 'off';
+  const hubRole = document.getElementById('settings-hub-role');
+  if (hubRole) hubRole.value = window._hubRole;
+  const hubHost = document.getElementById('settings-hub-host');
+  if (hubHost) hubHost.value = s.hub_host || '';
+  const hubPort = document.getElementById('settings-hub-port');
+  if (hubPort) hubPort.value = s.hub_port || 4242;
+  const autoIface = document.getElementById('settings-auto-interface');
+  if (autoIface) autoIface.checked = s.auto_interface_enabled !== false;
+  const autoAnn = document.getElementById('settings-auto-announce');
+  if (autoAnn) autoAnn.checked = !!s.auto_announce;
+  onHubRoleChange();
+  updateHubUi();
+}
+
+function refreshLanInterfaces(showToast, btn, forceRefresh) {
   const el = btn || document.getElementById('lan-refresh-btn');
   if (el) {
     el.classList.add('spinning');
     el.disabled = true;
   }
-  return fetch('/api/interfaces?refresh=1')
+  const qs = forceRefresh ? '?refresh=1' : '';
+  return fetch('/api/interfaces' + qs)
     .then(r => r.json())
     .then(d => {
       const ifaces = d.interfaces || [];
@@ -2056,6 +2087,11 @@ function fetchIdentity() {
   fetch('/api/identity')
     .then(r => r.json())
     .then(d => {
+      if (d.name) {
+        window._appSettings = Object.assign({}, window._appSettings || {}, {name: d.name});
+        const nameEl = document.getElementById('settings-name');
+        if (nameEl && !nameEl.value.trim()) nameEl.value = d.name;
+      }
       myHash = d.connect_hash || d.hash;
       const label = formatHashDisplay(myHash);
       document.getElementById('identity-box').textContent = label;
@@ -3504,32 +3540,16 @@ function toggleSettings() {
   if (settingsShown) {
     panel.classList.add('open');
     btn?.classList.add('active');
+    applySettingsToForm(window._appSettings || {});
     refreshNetworkStatus();
     startNetworkAutoRefresh();
     loadRnsInterfaces();
     Promise.all([
       fetch('/api/settings').then(r => r.json()),
-      refreshLanInterfaces(false),
+      refreshLanInterfaces(false, null, false),
     ]).then(([s, ifaces]) => {
-        document.getElementById('settings-name').value = s.name || '';
-        document.getElementById('settings-retention').value = s.history_retention || 'never';
-        document.getElementById('settings-received-dir').value = s.received_dir || '';
-        const autoReset = document.getElementById('settings-network-auto-reset');
-        if (autoReset) autoReset.checked = s.network_stats_auto_reset !== false;
-        populateLanInterfaceSelect(ifaces, s.lan_interface || '');
-        window._hubRole = s.hub_role || 'off';
-        const hubRole = document.getElementById('settings-hub-role');
-        if (hubRole) hubRole.value = window._hubRole;
-        const hubHost = document.getElementById('settings-hub-host');
-        if (hubHost) hubHost.value = s.hub_host || '';
-        const hubPort = document.getElementById('settings-hub-port');
-        if (hubPort) hubPort.value = s.hub_port || 4242;
-        const autoIface = document.getElementById('settings-auto-interface');
-        if (autoIface) autoIface.checked = s.auto_interface_enabled !== false;
-        const autoAnn = document.getElementById('settings-auto-announce');
-        if (autoAnn) autoAnn.checked = !!s.auto_announce;
-        onHubRoleChange();
-        updateHubUi();
+        window._appSettings = s;
+        applySettingsToForm(s, ifaces);
         const sh = document.getElementById('settings-hash');
         if (sh) sh.value = myHash;
       });
@@ -3597,9 +3617,8 @@ function saveSettings() {
   }).then(async r => {
     const d = await r.json();
     if (r.ok && d.status === 'ok') {
-      if (d.settings?.received_dir) {
-        document.getElementById('settings-received-dir').value = d.settings.received_dir;
-      }
+      window._appSettings = d.settings || {};
+      applySettingsToForm(window._appSettings);
       window._hubRole = d.settings?.hub_role || hub_role;
       updateHubUi();
       toast('Settings saved');

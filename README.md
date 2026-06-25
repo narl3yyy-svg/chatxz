@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.126
+**Current version:** 0.3.127
 
 ## Download
 
@@ -80,6 +80,15 @@ cd chatxz
 
 Open **http://localhost:8742**. Config in `~/.config/chatxz/`. Dependencies install quietly on first run only.
 
+**Stop:** **Ctrl+C** in the terminal — `run.sh` auto-runs `scripts/stop-chatxz.sh` on the next start to release ports **8742**, **4242**, **8743**.
+
+If you see `address already in use` or `UDP port 4242 is already in use`:
+
+```bash
+bash scripts/stop-chatxz.sh
+./run.sh web --share
+```
+
 **Optional:** `bash scripts/install-macos.sh` — voice support (pyaudio) and Homebrew packages.
 
 ---
@@ -101,6 +110,8 @@ git stash -u && git pull
 ```
 
 Open **http://localhost:8742** (or `http://<your-lan-ip>:8742` with `--share`).
+
+**Stop:** **Ctrl+C** — next `./run.sh web` run calls `scripts/stop-chatxz.sh` to free ports. Manual cleanup: `bash scripts/stop-chatxz.sh`
 
 **Firewall:** allow UDP **4242** (RNS) and **8743** (discovery beacon) on the LAN.
 
@@ -180,6 +191,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.127** — macOS/Linux: `scripts/stop-chatxz.sh` + `lsof` port cleanup (fixes errno 48 / port 4242 in use); settings display name shows instantly after restart (no 5s wait)
 - **v0.3.126** — Windows: beacon broadcasts scoped to default-route NIC (fixes slowness on PCs with many virtual adapters); **v0.3.125** restart fix included
 - **v0.3.125** — Windows: fix **Restart server** 500 error (`UnboundLocalError` on `sys`); restart reloads network stack in-process without closing cmd
 - **v0.3.124** — Windows: fix settings save, Explorer folder picker, in-process restart (cmd stays open); faster NIC scan (ipconfig default); ↻ refresh spins
