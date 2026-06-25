@@ -658,6 +658,7 @@ class ChatWebServer:
             "hub_host": "",
             "hub_port": 4242,
             "hub_server_hash": "",
+            "auto_interface_enabled": True,
         }
         try:
             with open(SETTINGS_FILE) as f:
@@ -770,7 +771,12 @@ class ChatWebServer:
         for iface in interfaces:
             if iface.get("type") == "UDPInterface" and bcast:
                 iface["forward_ip"] = bcast
-        config_text = render_rns_config(interfaces, broadcast_ip=bcast, android=is_android())
+        config_text = render_rns_config(
+            interfaces,
+            broadcast_ip=bcast,
+            android=is_android(),
+            auto_interface_enabled=settings.get("auto_interface_enabled", True),
+        )
         with open(rns_config_path, "w") as f:
             f.write(config_text)
         print(f"[config] Wrote RNS config at {rns_config_path} (broadcast={bcast})")
@@ -807,8 +813,8 @@ class ChatWebServer:
                 bootstrap_android_usb()
             except Exception as e:
                 print(f"[serial] Android USB bootstrap failed: {e}")
-        if self.embedded or is_android() or getattr(sys, "frozen", False):
-            patch_embedded_signals()
+        # v0.3.90+ starts RNS on a worker thread on desktop; RNS registers SIGINT handlers.
+        patch_embedded_signals()
         settings = self.load_settings()
         self._write_rns_config(settings)
         self._log_serial_diagnostics()
@@ -2190,6 +2196,33 @@ class ChatWebServer:
         if self.messaging:
             self.messaging.receive_dir = path
 
+    def _pick_directory_tk(self, start):
+        if is_android() or not os.environ.get("DISPLAY"):
+            return None
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+        except Exception:
+            return None
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                root.attributes("-topmost", True)
+            except Exception:
+                pass
+            picked = filedialog.askdirectory(
+                initialdir=start,
+                mustexist=True,
+                title="Select folder for received files",
+            )
+            root.destroy()
+            if picked:
+                return os.path.normpath(picked)
+        except Exception:
+            pass
+        return None
+
     def _pick_directory_native(self):
         if is_android():
             return None
@@ -2206,6 +2239,10 @@ class ChatWebServer:
             commands.append(["kdialog", "--getexistingdirectory", start])
         if shutil.which("yad"):
             commands.append(["yad", "--file", "--directory", f"--filename={start}"])
+
+        picked = self._pick_directory_tk(start)
+        if picked:
+            return picked
 
         for cmd in commands:
             try:
@@ -2281,6 +2318,9 @@ class ChatWebServer:
             if "lan_interface" in data:
                 settings["lan_interface"] = (data.get("lan_interface") or "").strip()
                 set_lan_interface_preference(settings["lan_interface"])
+                self._write_rns_config(settings)
+            if "auto_interface_enabled" in data:
+                settings["auto_interface_enabled"] = bool(data["auto_interface_enabled"])
                 self._write_rns_config(settings)
             settings = self._apply_hub_settings(settings)
             self.save_settings(settings)

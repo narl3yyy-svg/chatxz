@@ -87,13 +87,13 @@ class WindowsInterfaceHelpers(unittest.TestCase):
             "\r\n"
             "   IPv4 Address. . . . . . . . . . . : 100.64.0.2\r\n"
         )
-        route = "0.0.0.0          0.0.0.0      10.0.47.1      10.0.47.37"
+        route = "0.0.0.0          10.0.47.1      10.0.47.37     25"
 
         def fake_run(cmd, *args, **kwargs):
             result = type("R", (), {"stdout": "", "returncode": 0})()
             if cmd and cmd[0] == "ipconfig":
                 result.stdout = ipconfig
-            elif cmd and cmd[0] == "route":
+            elif cmd and cmd[0] == "route" and len(cmd) >= 2 and cmd[1] == "print":
                 result.stdout = route
             return result
 

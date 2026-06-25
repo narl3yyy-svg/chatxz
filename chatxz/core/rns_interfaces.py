@@ -272,6 +272,9 @@ def _sync_serial_enabled(iface):
     """Keep enabled in sync with port selection and live accessibility."""
     if iface.get("preset") != "serial" and iface.get("type") != "SerialInterface":
         return iface
+    if iface.get("user_disabled"):
+        iface["enabled"] = False
+        return iface
     port = (iface.get("port") or "").strip()
     if not port:
         iface["enabled"] = False
@@ -481,16 +484,16 @@ def update_interface(items, iface_id, updates):
         updated = {**item}
         preset = updated.get("preset") or ""
         itype = updated.get("type", "")
+        if "enabled" in updates:
+            updated["enabled"] = bool(updates["enabled"])
+            if preset == "serial" or itype == "SerialInterface":
+                updated["user_disabled"] = not bool(updates["enabled"])
         if preset == "serial" or itype == "SerialInterface":
             if "port" in updates:
                 updated["port"] = str(updates["port"] or "").strip()
             if "speed" in updates and updates["speed"] is not None:
                 updated["speed"] = int(updates["speed"])
-            if "enabled" in updates:
-                updated["enabled"] = bool(updates["enabled"])
             updated = _sync_serial_enabled(updated)
-            if serial_port_accessible(updated.get("port")):
-                updated["enabled"] = True
         elif preset in ("tcp_client", "tcp_server") or itype in ("TCPClientInterface", "TCPServerInterface"):
             if "target_host" in updates and updates["target_host"]:
                 updated["target_host"] = str(updates["target_host"]).strip()
@@ -736,7 +739,9 @@ def ensure_runtime_serial(settings_interfaces=None):
     return None
 
 
-def render_rns_config(interfaces, broadcast_ip=None, android=False, log=print):
+def render_rns_config(
+    interfaces, broadcast_ip=None, android=False, log=print, auto_interface_enabled=True,
+):
     normalized = normalize_interface_list(interfaces)
     has_tcp_server = any(
         i.get("type") == "TCPServerInterface" and i.get("enabled", True)
@@ -827,7 +832,7 @@ def render_rns_config(interfaces, broadcast_ip=None, android=False, log=print):
         i.get("type") == "UDPInterface" and i.get("enabled", True)
         for i in normalized
     )
-    if has_udp_lan and not android and sys.platform != "win32":
+    if has_udp_lan and auto_interface_enabled and not android and sys.platform != "win32":
         lines.extend([
             "  [[Default Interface]]",
             "    type = AutoInterface",

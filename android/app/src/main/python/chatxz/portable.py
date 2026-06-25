@@ -19,7 +19,7 @@ def portable_root():
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
-def wait_for_port(host, port, timeout=90.0):
+def wait_for_port(host, port, timeout=30.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:

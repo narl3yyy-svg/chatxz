@@ -344,6 +344,20 @@ body::before {
   gap: 8px;
   margin-bottom: 6px;
 }
+.rns-iface-card .iface-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.rns-iface-card .iface-active-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text2);
+  white-space: nowrap;
+}
 .rns-iface-serial-fields {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1035,9 +1049,9 @@ body.sidebar-open #sidebar-backdrop { display: block; }
             <label>Received Files Folder</label>
             <div class="field-row">
               <input id="settings-received-dir" placeholder="/home/user/Downloads">
-              <button class="input-btn" onclick="pickReceivedDir()" style="width:40px;height:40px;border:1px solid var(--border);border-radius:var(--radius-md)" title="Browse...">📁</button>
+              <button class="btn-block" onclick="pickReceivedDir()" style="width:auto;white-space:nowrap;padding:0 12px;height:40px" title="Select folder">Select folder</button>
             </div>
-            <p class="field-hint" id="settings-received-hint">Browse picks a native folder path. Click Save to apply.</p>
+            <p class="field-hint" id="settings-received-hint">Select folder opens a native directory picker (zenity/kdialog/tk on Linux). Click Save to apply.</p>
             <input type="file" id="dir-picker-fallback" style="display:none" webkitdirectory onchange="pickReceivedDirFallback(this)">
           </div>
         </div>
@@ -1084,6 +1098,10 @@ body.sidebar-open #sidebar-backdrop { display: block; }
             </div>
             <div id="serial-devices-panel" class="serial-devices-panel" style="display:none"></div>
             <div id="rns-interfaces-list" style="font-size:11px;color:var(--text2)">Loading...</div>
+            <label id="auto-interface-toggle" style="display:none;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin-top:10px">
+              <input type="checkbox" id="settings-auto-interface" onchange="saveAutoInterface()">
+              RNS AutoInterface (IPv6 LAN mesh — Linux/macOS when UDP LAN is active)
+            </label>
             <div id="serial-permission-hint" style="display:none;margin-top:6px;font-size:10px;color:var(--warn,#e8a838);line-height:1.45"></div>
             <div id="serial-setup-hint" style="margin-top:6px;font-size:10px;color:var(--text3)">Plug in USB serial, pick device + baud (default 57600), click Apply. Restart chatxz after applying.</div>
           </div>
@@ -2400,7 +2418,9 @@ function renderRnsInterfaceRow(iface, serialPorts, baudRates) {
     metaBits += ' · disabled';
   }
   const meta = escapeHtml(metaBits);
-  let body = `<div class="iface-head"><span class="net-label">${label}<div style="font-size:10px;color:var(--text3)">${meta}</div></span><button class="btn-block danger" style="width:auto;padding:4px 8px;font-size:11px" onclick="deleteRnsInterface('${id}')">Delete</button></div>`;
+  const active = iface.enabled !== false;
+  const activeToggle = `<label class="iface-active-toggle"><input type="checkbox"${active ? ' checked' : ''} onchange="toggleRnsInterfaceEnabled('${id}', this.checked)"> Active</label>`;
+  let body = `<div class="iface-head"><span class="net-label">${label}<div style="font-size:10px;color:var(--text3)">${meta}</div></span><div class="iface-head-actions">${activeToggle}<button class="btn-block danger" style="width:auto;padding:4px 8px;font-size:11px" onclick="deleteRnsInterface('${id}')">Delete</button></div></div>`;
   if (isSerial) {
     body += `<div class="rns-iface-serial-fields">
       <div><label>Device</label>
@@ -2441,6 +2461,40 @@ function renderRnsInterfaceRow(iface, serialPorts, baudRates) {
     </div>`;
   }
   return `<div class="rns-iface-card">${body}</div>`;
+}
+
+function toggleRnsInterfaceEnabled(id, enabled) {
+  fetch('/api/rns-interfaces/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id, enabled: !!enabled}),
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') {
+      toast(enabled ? 'Interface enabled — restart chatxz to apply' : 'Interface disabled — restart chatxz to apply');
+      loadRnsInterfaces();
+      refreshNetworkStatus();
+    } else {
+      toast('Update failed: ' + (d.error || ''));
+      loadRnsInterfaces();
+    }
+  }).catch(() => {
+    toast('Update failed');
+    loadRnsInterfaces();
+  });
+}
+
+function saveAutoInterface() {
+  const enabled = !!document.getElementById('settings-auto-interface')?.checked;
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({auto_interface_enabled: enabled}),
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') {
+      toast('AutoInterface ' + (enabled ? 'enabled' : 'disabled') + ' — restart chatxz to apply');
+      refreshNetworkStatus();
+    } else toast('Save failed: ' + (d.error || ''));
+  }).catch(() => toast('Save failed'));
 }
 
 function saveTcpInterface(id) {
@@ -2509,6 +2563,13 @@ function loadRnsInterfaces() {
     }
     let html = items.map(iface => renderRnsInterfaceRow(iface, window._serialPorts, baudRates)).join('');
     list.innerHTML = html;
+    const autoToggle = document.getElementById('auto-interface-toggle');
+    const autoCb = document.getElementById('settings-auto-interface');
+    const hasUdp = items.some(i => (i.preset === 'udp_lan' || i.type === 'UDPInterface') && i.enabled !== false);
+    if (autoToggle && autoCb) {
+      const showAuto = hasUdp && appPlatform !== 'android' && appPlatform !== 'windows';
+      autoToggle.style.display = showAuto ? 'flex' : 'none';
+    }
   }).catch(() => { list.textContent = 'Failed to load interfaces.'; });
 }
 
@@ -2864,6 +2925,8 @@ function toggleSettings() {
         if (hubHost) hubHost.value = s.hub_host || '';
         const hubPort = document.getElementById('settings-hub-port');
         if (hubPort) hubPort.value = s.hub_port || 4242;
+        const autoIface = document.getElementById('settings-auto-interface');
+        if (autoIface) autoIface.checked = s.auto_interface_enabled !== false;
         onHubRoleChange();
         updateHubUi();
         const sh = document.getElementById('settings-hash');
@@ -3539,14 +3602,14 @@ async function pickReceivedDir() {
       if (e.name === 'AbortError') return;
     }
   }
-  document.getElementById('dir-picker-fallback').click();
+  toast('No native folder picker found — install zenity (GTK) or use tkinter, then try again.');
 }
 function pickReceivedDirFallback(input) {
   if (input.files && input.files.length > 0) {
     const rel = input.files[0].webkitRelativePath;
     const hint = rel.substring(0, rel.indexOf('/'));
     document.getElementById('settings-received-dir').value = '.../' + hint;
-    toast('Enter the full absolute path, then Save.');
+    toast('Browser folder pick is limited — enter the full absolute path, then Save.');
   }
 }
 

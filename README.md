@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.88
+**Current version:** 0.3.91
 
 ## Download
 
@@ -80,6 +80,12 @@ Open **http://localhost:8742** (or `http://<your-lan-ip>:8742` with `--share`).
 
 **Firewall:** allow UDP **4242** (RNS) and **8743** (discovery beacon) on the LAN.
 
+**Before pushing changes**, run the pre-push check:
+
+```bash
+bash scripts/check.sh
+```
+
 ---
 
 ## Using chatxz
@@ -147,6 +153,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.91** — Fix RNS init on Linux when started in background thread (signal handler patch); native folder picker for received-files (zenity/kdialog/tk, not browser upload); per-interface Active toggles + AutoInterface on/off; `scripts/check.sh` pre-push test suite
 - **v0.3.90** — Windows startup speed: HTTP server listens immediately (RNS init in background); fast ipconfig-based LAN scan with 45s cache (fixes slow PowerShell on multi-homed NICs); single-pass network status API
 - **v0.3.89** — Windows/macOS LAN detection: enumerate NICs via PowerShell/ifconfig (fixes false "LAN disconnected" on Windows portable); prefer default-gateway subnet IP on multi-homed hosts; frozen exe restart no longer breaks when install path contains spaces; warn when TCP Client targets this machine
 - **v0.3.88** — Inbound link fixes: resolve peer from link remote identity (not blind discovery guess); adopt existing inbound links before outbound connect; promote inbound sessions when peer hash was unknown; fixes split-brain startup where one side queued messages for minutes
