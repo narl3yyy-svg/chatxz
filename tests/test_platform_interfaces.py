@@ -159,5 +159,52 @@ class WindowsInterfaceHelpers(unittest.TestCase):
                     self.assertTrue(plat.lan_connected())
 
 
+class DarwinInterfaceHelpers(unittest.TestCase):
+    def test_darwin_enumerate_parses_ifconfig(self):
+        ifconfig = (
+            "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n"
+            "\toptions=6460<TSO4,TSO6,CHANNEL_IO>\n"
+            "\tether aa:bb:cc:dd:ee:ff\n"
+            "\tinet 192.168.1.42 netmask 0xffffff00 broadcast 192.168.1.255\n"
+            "\tmedia: autoselect\n"
+            "\tstatus: active\n"
+            "utun4: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n"
+            "\tinet 100.64.0.2 --> 100.64.0.2 netmask 0xffffffff\n"
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            result = type("R", (), {"stdout": "", "returncode": 0})()
+            if cmd and cmd[0] == "ifconfig":
+                result.stdout = ifconfig
+            return result
+
+        with patch.object(plat.subprocess, "run", side_effect=fake_run):
+            entries = plat._darwin_enumerate_interfaces()
+        by_name = {e["name"]: e for e in entries}
+        self.assertEqual(by_name["en0"]["ip"], "192.168.1.42")
+        self.assertTrue(by_name["en0"]["up"])
+        self.assertEqual(by_name["en0"]["broadcast"], "192.168.1.255")
+        self.assertEqual(by_name["utun4"]["ip"], "100.64.0.2")
+        self.assertTrue(by_name["utun4"]["up"])
+        self.assertEqual(by_name["utun4"]["kind"], "vpn")
+
+    def test_physical_lan_true_on_darwin_entries(self):
+        entries = [
+            {
+                "name": "en0",
+                "kind": "ethernet",
+                "ip": "192.168.1.42",
+                "up": True,
+                "broadcast": "192.168.1.255",
+            },
+        ]
+        with patch.object(plat, "is_android", return_value=False):
+            with patch.object(plat.sys, "platform", "darwin"):
+                with patch.object(plat, "_desktop_enumerate_interfaces", return_value=entries):
+                    self.assertTrue(plat.physical_lan_reachable())
+                    self.assertTrue(plat.lan_connected())
+                    self.assertEqual(plat._desktop_lan_ip(), "192.168.1.42")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -281,6 +281,84 @@ def ensure_rns_ports_free(force=False):
     print("[startup] Or restart with:  ./run.sh web --share --force")
     return False
 
+
+def _subprocess_no_window():
+    if sys.platform == "win32":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return 0
+
+
+def _pick_directory_tkinter(start):
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        picked = filedialog.askdirectory(initialdir=start, mustexist=True, parent=root)
+        root.destroy()
+        return picked or None
+    except Exception:
+        return None
+
+
+def _pick_directory_windows(start):
+    start_esc = start.replace("'", "''")
+    script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Select received files folder'
+$dialog.ShowNewFolderButton = $true
+if (Test-Path -LiteralPath '{start_esc}') {{
+    $dialog.SelectedPath = '{start_esc}'
+}}
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+    Write-Output $dialog.SelectedPath
+}}
+"""
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+            creationflags=_subprocess_no_window(),
+        )
+        picked = (proc.stdout or "").strip()
+        if picked:
+            return os.path.normpath(picked)
+    except Exception:
+        pass
+    return None
+
+
+def _pick_directory_macos(start):
+    start_posix = start.replace("\\", "/")
+    script = (
+        'POSIX path of (choose folder with prompt "Select received files folder" '
+        f'default location POSIX file "{start_posix}")'
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        picked = (proc.stdout or "").strip()
+        if picked and picked != "/":
+            return os.path.normpath(picked)
+    except Exception:
+        pass
+    return None
+
+
 class ChatWebServer:
     def __init__(self, host="127.0.0.1", port=8742, verbose=False, debug=False, force=False, embedded=False):
         self.host = host
@@ -2675,12 +2753,33 @@ class ChatWebServer:
     async def handle_settings_get(self, request):
         return web.json_response(self._apply_hub_settings(self.load_settings()))
 
+    def _abs_path_hint(self):
+        if sys.platform == "win32":
+            return "C:\\Users\\you\\Downloads"
+        return "/home/user/Downloads"
+
     def _normalize_received_dir(self, raw):
-        path = os.path.normpath(os.path.expanduser((raw or "").strip()))
+        path = (raw or "").strip()
         if not path:
             return None, "Path is empty"
+        path = os.path.expanduser(path)
+        if sys.platform == "win32":
+            if re.match(r"^[A-Za-z]:[^\\/]", path):
+                path = path[:2] + "\\" + path[2:]
+            path = os.path.normpath(path.replace("/", "\\"))
+        else:
+            path = os.path.normpath(path)
         if not os.path.isabs(path):
-            return None, "Path must be absolute (e.g. /home/user/Downloads)"
+            for base in (self.config_dir, os.path.expanduser("~"), os.getcwd()):
+                if not base:
+                    continue
+                candidate = os.path.normpath(os.path.join(base, path))
+                if os.path.isdir(candidate):
+                    path = candidate
+                    break
+            else:
+                hint = self._abs_path_hint()
+                return None, f"Path must be absolute (e.g. {hint})"
         if is_android() and path.startswith("/storage/"):
             try:
                 os.makedirs(path, exist_ok=True)
@@ -2716,6 +2815,16 @@ class ChatWebServer:
         start = os.path.expanduser(start)
         if not os.path.isdir(start):
             start = os.path.expanduser("~")
+
+        pickers = []
+        if sys.platform == "win32":
+            pickers.extend([_pick_directory_tkinter, _pick_directory_windows])
+        elif sys.platform == "darwin":
+            pickers.extend([_pick_directory_macos, _pick_directory_tkinter])
+        for picker in pickers:
+            picked = picker(start)
+            if picked:
+                return os.path.normpath(picked)
 
         commands = []
         if shutil.which("zenity"):

@@ -681,11 +681,19 @@ def _darwin_enumerate_interfaces():
 
     entries = []
     current = None
+    current_up = False
+    current_active = False
     for line in text.splitlines():
         if line and not line.startswith(("\t", " ")):
             current = line.split(":")[0].strip()
+            current_up = "<UP" in line or "UP," in line or ",UP>" in line
+            current_active = False
             continue
         if not current or current == "lo0":
+            continue
+        stripped = line.strip()
+        if stripped.lower().startswith("status:") and "active" in stripped.lower():
+            current_active = True
             continue
         match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", line)
         if not match:
@@ -693,8 +701,7 @@ def _darwin_enumerate_interfaces():
         ip = match.group(1)
         if ip.startswith("127.") or ip.startswith("169.254."):
             continue
-        flags = line.strip()
-        up = "status: active" in flags or "<UP" in flags or "UP," in flags
+        up = current_up or current_active
         subnet = _host_ipv4_broadcast(ip) if up else None
         entries.append({
             "name": current,
