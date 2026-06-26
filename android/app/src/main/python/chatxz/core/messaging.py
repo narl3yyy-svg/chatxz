@@ -426,6 +426,27 @@ class MessagingBackend:
             out.append(peer)
         return out
 
+    def _hub_tcp_linked_peers(self):
+        """Peers reachable only over TCP hub transport (not UDP/serial P2P)."""
+        out = []
+        for peer in self.linked_peers():
+            if not peer or is_hub_peer_hash(peer):
+                continue
+            link = self._link_for_peer(peer)
+            if not link:
+                continue
+            if interface_family(self._link_attached_interface(link)) == "tcp":
+                out.append(peer)
+        return out
+
+    def _hub_message_acceptable(self, chat_msg, link):
+        if not getattr(chat_msg, "hub_group", False):
+            return True
+        role, _ = self._load_hub_settings()
+        if role == "off":
+            return False
+        return interface_family(self._link_attached_interface(link)) == "tcp"
+
     def disconnect_peer(self, peer_hash, user_initiated=False):
         peer = self.dest_hash_for(peer_hash)
         if user_initiated and peer:
@@ -1525,18 +1546,15 @@ class MessagingBackend:
         return link_hint or best or self._link_for_peer(peer)
 
     def _hub_send_targets(self, hub_server_hash=None, hub_server_mode=False):
+        tcp_peers = self._hub_tcp_linked_peers()
         if hub_server_mode:
-            return [
-                p for p in self.linked_peers()
-                if p and not is_hub_peer_hash(p)
-            ]
+            return tcp_peers
         if hub_server_hash:
             peer = self.dest_hash_for(hub_server_hash)
-            return [peer] if peer and peer != "unknown" else []
-        return [
-            p for p in self.linked_peers()[:1]
-            if p and not is_hub_peer_hash(p)
-        ]
+            if peer and peer != "unknown" and peer in tcp_peers:
+                return [peer]
+            return []
+        return tcp_peers[:1]
 
     def drain_hub_group_queue(self, hub_server_hash=None, hub_server_mode=False):
         if not any(is_hub_peer_hash(e.get("target_hash")) for e in self.message_queue):
@@ -2910,6 +2928,10 @@ class MessagingBackend:
                     self._handle_lan_http_offer(chat_msg, remote_hash)
                     return
 
+                if not self._hub_message_acceptable(chat_msg, link):
+                    print("[hub] Ignored group message (hub transport only)")
+                    return
+
                 chat_msg.sender = remote_hash
                 print(f"[messaging] Received {chat_msg.msg_type} from {remote_hash[:16]}...")
 
@@ -3644,7 +3666,7 @@ class MessagingBackend:
         if not getattr(chat_msg, "hub_group", False):
             return
         data = chat_msg.to_json().encode("utf-8")
-        for peer in self.linked_peers():
+        for peer in self._hub_tcp_linked_peers():
             if is_hub_peer_hash(peer) or self.hashes_equivalent(peer, sender_hash):
                 continue
             link = self._link_for_peer(peer)

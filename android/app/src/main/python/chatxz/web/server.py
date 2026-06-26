@@ -1485,6 +1485,11 @@ class ChatWebServer:
     def _on_message(self, chat_msg, sender_hash):
         hub_group = bool(getattr(chat_msg, "hub_group", False))
         if hub_group:
+            settings = self.load_settings()
+            if settings.get("hub_role", "off") == "off":
+                if self.debug:
+                    print("[hub] Dropped group message (hub disabled)")
+                return
             chat_peer = HUB_GROUP_PEER
             if sender_hash and sender_hash != "system":
                 sender = self._peer_dest_hash(sender_hash)

@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.139": [
+        "Hub group chat is isolated to TCP hub transport — P2P-only peers (hub off) no longer receive group messages relayed from the hub server.",
+        "Group messages are dropped on receive when hub mode is off, and hub server relay targets only TCP-connected hub clients.",
+        "Removed unused config/config.ini template and empty chatxz/ui package.",
+    ],
     "0.3.138": [
         "Changing Settings → Network IPv4 now drops all active links and clears cached RNS paths — messages no longer cross subnets after a NIC change.",
         "Beacon discovery strictly rejects peers outside your LAN /24 (no more 10.0.30.x on 10.10.100.x).",

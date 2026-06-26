@@ -212,6 +212,99 @@ class HubFailoverTests(unittest.TestCase):
         self.assertEqual(families, ["tcp"])
 
 
+class HubGroupIsolationTests(unittest.TestCase):
+    def _backend_with_links(self, hub_role="off"):
+        from unittest.mock import MagicMock, patch
+        import json
+        import os
+        import tempfile
+
+        ident = MagicMock()
+        ident.hash = bytes.fromhex("a" * 32)
+        tmp = tempfile.mkdtemp()
+        settings_path = os.path.join(tmp, "settings.json")
+        with open(settings_path, "w", encoding="utf-8") as fh:
+            json.dump({"hub_role": hub_role}, fh)
+        backend = MessagingBackend(identity=ident, config_dir=tmp)
+
+        class UDPInterface:
+            pass
+
+        class TCPClientInterface:
+            pass
+
+        udp_link = MagicMock()
+        udp_link.link_id = "udp1"
+        udp_link.attached_interface = UDPInterface()
+        tcp_link = MagicMock()
+        tcp_link.link_id = "tcp1"
+        tcp_link.attached_interface = TCPClientInterface()
+
+        backend.peer_links = {
+            "b" * 32: udp_link,
+            "c" * 32: tcp_link,
+        }
+        backend.links = {"udp1": udp_link, "tcp1": tcp_link}
+        return backend, udp_link, tcp_link
+
+    def test_hub_send_targets_server_uses_tcp_only(self):
+        backend, _, _ = self._backend_with_links(hub_role="server")
+        targets = backend._hub_send_targets(hub_server_mode=True)
+        self.assertEqual(targets, ["c" * 32])
+
+    def test_hub_send_targets_client_uses_tcp_only(self):
+        backend, _, _ = self._backend_with_links(hub_role="client")
+        targets = backend._hub_send_targets(hub_server_hash="c" * 32)
+        self.assertEqual(targets, ["c" * 32])
+        self.assertEqual(backend._hub_send_targets(hub_server_hash="b" * 32), [])
+
+    def test_relay_hub_message_skips_udp_peers(self):
+        from unittest.mock import MagicMock, patch
+
+        backend, udp_link, tcp_link = self._backend_with_links(hub_role="server")
+        msg = MagicMock()
+        msg.hub_group = True
+        msg.to_json.return_value = '{"hub":true}'
+        with patch("chatxz.core.messaging.RNS.Packet") as pkt:
+            backend.relay_hub_message(msg, sender_hash="d" * 32)
+            pkt.assert_called_once_with(tcp_link, b'{"hub":true}')
+
+    def test_hub_message_rejected_when_hub_off(self):
+        from unittest.mock import MagicMock
+
+        backend, udp_link, _ = self._backend_with_links(hub_role="off")
+        msg = MagicMock()
+        msg.hub_group = True
+        self.assertFalse(backend._hub_message_acceptable(msg, udp_link))
+
+    def test_hub_message_rejected_on_udp_when_hub_client(self):
+        from unittest.mock import MagicMock
+
+        backend, udp_link, tcp_link = self._backend_with_links(hub_role="client")
+        msg = MagicMock()
+        msg.hub_group = True
+        self.assertFalse(backend._hub_message_acceptable(msg, udp_link))
+        self.assertTrue(backend._hub_message_acceptable(msg, tcp_link))
+
+    def test_on_message_drops_hub_group_when_hub_off(self):
+        from chatxz.web.server import ChatWebServer
+        from unittest.mock import MagicMock, patch
+
+        server = ChatWebServer.__new__(ChatWebServer)
+        server.config_dir = "/tmp/chatxz-hub-off"
+        server.message_history = []
+        server.websockets = []
+        server._loop = None
+        server.debug = False
+        chat_msg = MagicMock()
+        chat_msg.hub_group = True
+        with patch.object(
+            ChatWebServer, "load_settings", return_value={"hub_role": "off"}
+        ), patch.object(ChatWebServer, "_save_history") as save_hist:
+            server._on_message(chat_msg, "b" * 32)
+        save_hist.assert_not_called()
+
+
 class HubPeerTests(unittest.TestCase):
     def test_is_hub_peer_hash(self):
         self.assertTrue(is_hub_peer_hash(HUB_GROUP_PEER))
