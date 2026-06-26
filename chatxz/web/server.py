@@ -2311,6 +2311,7 @@ class ChatWebServer:
             return None
         clean = normalize_hash(hash_hex)
         by_hash = None
+        by_serial = None
         by_rns = None
         by_ip = None
         for p in self._scoped_peers():
@@ -2319,9 +2320,15 @@ class ChatWebServer:
             if peer_ip and p.get("ip") == peer_ip:
                 by_ip = p
             if clean and (ph == clean or ih == clean):
-                by_hash = p
-                if p.get("via") == "rns":
+                via = (p.get("via") or "").strip()
+                if via == "serial":
+                    by_serial = p
+                else:
+                    by_hash = by_hash or p
+                if via == "rns":
                     by_rns = p
+        if by_serial:
+            return by_serial
         if by_rns:
             return by_rns
         if by_hash:

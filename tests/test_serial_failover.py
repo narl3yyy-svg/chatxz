@@ -353,6 +353,39 @@ class FailoverPreferenceTests(unittest.TestCase):
         self.assertFalse(needs)
         self.assertEqual(reason, "")
 
+    def test_reconnect_active_peer_skips_during_connect(self):
+        backend = self._backend()
+        backend._connect_in_progress = True
+        backend.active_peer_hash = "f1c2ac9061239f7c096701f02969729c"
+        backend._session_peer_hash = backend.active_peer_hash
+        with patch.object(backend, "_serial_transport_ready", return_value=True):
+            self.assertFalse(backend.reconnect_active_peer(reason="link dropped"))
+
+    def test_failover_families_serial_via_meta_even_with_lan_up(self):
+        backend = self._backend()
+        peer = "436ce5fd79d0932d436ce5fd79d0932d"
+        backend.peer_transport_resolver = lambda _h: {
+            "hash": peer,
+            "name": "ARCH",
+            "via": "serial",
+        }
+        with patch.object(backend, "_hub_transport_active", return_value=False):
+            with patch.object(backend, "_has_online_family", return_value=True):
+                with patch.object(backend, "_serial_transport_ready", return_value=True):
+                    with patch("chatxz.core.messaging.physical_lan_reachable", return_value=True):
+                        with patch.object(backend, "_serial_faster_than_lan", return_value=False):
+                            families = backend._failover_families_to_try(peer)
+        self.assertEqual(families, ["serial"])
+
+    def test_prime_serial_path_skips_when_path_cached(self):
+        backend = self._backend()
+        peer = "436ce5fd79d0932d436ce5fd79d0932d"
+        with patch.object(backend, "_serial_transport_ready", return_value=True):
+            with patch.object(backend, "_peer_has_path_on_family", return_value=True):
+                with patch.object(backend, "_burst_serial_announce") as burst:
+                    self.assertTrue(backend._prime_serial_path(peer, timeout_s=8.0))
+        burst.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

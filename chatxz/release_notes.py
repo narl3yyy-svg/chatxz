@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.157": [
+        "Serial connect: one consolidated attempt (no triple prime/outbound loops) with full 22s timeout and inbound wait — fixes Arch↔Ubuntu USB link failing with Peer not reachable.",
+        "Discovery resolver prefers via=serial over stale LAN/rns entries so dual-transport nodes route serial peers correctly.",
+        "Failover for serial peers stays on serial only; reconnect is blocked while a connect is already in progress.",
+    ],
     "0.3.156": [
         "Settings nav split: Live status is its own tab under Network; Network tab is config only; Network maintenance moved to System.",
         "Serial failover waits for USB serial to come back online instead of hammering reconnect while the port is down.",

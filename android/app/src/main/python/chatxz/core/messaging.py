@@ -69,6 +69,8 @@ SERIAL_PATH_PRIME_TIMEOUT_S = 28
 SERIAL_ANNOUNCE_BURST_COUNT = 5
 SERIAL_ANNOUNCE_BURST_INTERVAL_S = 0.4
 SERIAL_LINK_CONNECT_TIMEOUT_S = 22
+SERIAL_INBOUND_FIRST_WAIT_S = 4
+SERIAL_INBOUND_WAIT_S = 12
 REVERSE_CONNECT_WAIT_S = 10
 ANDROID_REVERSE_CONNECT_WAIT_S = 12
 INITIATOR_INBOUND_WAIT_S = 8
@@ -299,6 +301,8 @@ class MessagingBackend:
         if self._peer_has_path_on_family(peer, "serial") and not self._peer_has_path_on_family(peer, "udp"):
             if not self._peer_has_path_on_family(peer, "tcp"):
                 return {"serial"}
+        if meta and (meta.get("via") or "").strip() == "serial":
+            return {"serial"}
         if self._peer_has_path_on_family(peer, "udp") or self._peer_has_path_on_family(peer, "tcp"):
             return {"udp", "lan", "tcp"}
         return set()
@@ -1076,6 +1080,11 @@ class MessagingBackend:
         """Ordered transports to attempt when reconnecting (LAN preferred unless serial is faster)."""
         if self._hub_transport_active() and self._peer_uses_hub_transport(peer):
             return ["tcp"]
+        meta = self._peer_discovery_meta(peer)
+        if meta and (meta.get("via") or "").strip() == "serial":
+            if self._serial_transport_ready():
+                return ["serial"]
+            return []
         interfaces = load_settings_interfaces(self.config_dir)
         udp_lan = configured_udp_lan_enabled(interfaces)
         tcp_lan = configured_tcp_lan_enabled(interfaces)
@@ -2537,6 +2546,8 @@ class MessagingBackend:
         clear_peer_path_unless_family(dest_hex, "serial")
         suppress_offline_lan_transports()
         dedupe_serial_interfaces()
+        if self._peer_has_path_on_family(dest_hex, "serial"):
+            return True
         if timeout_s is None:
             timeout_s = SERIAL_PATH_PRIME_TIMEOUT_S
         print(f"[connect] Priming serial RNS path ({timeout_s:.0f}s)...")
@@ -2546,8 +2557,8 @@ class MessagingBackend:
             if self._interrupted():
                 return False
             now = time.time()
-            if now - last_burst >= 1.2:
-                self._burst_serial_announce(count=3, interval=0.25)
+            if now - last_burst >= 2.0:
+                self._burst_serial_announce(count=2, interval=0.3)
                 request_paths_for_hash(dest_hex, family="serial")
                 last_burst = now
             path_iface = wait_for_peer_path_families(
@@ -2561,6 +2572,43 @@ class MessagingBackend:
             "[connect] Serial path not ready — both ends need Serial in RNS: yes, "
             "same baud, tap Announce on each, then Connect"
         )
+        return False
+
+    def _connect_serial_peer(self, destination, dest_hex, clean, old_link=None,
+                             prime_timeout=8.0):
+        """Single serial connect: prime once, brief inbound wait, outbound, inbound fallback."""
+        if not self._serial_transport_ready():
+            print("[connect] Serial path blocked — Serial in RNS: no")
+            return False
+        clear_peer_path_unless_family(dest_hex, "serial")
+        suppress_offline_lan_transports()
+        dedupe_serial_interfaces()
+        if not self._peer_has_path_on_family(dest_hex, "serial"):
+            if not self._prime_serial_path(dest_hex, timeout_s=prime_timeout):
+                return False
+        else:
+            print("[connect] Serial path ready via SerialInterface")
+        print(
+            f"[connect] Serial peer — listening for inbound "
+            f"({SERIAL_INBOUND_FIRST_WAIT_S}s)..."
+        )
+        if self._wait_for_peer_link(
+            dest_hex, alt_hex=clean, timeout_s=SERIAL_INBOUND_FIRST_WAIT_S,
+        ):
+            return True
+        print(f"[connect] Serial outbound ({SERIAL_LINK_CONNECT_TIMEOUT_S}s)...")
+        if self._establish_outbound_link(
+            destination, dest_hex, clean, old_link=old_link,
+            timeout_s=SERIAL_LINK_CONNECT_TIMEOUT_S,
+        ):
+            return True
+        if self._peer_link_active(dest_hex, clean):
+            return True
+        print(f"[connect] Waiting for serial inbound ({SERIAL_INBOUND_WAIT_S}s)...")
+        if self._wait_for_peer_link(
+            dest_hex, alt_hex=clean, timeout_s=SERIAL_INBOUND_WAIT_S,
+        ):
+            return True
         return False
 
     def _promote_outbound_link(self, link, dest_hex, old_link=None, promote_active=None):
@@ -3691,6 +3739,8 @@ class MessagingBackend:
     def reconnect_active_peer(self, peer_ip=None, peer_port=None, peer_lookup=None,
                               caller_ip=None, caller_port=8742, reason=""):
         now = time.time()
+        if self._connect_in_progress:
+            return False
         if self._failover_in_progress:
             return False
         peer = self.dest_hash_for(self._session_peer_hash or self.active_peer_hash or "")
@@ -3748,7 +3798,13 @@ class MessagingBackend:
                 ):
                     print(f"[connect] {prefer} path not ready — trying next transport")
                     continue
-                if (
+                if prefer == "serial" and self._serial_transport_ready():
+                    inbound_wait = SERIAL_INBOUND_FIRST_WAIT_S
+                    print(f"[connect] Failover waiting for serial inbound ({inbound_wait}s)...")
+                    if self._wait_for_peer_link(peer, timeout_s=inbound_wait):
+                        print("[connect] Failover complete (serial inbound)")
+                        return True
+                elif (
                     prefer in ("udp", "lan")
                     and use_ip
                     and self._lan_transport_ready()
@@ -3948,18 +4004,21 @@ class MessagingBackend:
                 clear_peer_path_unless_family(dest_hex, "serial")
                 peer_ip = None
 
-            if serial_ready and prefer_serial:
-                self._prime_serial_path(dest_hex, timeout_s=12.0 if not physical_lan else 8.0)
-                print(f"[connect] Serial peer — quick connect ({QUICK_OUTBOUND_TIMEOUT_S}s)")
-                if self._establish_outbound_link(
+            serial_only_peer = (
+                prefer_serial
+                or serial_only
+                or self._peer_expected_transport_families(dest_hex) == {"serial"}
+            )
+            if serial_ready and serial_only_peer:
+                prime_timeout = 12.0 if not physical_lan else 8.0
+                if self._connect_serial_peer(
                     destination, dest_hex, clean, old_link=old_link,
-                    timeout_s=QUICK_OUTBOUND_TIMEOUT_S,
+                    prime_timeout=prime_timeout,
                 ):
                     adopt = self._link_for_peer(dest_hex) or self.active_link
                     return self._finish_connect(dest_hex, link=adopt)
-                if self._peer_link_active(dest_hex, clean):
-                    adopt = self._link_for_peer(dest_hex) or self._find_active_link_for_peer(dest_hex, clean)
-                    return self._finish_connect(dest_hex, link=adopt)
+                print("[connect] Peer not reachable (serial)")
+                return False
 
             if self._tcp_connect_ready(dest_hex, peer_ip, peer_lan_down, prefer_serial=prefer_serial):
                 if peer_ip:
@@ -3987,45 +4046,6 @@ class MessagingBackend:
                     adopt = self._link_for_peer(dest_hex) or self._find_active_link_for_peer(dest_hex, clean)
                     return self._finish_connect(dest_hex, link=adopt)
 
-            if serial_ready and (serial_only or not physical_lan or self._peer_has_path_on_family(dest_hex, "serial")):
-                if not physical_lan:
-                    peer_ip = None
-                    print("[connect] Physical LAN down — serial path only (no HTTP wake)")
-                self._prime_serial_path(dest_hex, timeout_s=12.0 if not physical_lan else 8.0)
-                print(f"[connect] Serial path attempt ({QUICK_OUTBOUND_TIMEOUT_S}s)")
-                if self._establish_outbound_link(
-                    destination, dest_hex, clean, old_link=old_link,
-                    timeout_s=QUICK_OUTBOUND_TIMEOUT_S,
-                ):
-                    adopt = self._link_for_peer(dest_hex) or self.active_link
-                    return self._finish_connect(dest_hex, link=adopt)
-                if not physical_lan:
-                    scrub_peer_path(dest_hex)
-                    request_paths_for_hash(dest_hex, family="serial")
-                    print(f"[connect] Connecting to {dest_hex[:16]}... (serial, timeout {SERIAL_LINK_CONNECT_TIMEOUT_S}s)")
-                    if self._establish_outbound_link(
-                        destination, dest_hex, clean, old_link=old_link,
-                        timeout_s=SERIAL_LINK_CONNECT_TIMEOUT_S,
-                    ):
-                        adopt = self._link_for_peer(dest_hex) or self.active_link
-                        return self._finish_connect(dest_hex, link=adopt)
-                    if self._peer_link_active(dest_hex, clean):
-                        adopt = self._link_for_peer(dest_hex) or self._find_active_link_for_peer(dest_hex, clean)
-                        return self._finish_connect(dest_hex, link=adopt)
-                    print("[connect] Peer not reachable (serial)")
-                    return False
-            elif serial_only:
-                print("[connect] Serial-only mode (no LAN) — skipping HTTP wake")
-                peer_ip = None
-                self._prime_serial_path(dest_hex)
-                if self._peer_has_path_on_family(dest_hex, "serial"):
-                    print(f"[connect] Serial path known — quick outbound ({QUICK_OUTBOUND_TIMEOUT_S}s)")
-                    if self._establish_outbound_link(
-                        destination, dest_hex, clean, old_link=old_link,
-                        timeout_s=QUICK_OUTBOUND_TIMEOUT_S,
-                    ):
-                        adopt = self._link_for_peer(dest_hex) or self.active_link
-                        return self._finish_connect(dest_hex, link=adopt)
             elif peer_ip and not respond_to_wake and lan_ready:
                 self._prime_lan_path(dest_hex, peer_ip=peer_ip, timeout_s=2.5)
                 if self._peer_has_path(dest_hex):
