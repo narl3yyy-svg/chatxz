@@ -239,6 +239,14 @@ class PeerDiscovery:
                 continue
             if same_ident or same_pubkey:
                 continue
+            if (
+                same_name
+                and new_via == "serial"
+                and existing_via in ("rns", "beacon")
+            ):
+                removed.append(normalize_hash(existing.get("hash")) or key)
+                del self.peers[key]
+                continue
             if serial_discovery_active() and same_name and not same_host:
                 continue
             if same_name and {"serial", "rns"} & {new_via, existing_via}:

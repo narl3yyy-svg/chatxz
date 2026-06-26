@@ -331,8 +331,15 @@ class MessagingBackend:
         peer = self.dest_hash_for(peer_hash)
         if not peer or peer == "unknown":
             return False
+        if self.peer_links.get(peer) is link:
+            return True
+        for cached_peer, cached_link in self.peer_links.items():
+            if cached_link is link and self.hashes_equivalent(cached_peer, peer):
+                return True
         cached = self._peer_for_link(link)
-        return bool(cached and self.hashes_equivalent(cached, peer))
+        if cached and cached != "unknown":
+            return self.hashes_equivalent(cached, peer)
+        return False
 
     def _link_acceptable_for_peer(self, link, peer_hash):
         if not link:
@@ -371,8 +378,18 @@ class MessagingBackend:
             return path_iface if expected & {"udp", "lan", "tcp"} else None
         return path_iface if fam in expected else None
 
+    def _parallel_sessions_allowed(self):
+        """True when USB serial and LAN are both up — independent peer links per transport."""
+        try:
+            from chatxz.core.transport_isolation import dual_transport_isolation_enabled
+            return dual_transport_isolation_enabled()
+        except Exception:
+            return False
+
     def _teardown_other_peer_links(self, keep_peer_hash, handoff=False):
         """Close active links to every peer except the one being connected."""
+        if self._parallel_sessions_allowed():
+            return 0
         keep = self.dest_hash_for(keep_peer_hash)
         if not keep or keep == "unknown":
             return 0
@@ -422,16 +439,17 @@ class MessagingBackend:
         if not peer or peer == "unknown":
             return None
         link = self.peer_links.get(peer)
-        if link:
+        if link and self._link_matches_peer(link, peer):
             return link
         for cached_peer, cached_link in self.peer_links.items():
             if self.hashes_equivalent(cached_peer, peer):
-                return cached_link
+                if self._link_matches_peer(cached_link, peer):
+                    return cached_link
         for link_id, cached in self._link_peer_hashes.items():
             if self.hashes_equivalent(cached, peer):
-                return self.links.get(link_id)
-        if self.active_peer_hash and self.hashes_equivalent(peer, self.active_peer_hash):
-            return self.active_link
+                link = self.links.get(link_id)
+                if link and self._link_matches_peer(link, peer):
+                    return link
         return None
 
     def _register_peer_link(self, link, peer_hash):
@@ -468,11 +486,18 @@ class MessagingBackend:
                 matches.append(link)
         return matches
 
-    def _adopt_healthy_peer_link(self, peer_hash):
-        """Promote a healthy background link for the session peer."""
+    def _adopt_healthy_peer_link(self, peer_hash, promote_session=None):
+        """Promote a healthy background link for one peer (optionally the UI session)."""
         peer = self.dest_hash_for(peer_hash)
         if not peer or peer == "unknown":
             return None
+        session_peer = self.dest_hash_for(
+            self._session_peer_hash or self.active_peer_hash or ""
+        )
+        if promote_session is None:
+            promote_session = bool(
+                session_peer and self.hashes_equivalent(peer, session_peer)
+            )
         if self.active_link and self._peer_link_active(peer):
             if self._link_interface_healthy(self.active_link):
                 if self.hashes_equivalent(
@@ -482,9 +507,15 @@ class MessagingBackend:
         for link in self._other_active_links_for_peer(peer):
             if not self._link_interface_healthy(link):
                 continue
-            self._notify_link_established(
-                link, peer, promote_active=True, background=False,
-            )
+            if not self._link_acceptable_for_peer(link, peer):
+                continue
+            if not self._link_matches_peer(link, peer):
+                continue
+            self._register_peer_link(link, peer)
+            if promote_session:
+                self._notify_link_established(
+                    link, peer, promote_active=True, background=False,
+                )
             return link
         return None
 
@@ -1407,11 +1438,31 @@ class MessagingBackend:
                 return True, "ethernet down, serial available"
 
         serial_only = self._peer_expected_transport_families(peer) == {"serial"}
+        lan_only = bool(
+            self._peer_expected_transport_families(peer)
+            and "serial" not in self._peer_expected_transport_families(peer)
+        )
+        parallel = self._parallel_sessions_allowed()
+
+        expected = self._peer_expected_transport_families(peer)
+        if parallel and expected:
+            if not self._link_interface_healthy(self.active_link):
+                return True, f"link interface offline ({type(attached).__name__ if attached else 'none'})"
+            if serial_only and att_fam == "serial":
+                return False, ""
+            if lan_only and att_fam in ("udp", "lan", "tcp"):
+                return False, ""
+            if serial_only and att_fam in ("udp", "lan", "tcp") and not in_grace:
+                return True, "serial peer requires serial transport"
+            if lan_only and att_fam == "serial" and not in_grace:
+                return True, "LAN peer requires LAN transport"
+
         if serial_only and att_fam == "serial" and self._link_interface_healthy(self.active_link):
             return False, ""
 
         if (
-            att_fam in ("udp", "lan")
+            not parallel
+            and att_fam in ("udp", "lan")
             and self._has_online_family("serial")
             and self._peer_has_path_on_family(peer, "serial")
             and not in_grace
@@ -1421,10 +1472,12 @@ class MessagingBackend:
 
         if att_fam == "serial" and not self._serial_transport_ready():
             if (self._has_online_family("udp") or self._has_online_family("lan")) and physical_lan_reachable():
-                return True, "serial offline, LAN available"
+                if not serial_only:
+                    return True, "serial offline, LAN available"
 
         if (
-            att_fam == "serial"
+            not parallel
+            and att_fam == "serial"
             and physical_lan_reachable()
             and self._has_online_family("udp")
             and not in_grace
@@ -1731,15 +1784,25 @@ class MessagingBackend:
         return out
 
     def _best_outgoing_link(self, peer_hash=None):
+        """Pick the best link for sends, locked to the peer's transport zone."""
         peer = self.dest_hash_for(
             peer_hash or self.active_peer_hash or self._session_peer_hash or ""
         )
         if not peer or peer == "unknown":
             return None
+        expected = self._peer_expected_transport_families(peer)
+        if expected == {"serial"}:
+            prefer = ("serial",)
+        elif expected & {"udp", "lan", "tcp"}:
+            prefer = ("tcp", "lan", "udp")
+        else:
+            prefer = ("tcp", "lan", "udp", "serial")
         best = None
         best_score = -1
         hub_p2p = self._hub_transport_active() and not self._peer_uses_hub_transport(peer)
         for link in self._links_for_peer(peer):
+            if not self._link_matches_peer(link, peer):
+                continue
             if not self._link_interface_healthy(link):
                 continue
             if not self._link_acceptable_for_peer(link, peer):
@@ -1747,13 +1810,22 @@ class MessagingBackend:
             iface = self._link_attached_interface(link)
             if hub_p2p and self._link_is_hub_transport(iface):
                 continue
-            score = self._link_path_score(link)
+            fam = interface_family(iface)
+            if expected:
+                if fam == "serial" and "serial" not in expected:
+                    continue
+                if fam in ("udp", "lan", "tcp") and not (expected & {"udp", "lan", "tcp"}):
+                    continue
+            fam_rank = len(prefer) - prefer.index(fam) if fam in prefer else 0
+            score = self._link_path_score(link) + fam_rank * 5
             if score > best_score:
                 best_score = score
                 best = link
         if best:
             return best
         for link in self._links_for_peer(peer):
+            if not self._link_matches_peer(link, peer):
+                continue
             if not self._link_acceptable_for_peer(link, peer):
                 continue
             iface = self._link_attached_interface(link)
@@ -2113,7 +2185,7 @@ class MessagingBackend:
         for peer in targets:
             if not self._peer_link_active(peer):
                 continue
-            link = self._best_outgoing_link(peer) or self._link_for_peer(peer)
+            link = self._queue_send_link(peer)
             if not link:
                 continue
             try:
@@ -2762,19 +2834,31 @@ class MessagingBackend:
         return self._peer_link_active(dest_hex, clean)
 
     def _peer_link_active(self, dest_hex, alt_hex=None):
-        for peer in (dest_hex, alt_hex):
-            if not peer:
+        for raw in (dest_hex, alt_hex):
+            if not raw:
                 continue
+            peer = self.dest_hash_for(raw)
             link = self._link_for_peer(peer)
             if not link:
                 continue
             try:
-                if link.status == RNS.Link.ACTIVE:
-                    return True
+                active = link.status == RNS.Link.ACTIVE
             except Exception:
+                active = True
+            if (
+                active
+                and self._link_matches_peer(link, peer)
+                and self._link_acceptable_for_peer(link, peer)
+            ):
                 return True
         found = self._find_active_link_for_peer(dest_hex, alt_hex)
-        return found is not None
+        if not found:
+            return False
+        peer = self.dest_hash_for(dest_hex or alt_hex)
+        return (
+            self._link_matches_peer(found, peer)
+            and self._link_acceptable_for_peer(found, peer)
+        )
 
     def _wait_for_peer_link(self, dest_hex, alt_hex=None, timeout_s=REVERSE_CONNECT_WAIT_S):
         deadline = time.time() + timeout_s
@@ -3087,13 +3171,24 @@ class MessagingBackend:
         self._last_link_established_at = time.time()
         if promote_active:
             self._consolidate_peer_links(peer, keep_link=link)
+            session_peer = self.dest_hash_for(self._session_peer_hash or "")
+            parallel = self._parallel_sessions_allowed()
+            adopt_session = (
+                not parallel
+                or not session_peer
+                or self.hashes_equivalent(peer, session_peer)
+                or not self.active_link
+            )
             old_active = self.active_peer_hash
-            self.active_link = link
-            self.active_peer_hash = peer
-            self._session_peer_hash = peer
-            self._send_link = link
-            if not old_active or self.hashes_equivalent(peer, old_active):
-                self._pending_sends.clear()
+            if adopt_session:
+                self.active_link = link
+                self.active_peer_hash = peer
+                self._session_peer_hash = peer
+                self._send_link = link
+                if not old_active or self.hashes_equivalent(peer, old_active):
+                    self._pending_sends.clear()
+            else:
+                self._register_peer_link(link, peer)
         label = "background" if background else "active"
         print(f"[messaging] Link ready with {peer[:16]}... ({label})")
         if self.on_link_established:
@@ -3773,7 +3868,7 @@ class MessagingBackend:
             return
         if self.is_user_disconnected(peer) or not self._peer_link_active(peer):
             return
-        link = self._link_for_peer(peer) or self.active_link
+        link = self._queue_send_link(peer) or self._link_for_peer(peer)
         self._schedule_queue_drain(peer, link=link, include_files=True)
 
     def resume_session_peer(self, peer_ip=None, peer_port=None, peer_lookup=None,
@@ -4285,34 +4380,41 @@ class MessagingBackend:
         )
         if not peer or peer == "unknown":
             return False
-        self._adopt_healthy_peer_link(peer)
         if not self._peer_link_active(peer):
             return False
-        link = self._outgoing_link(peer)
-        return bool(link and self._link_interface_healthy(link))
+        link = self._queue_send_link(peer)
+        return bool(
+            link
+            and self._link_matches_peer(link, peer)
+            and self._link_interface_healthy(link)
+        )
 
     def send_message(self, text, receipt_callback=None, msg_id=None, target_peer=None,
                      link=None):
         peer = self.dest_hash_for(
             target_peer or self.active_peer_hash or self._session_peer_hash or ""
         )
-        self._adopt_healthy_peer_link(peer)
-        if not self._peer_link_active(peer):
-            print(f"[messaging] send_message: no active link to {peer[:16] if peer else 'peer'}")
+        if not peer or peer == "unknown":
+            print("[messaging] send_message: no target peer")
             return False
-        link = link or self._best_outgoing_link(peer)
-        if not link:
-            print(f"[messaging] send_message: no link to {peer[:16] if peer else 'peer'}")
+        if not self._peer_link_active(peer):
+            print(f"[messaging] send_message: no active link to {peer[:16]}")
+            return False
+        link = self._queue_send_link(peer, link_hint=link)
+        if not link or not self._link_matches_peer(link, peer):
+            print(f"[messaging] send_message: no transport-safe link to {peer[:16]}")
             return False
         if not self._link_interface_healthy(link):
-            alt = self._best_outgoing_link(peer)
-            if alt and alt.link_id != link.link_id and self._link_interface_healthy(alt):
+            alt = self._queue_send_link(peer)
+            if (
+                alt
+                and alt.link_id != link.link_id
+                and self._link_matches_peer(alt, peer)
+                and self._link_interface_healthy(alt)
+            ):
                 link = alt
-                self._notify_link_established(
-                    link, peer, promote_active=True, background=False,
-                )
             else:
-                print(f"[messaging] send_message: link transport offline for {peer[:16] if peer else 'peer'}")
+                print(f"[messaging] send_message: link transport offline for {peer[:16]}")
                 return False
         msg = ChatMessage(MESSAGE_TYPE_TEXT, text, msg_id=msg_id)
         data = msg.to_json().encode("utf-8")

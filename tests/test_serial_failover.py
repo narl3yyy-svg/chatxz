@@ -368,14 +368,25 @@ class FailoverPreferenceTests(unittest.TestCase):
         ubuntu = "f1c2ac9061239f7c096701f02969729c"
         backend.active_peer_hash = windows
         backend._session_peer_hash = windows
-        with patch.object(backend, "_teardown_other_peer_links", return_value=0) as teardown:
-            with patch.object(backend, "_teardown_mismatched_links", return_value=0):
-                with patch.object(backend, "_peer_link_active", return_value=False):
-                    with patch.object(backend, "_wait_for_identity", return_value=(None, ubuntu)):
-                        backend._connect_to_locked(ubuntu, user_initiated=True)
+        with patch.object(backend, "_parallel_sessions_allowed", return_value=False):
+            with patch.object(backend, "_teardown_other_peer_links", return_value=0) as teardown:
+                with patch.object(backend, "_teardown_mismatched_links", return_value=0):
+                    with patch.object(backend, "_peer_link_active", return_value=False):
+                        with patch.object(backend, "_wait_for_identity", return_value=(None, ubuntu)):
+                            backend._connect_to_locked(ubuntu, user_initiated=True)
         self.assertEqual(backend.active_peer_hash, ubuntu)
         self.assertEqual(backend._session_peer_hash, ubuntu)
         teardown.assert_called_once()
+
+    def test_parallel_connect_keeps_other_peer_links(self):
+        backend = self._backend()
+        windows = "87a012c46dc2274afccae6fe597b8675"
+        ubuntu = "f1c2ac9061239f7c096701f02969729c"
+        backend.active_peer_hash = windows
+        backend._session_peer_hash = windows
+        with patch.object(backend, "_parallel_sessions_allowed", return_value=True):
+            closed = backend._teardown_other_peer_links(ubuntu)
+        self.assertEqual(closed, 0)
 
     def test_session_needs_reconnect_skips_during_connect(self):
         backend = self._backend()

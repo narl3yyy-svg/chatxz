@@ -2361,18 +2361,19 @@ class ChatWebServer:
                 if via == "rns":
                     by_rns = p
         if by_serial and by_rns:
-            from chatxz.utils.platform import physical_lan_reachable
             from chatxz.utils.lan_scope import peer_in_scope
+            from chatxz.core.transport_isolation import dual_transport_isolation_enabled
 
             rns_ip = (by_rns.get("ip") or "").strip()
             scope = self._discovery_scope_ip()
-            if (
-                rns_ip
-                and physical_lan_reachable()
-                and (not scope or peer_in_scope(rns_ip, scope))
-            ):
+            in_scope = rns_ip and (not scope or peer_in_scope(rns_ip, scope))
+            if peer_ip and rns_ip and peer_ip == rns_ip:
                 return by_rns
-            return by_serial
+            if peer_ip and rns_ip and peer_ip != rns_ip:
+                return by_serial
+            if dual_transport_isolation_enabled() or not in_scope:
+                return by_serial
+            return by_rns
         if by_serial:
             return by_serial
         if by_rns:
