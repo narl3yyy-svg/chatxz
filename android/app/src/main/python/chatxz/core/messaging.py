@@ -22,6 +22,7 @@ from chatxz.core.lan_rns import (
     peer_path_entry,
     peer_path_on_family,
     prune_bridged_lan_paths,
+    prune_lan_path_for_peer,
     prune_stale_lan_paths,
     request_path_for_hash,
     request_paths_for_hash,
@@ -303,6 +304,12 @@ class MessagingBackend:
                 return {"serial"}
         if meta and (meta.get("via") or "").strip() == "serial":
             return {"serial"}
+        if self._peer_has_path_on_family(peer, "serial"):
+            meta = meta or self._peer_discovery_meta(peer) or {}
+            ip = (meta.get("ip") or "").strip()
+            via = (meta.get("via") or "").strip()
+            if via == "serial" or not ip or not self._peer_lan_ip_usable(ip):
+                return {"serial"}
         if self._peer_has_path_on_family(peer, "udp") or self._peer_has_path_on_family(peer, "tcp"):
             return {"udp", "lan", "tcp"}
         return set()
@@ -1269,6 +1276,8 @@ class MessagingBackend:
                 print("[connect] Serial interface offline — skipping serial path prep")
                 clear_paths_on_family("serial")
                 return False
+            prune_lan_path_for_peer(peer)
+            clear_peer_path_unless_family(peer, "serial")
             request_paths_for_hash(peer, family="serial")
             path_iface = wait_for_peer_path_families(
                 peer, families=("serial",), timeout_s=18.0, should_stop=stop,
@@ -2245,6 +2254,8 @@ class MessagingBackend:
 
     def _burst_serial_announce(self, count=None, interval=None):
         """Send several RNS announces on serial only — slow links need repeats."""
+        if self._connect_in_progress or self._failover_in_progress:
+            return 0
         if not self.destination or not self._serial_transport_ready():
             return 0
         suppress_offline_lan_transports()
@@ -2581,6 +2592,7 @@ class MessagingBackend:
             print("[connect] Serial path blocked — Serial in RNS: no")
             return False
         clear_peer_path_unless_family(dest_hex, "serial")
+        prune_lan_path_for_peer(dest_hex)
         suppress_offline_lan_transports()
         dedupe_serial_interfaces()
         if not self._peer_has_path_on_family(dest_hex, "serial"):
@@ -2761,6 +2773,8 @@ class MessagingBackend:
 
     def _should_rns_auto_announce(self):
         """Periodic RNS-only announces on serial (no LAN beacon/unicast)."""
+        if self._connect_in_progress or self._failover_in_progress:
+            return False
         if not self._serial_transport_ready():
             return False
         if self._serial_mode_active():
@@ -3188,17 +3202,7 @@ class MessagingBackend:
 
         incoming_fam = interface_family(self._link_attached_interface(link))
         expected = self._peer_expected_transport_families(peer_hash)
-        if expected:
-            if incoming_fam == "serial" and "serial" not in expected:
-                try:
-                    link.teardown()
-                except Exception:
-                    pass
-                print(
-                    f"[messaging] Rejected serial inbound from {peer_hash[:16]}... "
-                    "(LAN peer)"
-                )
-                return
+        if expected and incoming_fam != "serial":
             if incoming_fam in ("udp", "lan", "tcp") and not (expected & {"udp", "lan", "tcp"}):
                 try:
                     link.teardown()
@@ -3209,6 +3213,10 @@ class MessagingBackend:
                     "(serial peer)"
                 )
                 return
+        if incoming_fam == "serial" and peer_hash and peer_hash != "unknown":
+            canon = self.dest_hash_for(peer_hash)
+            if canon and canon != "unknown":
+                prune_lan_path_for_peer(canon)
 
         if self.active_link and self.active_peer_hash and not is_hub_peer_hash(self.active_peer_hash):
             same_peer = (
@@ -3728,6 +3736,8 @@ class MessagingBackend:
             return False
         if self.active_link and self._peer_link_active(peer):
             return True
+        if self._connect_in_progress:
+            return False
         if self._failover_in_progress:
             return False
         print(f"[connect] Resuming session with {peer[:16]}...")
@@ -3831,7 +3841,10 @@ class MessagingBackend:
                     self._adopt_healthy_peer_link(peer)
                     print(f"[connect] Failover complete via {prefer}")
                     return True
-                print(f"[connect] Failover connect via {prefer} failed — trying next transport")
+                if prefer == families[-1]:
+                    print(f"[connect] Failover connect via {prefer} failed")
+                else:
+                    print(f"[connect] Failover connect via {prefer} failed — trying next transport")
             return False
         finally:
             self._failover_in_progress = False

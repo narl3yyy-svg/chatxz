@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.158": [
+        "Serial inbound links are always accepted on SerialInterface — Arch no longer rejects Ubuntu when a stale UDP path exists on the shared 10.10.10.x LAN.",
+        "IP-less serial RNS announces are discovered using the receiving interface, so Arch sees Ubuntu (serial) even when a LAN path is cached.",
+        "Serial connect pauses announce bursts and session-resume while a link attempt is in progress.",
+    ],
     "0.3.157": [
         "Serial connect: one consolidated attempt (no triple prime/outbound loops) with full 22s timeout and inbound wait — fixes Arch↔Ubuntu USB link failing with Peer not reachable.",
         "Discovery resolver prefers via=serial over stale LAN/rns entries so dual-transport nodes route serial peers correctly.",

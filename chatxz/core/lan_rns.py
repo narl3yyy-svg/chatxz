@@ -215,6 +215,34 @@ def peer_path_hops(hash_hex):
         return None
 
 
+def _dest_key_bytes(destination_hash):
+    if isinstance(destination_hash, bytes):
+        return destination_hash
+    clean = (destination_hash or "").replace(":", "").strip().lower()
+    if len(clean) != 32:
+        return None
+    try:
+        return bytes.fromhex(clean)
+    except ValueError:
+        return None
+
+
+def announce_receiving_interface(destination_hash):
+    """RNS interface that most recently received an announce for this destination."""
+    dest_bytes = _dest_key_bytes(destination_hash)
+    if dest_bytes is None:
+        return None
+    try:
+        with RNS.Transport.announce_table_lock:
+            entry = RNS.Transport.announce_table.get(dest_bytes)
+        if not entry or len(entry) <= 5:
+            return None
+        packet = entry[5]
+        return getattr(packet, "receiving_interface", None)
+    except Exception:
+        return None
+
+
 def is_lan_transport_family(family):
     return family in ("udp", "lan", "tcp")
 
@@ -272,6 +300,24 @@ def prune_cross_zone_paths(serial_peer_hashes=None):
     except Exception:
         pass
     return removed
+
+
+def prune_lan_path_for_peer(hash_hex):
+    """Remove a cached LAN path for one peer when serial is the active transport."""
+    dest_bytes = _dest_bytes_for_hash(hash_hex)
+    if dest_bytes is None:
+        return False
+    try:
+        with RNS.Transport.path_table_lock:
+            entry = RNS.Transport.path_table.get(dest_bytes)
+            if not entry or len(entry) <= 5:
+                return False
+            if is_lan_transport_family(interface_family(entry[5])):
+                RNS.Transport.path_table.pop(dest_bytes, None)
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def peer_path_on_family(hash_hex, family):

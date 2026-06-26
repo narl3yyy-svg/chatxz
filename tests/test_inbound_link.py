@@ -129,6 +129,46 @@ class InboundLinkTests(unittest.TestCase):
         self.assertTrue(backend.is_user_disconnected(peer))
         self.assertFalse(backend.resume_session_peer())
 
+    def test_resume_session_skips_during_connect(self):
+        backend = _make_backend()
+        peer = "4a2aa1dbbed382886b0333274e546ba8"
+        backend._session_peer_hash = peer
+        backend._connect_in_progress = True
+        self.assertFalse(backend.resume_session_peer())
+
+    def test_serial_inbound_not_rejected_for_lan_expected_peer(self):
+        backend = _make_backend()
+        peer = "f1c2ac9061239f7c096701f02969729c"
+        remote_ident = "f1c2ac9061239f7c096701f02969729c"
+        link = _FakeLink("66" * 16, remote_ident)
+        link.attached_interface = MagicMock()
+        established = []
+
+        def on_established(p, l, **kwargs):
+            established.append(p)
+
+        backend.on_link_established = on_established
+        backend.peer_transport_resolver = lambda _h: {
+            "hash": peer,
+            "via": "rns",
+            "ip": "10.10.10.10",
+        }
+        with patch.object(backend, "_peer_allowed_by_scope", return_value=True):
+            with patch.object(
+                backend,
+                "_peer_expected_transport_families",
+                return_value={"udp", "lan", "tcp"},
+            ):
+                with patch("chatxz.core.messaging.interface_family", return_value="serial"):
+                    with patch.object(backend, "_setup_link"):
+                        with patch(
+                            "chatxz.core.messaging.message_dest_hash_for_identity",
+                            return_value=peer,
+                        ):
+                            with patch.object(backend, "dest_hash_for", side_effect=lambda h: h):
+                                backend._link_callback(link)
+        self.assertEqual(len(established), 1)
+
     def test_user_initiated_connect_clears_disconnect_flag(self):
         backend = _make_backend()
         peer = "4a2aa1dbbed382886b0333274e546ba8"

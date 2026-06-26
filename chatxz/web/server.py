@@ -4404,6 +4404,7 @@ class ChatWebServer:
                 now = time.time()
                 if (
                     now - self._session_resume_last >= 45.0
+                    and not getattr(self.messaging, "_connect_in_progress", False)
                     and not getattr(self.messaging, "_failover_in_progress", False)
                     and (now - getattr(self.messaging, "_failover_last_attempt", 0))
                     >= getattr(self.messaging, "_failover_cooldown", lambda: 20.0)()

@@ -377,6 +377,20 @@ class FailoverPreferenceTests(unittest.TestCase):
                             families = backend._failover_families_to_try(peer)
         self.assertEqual(families, ["serial"])
 
+    def test_expected_transport_serial_when_serial_path_and_out_of_scope_ip(self):
+        backend = self._backend()
+        peer = "f1c2ac9061239f7c096701f02969729c"
+        backend.peer_transport_resolver = lambda _h: {
+            "hash": peer,
+            "via": "rns",
+            "ip": "10.10.10.10",
+        }
+        with patch.object(backend, "_serial_transport_ready", return_value=True):
+            with patch.object(backend, "_peer_has_path_on_family", side_effect=lambda _p, fam: fam == "serial"):
+                with patch.object(backend, "_peer_lan_ip_usable", return_value=False):
+                    expected = backend._peer_expected_transport_families(peer)
+        self.assertEqual(expected, {"serial"})
+
     def test_prime_serial_path_skips_when_path_cached(self):
         backend = self._backend()
         peer = "436ce5fd79d0932d436ce5fd79d0932d"
