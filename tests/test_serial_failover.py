@@ -315,6 +315,44 @@ class FailoverPreferenceTests(unittest.TestCase):
                     chosen = backend._queue_send_link(peer, link_hint=udp_link)
         self.assertIsNone(chosen)
 
+    def test_failover_serial_only_peer(self):
+        backend = self._backend()
+        peer = "f1c2ac9061239f7c096701f02969729c"
+        backend.peer_transport_resolver = lambda _h: {
+            "hash": peer,
+            "name": "UBUNTU",
+            "via": "serial",
+        }
+        with patch.object(backend, "_hub_transport_active", return_value=False):
+            with patch.object(backend, "_has_online_family", return_value=True):
+                with patch.object(backend, "_serial_transport_ready", return_value=True):
+                    with patch("chatxz.core.messaging.physical_lan_reachable", return_value=True):
+                        families = backend._failover_families_to_try(peer)
+        self.assertEqual(families, ["serial"])
+
+    def test_connect_user_initiated_binds_session_early(self):
+        backend = self._backend()
+        windows = "87a012c46dc2274afccae6fe597b8675"
+        ubuntu = "f1c2ac9061239f7c096701f02969729c"
+        backend.active_peer_hash = windows
+        backend._session_peer_hash = windows
+        with patch.object(backend, "_teardown_other_peer_links", return_value=0) as teardown:
+            with patch.object(backend, "_teardown_mismatched_links", return_value=0):
+                with patch.object(backend, "_peer_link_active", return_value=False):
+                    with patch.object(backend, "_wait_for_identity", return_value=(None, ubuntu)):
+                        backend._connect_to_locked(ubuntu, user_initiated=True)
+        self.assertEqual(backend.active_peer_hash, ubuntu)
+        self.assertEqual(backend._session_peer_hash, ubuntu)
+        teardown.assert_called_once()
+
+    def test_session_needs_reconnect_skips_during_connect(self):
+        backend = self._backend()
+        backend._connect_in_progress = True
+        backend.active_peer_hash = "87a012c46dc2274afccae6fe597b8675"
+        needs, reason = backend.session_needs_reconnect()
+        self.assertFalse(needs)
+        self.assertEqual(reason, "")
+
 
 if __name__ == "__main__":
     unittest.main()

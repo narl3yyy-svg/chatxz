@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from chatxz.core.transport_isolation import (
     _filter_interfaces,
+    _pin_announce_interface,
     apply_transport_isolation,
     dual_transport_isolation_enabled,
     families_compatible,
@@ -50,17 +51,37 @@ class TransportIsolationTests(unittest.TestCase):
         import RNS.Transport as Transport
         import chatxz.core.transport_isolation as ti
 
-        original = Transport.path_request
+        original_pr = Transport.path_request
+        original_ob = Transport.outbound
         ti._patched = False
         try:
             apply_transport_isolation()
             self.assertTrue(ti._patched)
-            self.assertIsNot(Transport.path_request, original)
+            self.assertIsNot(Transport.path_request, original_pr)
+            self.assertIsNot(Transport.outbound, original_ob)
             apply_transport_isolation()
             self.assertTrue(ti._patched)
         finally:
-            Transport.path_request = original
+            Transport.path_request = original_pr
+            Transport.outbound = original_ob
             ti._patched = False
+
+    def test_pin_announce_interface_on_rebroadcast(self):
+        import RNS
+
+        serial_iface = MagicMock()
+        packet = MagicMock()
+        packet.packet_type = RNS.Packet.ANNOUNCE
+        packet.hops = 2
+        packet.attached_interface = None
+        packet.receiving_interface = serial_iface
+        packet.destination_hash = b"\x01" * 16
+        with patch(
+            "chatxz.core.transport_isolation.dual_transport_isolation_enabled",
+            return_value=True,
+        ):
+            _pin_announce_interface(packet)
+        self.assertIs(packet.attached_interface, serial_iface)
 
 
 if __name__ == "__main__":

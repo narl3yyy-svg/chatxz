@@ -1552,6 +1552,17 @@ class ChatWebServer:
                 if self.debug:
                     print("[hub] Dropped group message (hub disabled)")
                 return
+            chat_peer = HUB_GROUP_PEER
+            if sender_hash and sender_hash != "system":
+                if self.messaging:
+                    sender = (
+                        self.messaging.canonical_connect_hash(sender_hash)
+                        or self._peer_dest_hash(sender_hash)
+                    )
+                else:
+                    sender = self._peer_dest_hash(sender_hash)
+            else:
+                sender = "system"
         elif (
             sender_hash
             and sender_hash != "system"
@@ -1564,16 +1575,6 @@ class ChatWebServer:
                     "(outside LAN scope)"
                 )
             return
-            chat_peer = HUB_GROUP_PEER
-            if sender_hash and sender_hash != "system":
-                sender = self._peer_dest_hash(sender_hash)
-                if self.messaging:
-                    sender = (
-                        self.messaging.canonical_connect_hash(sender_hash)
-                        or sender
-                    )
-            else:
-                sender = "system"
         elif sender_hash and sender_hash != "system":
             if self.messaging:
                 chat_peer = (
@@ -1818,6 +1819,8 @@ class ChatWebServer:
         ):
             return False
         if self.messaging:
+            if self.messaging._peer_link_active(clean):
+                return True
             if self.messaging.active_peer_hash and self._peers_equivalent(
                 clean, self.messaging.active_peer_hash
             ):
@@ -1884,9 +1887,35 @@ class ChatWebServer:
             pass
 
         for old in removed_clean:
+            still_linked = bool(
+                self.messaging
+                and (
+                    self.messaging._peer_link_active(old)
+                    or (replacement and self.messaging._peer_link_active(replacement))
+                )
+            )
             if self.messaging:
-                self.messaging.disconnect_peer(old)
-                self.messaging.clear_queue(old)
+                if still_linked and replacement:
+                    canon = replacement
+                    if self.messaging.active_peer_hash and self._peers_equivalent(
+                        self.messaging.active_peer_hash, old
+                    ):
+                        self.messaging.active_peer_hash = canon
+                    if self.messaging._session_peer_hash and self._peers_equivalent(
+                        self.messaging._session_peer_hash, old
+                    ):
+                        self.messaging._session_peer_hash = canon
+                    link = (
+                        self.messaging._link_for_peer(replacement)
+                        or self.messaging._link_for_peer(old)
+                        or self.messaging.active_link
+                    )
+                    if link:
+                        self.messaging._register_peer_link(link, canon)
+                        self.messaging._cache_link_peer(link, canon)
+                else:
+                    self.messaging.disconnect_peer(old)
+                    self.messaging.clear_queue(old)
             delete_saved_contact(self.config_dir, old)
             self._clear_history_for_peer(old)
             self._clear_queue_for_peer(old)
@@ -2320,6 +2349,10 @@ class ChatWebServer:
                 self.discovery
                 and hub_role == "off"
                 and not self._peer_is_current(resolved_hash)
+                and not (
+                    self.messaging
+                    and self.messaging._peer_link_active(resolved_hash)
+                )
             ):
                 return web.json_response({
                     "error": "Stale peer hash — use the peer in Discovered or wait for Announce",
@@ -2816,6 +2849,7 @@ class ChatWebServer:
                 continue
             from chatxz.core.lan_rns import (
                 clear_paths_on_family,
+                prune_bridged_lan_paths,
                 prune_stale_lan_paths,
                 suppress_offline_lan_transports,
             )
@@ -2832,6 +2866,7 @@ class ChatWebServer:
                 await self._run_blocking(prune_dead_serial_interfaces)
                 await self._run_blocking(clear_paths_on_family, "serial")
             await self._run_blocking(prune_stale_lan_paths)
+            await self._run_blocking(prune_bridged_lan_paths)
             peer = self._peer_dest_hash(
                 self.messaging.active_peer_hash
                 or getattr(self.messaging, "_session_peer_hash", None)
@@ -4470,7 +4505,11 @@ class ChatWebServer:
                     if meta:
                         peer_ip = meta.get("ip")
                     target_hash = self._resolve_current_peer_hash(target_hash, peer_ip)
-                    if self.discovery and not self._peer_is_current(target_hash):
+                    if (
+                        self.discovery
+                        and not self._peer_is_current(target_hash)
+                        and not self.messaging.peer_send_ready(target_hash)
+                    ):
                         await ws.send_str(json.dumps({
                             "type": "info",
                             "data": "Stale peer hash — open the peer from Discovered",

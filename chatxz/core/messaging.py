@@ -21,6 +21,7 @@ from chatxz.core.lan_rns import (
     online_interfaces,
     peer_path_entry,
     peer_path_on_family,
+    prune_bridged_lan_paths,
     prune_stale_lan_paths,
     request_path_for_hash,
     request_paths_for_hash,
@@ -227,6 +228,7 @@ class MessagingBackend:
         self.peer_links = {}
         self._connect_user_initiated = False
         self._connect_background = False
+        self._connect_in_progress = False
         self._peer_lan_unreachable = {}
         self._user_disconnected = set()
         self._transport_reconnect_pending = False
@@ -308,6 +310,49 @@ class MessagingBackend:
         if fam in ("udp", "lan", "tcp"):
             return bool(expected & {"udp", "lan", "tcp"})
         return fam in expected
+
+    def _peer_path_interface_for_peer(self, peer_hash):
+        """Return path interface only when it matches the peer's transport zone."""
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown":
+            return None
+        scrub_peer_path(peer)
+        _, path_iface = peer_path_entry(peer)
+        if not path_iface or not interface_is_healthy(path_iface):
+            return None
+        expected = self._peer_expected_transport_families(peer)
+        if not expected:
+            return path_iface
+        fam = interface_family(path_iface)
+        if fam == "serial":
+            return path_iface if "serial" in expected else None
+        if fam in ("udp", "lan", "tcp"):
+            return path_iface if expected & {"udp", "lan", "tcp"} else None
+        return path_iface if fam in expected else None
+
+    def _teardown_other_peer_links(self, keep_peer_hash, handoff=False):
+        """Close active links to every peer except the one being connected."""
+        keep = self.dest_hash_for(keep_peer_hash)
+        if not keep or keep == "unknown":
+            return 0
+        closed = 0
+        for link in list(self.links.values()):
+            remote = self.dest_hash_for(self._peer_for_link(link))
+            if not remote or remote == "unknown" or self.hashes_equivalent(remote, keep):
+                continue
+            try:
+                if handoff:
+                    self._link_handoff = True
+                link.teardown()
+                closed += 1
+            except Exception:
+                pass
+            finally:
+                if handoff:
+                    self._link_handoff = False
+        if closed:
+            print(f"[connect] Closed {closed} link(s) to other peer(s)")
+        return closed
 
     def _peer_allowed_by_scope(self, peer_hash, link=None):
         if link and not self._link_acceptable_for_peer(link, peer_hash):
@@ -1032,12 +1077,21 @@ class MessagingBackend:
             order = ("serial", "udp", "tcp", "lan") if tcp_lan else ("serial", "udp", "lan")
         else:
             order = ("udp", "tcp", "serial", "lan") if tcp_lan else ("udp", "serial", "lan")
+        expected = self._peer_expected_transport_families(peer)
         seen = set()
         out = []
         for fam in order:
-            if fam and fam not in seen:
-                seen.add(fam)
-                out.append(fam)
+            if not fam or fam in seen:
+                continue
+            if expected:
+                if fam == "serial" and "serial" not in expected:
+                    continue
+                if fam in ("udp", "lan", "tcp") and not (expected & {"udp", "lan", "tcp"}):
+                    continue
+            seen.add(fam)
+            out.append(fam)
+        if expected == {"serial"} and "serial" in seen:
+            return ["serial"]
         return out
 
     def _failover_announce(self, prefer_family, peer_ip=None):
@@ -1150,6 +1204,9 @@ class MessagingBackend:
         pruned = prune_stale_lan_paths()
         if pruned:
             print(f"[connect] Cleared {pruned} stale LAN path(s)")
+        bridged = prune_bridged_lan_paths()
+        if bridged:
+            print(f"[connect] Cleared {bridged} bridged LAN path(s)")
         if prefer_family == "serial":
             keep_families = ("serial",)
         elif prefer_family == "tcp":
@@ -1255,7 +1312,7 @@ class MessagingBackend:
         if not self._link_interface_healthy(self.active_link):
             return True, f"link interface offline ({type(attached).__name__ if attached else 'none'})"
 
-        path_iface = self._peer_path_interface(peer)
+        path_iface = self._peer_path_interface_for_peer(peer)
         att_fam = interface_family(attached)
         path_fam = interface_family(path_iface) if path_iface else ""
 
@@ -1288,11 +1345,16 @@ class MessagingBackend:
             if not in_grace:
                 return True, "ethernet down, serial available"
 
+        serial_only = self._peer_expected_transport_families(peer) == {"serial"}
+        if serial_only and att_fam == "serial" and self._link_interface_healthy(self.active_link):
+            return False, ""
+
         if (
             att_fam in ("udp", "lan")
             and self._has_online_family("serial")
             and self._peer_has_path_on_family(peer, "serial")
             and not in_grace
+            and not serial_only
         ):
             return True, "peer path on serial"
 
@@ -1305,10 +1367,11 @@ class MessagingBackend:
             and physical_lan_reachable()
             and self._has_online_family("udp")
             and not in_grace
+            and not serial_only
         ):
             if self._serial_faster_than_lan(peer) and self._peer_has_path_on_family(peer, "serial"):
                 return False, ""
-            path_iface = self._peer_path_interface(peer)
+            path_iface = self._peer_path_interface_for_peer(peer)
             if path_iface and interface_family(path_iface) == "serial":
                 if self._serial_faster_than_lan(peer):
                     return False, ""
@@ -1344,6 +1407,8 @@ class MessagingBackend:
 
     def session_needs_reconnect(self):
         """True when the primary session peer's RNS link is missing or unhealthy."""
+        if self._connect_in_progress:
+            return False, ""
         peer = self.dest_hash_for(self.active_peer_hash or self._session_peer_hash or "")
         if not peer or peer == "unknown":
             return False, ""
@@ -3602,10 +3667,31 @@ class MessagingBackend:
             if self._interrupted():
                 return False
 
+            self._connect_in_progress = True
             self._connect_user_initiated = bool(user_initiated)
             self._connect_background = bool(respond_to_wake and not user_initiated)
             self._connect_failover = bool(failover)
 
+            try:
+                return self._connect_to_locked(
+                    destination_hash_hex,
+                    peer_ip=peer_ip,
+                    peer_port=peer_port,
+                    peer_lookup=peer_lookup,
+                    caller_ip=caller_ip,
+                    caller_port=caller_port,
+                    replace=replace,
+                    failover=failover,
+                    respond_to_wake=respond_to_wake,
+                    user_initiated=user_initiated,
+                )
+            finally:
+                self._connect_in_progress = False
+
+    def _connect_to_locked(self, destination_hash_hex, peer_ip=None, peer_port=None,
+                           peer_lookup=None, caller_ip=None, caller_port=8742,
+                           replace=False, failover=False, respond_to_wake=False,
+                           user_initiated=False):
             clean = normalize_hash(destination_hash_hex)
             if len(clean) != 32:
                 print(f"[connect] Invalid hash length ({len(clean)} chars, expected 32)")
@@ -3622,6 +3708,10 @@ class MessagingBackend:
 
             if user_initiated:
                 self.clear_user_disconnected(clean)
+                session_hash = self.dest_hash_for(clean) or clean
+                self._session_peer_hash = session_hash
+                self.active_peer_hash = session_hash
+                self._teardown_other_peer_links(session_hash)
                 pruned = self._teardown_mismatched_links(clean)
                 if pruned:
                     print(f"[connect] Closed {pruned} stale link(s) for {clean[:16]}...")
@@ -3728,6 +3818,9 @@ class MessagingBackend:
             )
             serial_only = serial_ready and (prefer_serial or not lan_ready or peer_lan_down)
             prune_stale_lan_paths()
+            bridged = prune_bridged_lan_paths()
+            if bridged:
+                print(f"[connect] Cleared {bridged} bridged LAN path(s)")
             if prefer_serial:
                 clear_peer_path_unless_family(dest_hex, "serial")
                 peer_ip = None

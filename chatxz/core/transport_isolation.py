@@ -12,6 +12,7 @@ _LAN_FAMILIES = frozenset({"udp", "lan", "tcp"})
 _SERIAL = "serial"
 _patched = False
 _original_path_request = None
+_original_outbound = None
 
 
 def dual_transport_isolation_enabled():
@@ -57,9 +58,38 @@ def _filter_interfaces(attached_interface, interfaces):
     return out
 
 
+def _pin_announce_interface(packet):
+    """Keep rebroadcasted announces on the interface that received them."""
+    if not dual_transport_isolation_enabled():
+        return
+    try:
+        if packet.packet_type != RNS.Packet.ANNOUNCE or packet.hops <= 0:
+            return
+        if packet.attached_interface is not None:
+            return
+        src_iface = getattr(packet, "receiving_interface", None)
+        if src_iface is None:
+            import RNS.Transport as Transport
+            with Transport.announce_table_lock:
+                entry = Transport.announce_table.get(packet.destination_hash)
+            if entry and len(entry) > 5:
+                orig = entry[5]
+                src_iface = getattr(orig, "receiving_interface", None)
+        if src_iface is None:
+            import RNS.Transport as Transport
+            with Transport.path_table_lock:
+                entry = Transport.path_table.get(packet.destination_hash)
+            if entry and len(entry) > 5:
+                src_iface = entry[5]
+        if src_iface is not None:
+            packet.attached_interface = src_iface
+    except Exception:
+        pass
+
+
 def apply_transport_isolation():
     """Patch RNS Transport.path_request to stay within transport zones."""
-    global _patched, _original_path_request
+    global _patched, _original_path_request, _original_outbound
     if _patched:
         return
     try:
@@ -67,6 +97,7 @@ def apply_transport_isolation():
     except Exception:
         return
     _original_path_request = Transport.path_request
+    _original_outbound = Transport.outbound
 
     @staticmethod
     def path_request(
@@ -112,6 +143,12 @@ def apply_transport_isolation():
         finally:
             Transport.interfaces = original_interfaces
 
+    @staticmethod
+    def outbound(packet):
+        _pin_announce_interface(packet)
+        return _original_outbound(packet)
+
     Transport.path_request = path_request
+    Transport.outbound = outbound
     _patched = True
     print("[network] Dual-transport isolation active (serial ↔ LAN path bridge blocked)")

@@ -238,6 +238,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.151** — **Serial session stability:** switching peers no longer hijacks failover to the previous LAN peer; stale hash checks honor active serial links; announce rebroadcast stays on the receiving transport; bridged multi-hop LAN paths pruned
 - **v0.3.150** — **Cross-talk fix:** serial and LAN transports are isolated — messages to Ubuntu cannot leak to Windows; rebroadcasted LAN peers no longer appear on serial discovery
 - **v0.3.149** — **Dual LAN + serial connect:** Arch↔Windows stays on pinned LAN; Arch↔Ubuntu uses serial first (clears stale UDP paths, skips bogus LAN quick-connect)
 - **v0.3.148** — **Serial startup fix:** no duplicate hot-add when RNS already loaded `/dev/ttyUSB0` from config — fixes Ubuntu `NoneType is_open` crash on startup

@@ -219,6 +219,36 @@ def is_lan_transport_family(family):
     return family in ("udp", "lan", "tcp")
 
 
+def prune_bridged_lan_paths():
+    """Drop multi-hop LAN paths when serial+LAN are both up (rebroadcast bridge artifacts)."""
+    try:
+        from chatxz.core.transport_isolation import dual_transport_isolation_enabled
+        if not dual_transport_isolation_enabled():
+            return 0
+    except Exception:
+        return 0
+    removed = 0
+    try:
+        with RNS.Transport.path_table_lock:
+            for dest_bytes, entry in list(RNS.Transport.path_table.items()):
+                if not entry or len(entry) <= 5:
+                    continue
+                iface = entry[5]
+                fam = interface_family(iface)
+                if fam not in ("udp", "lan", "tcp"):
+                    continue
+                try:
+                    hops = int(entry[2])
+                except Exception:
+                    hops = 0
+                if hops > 1:
+                    RNS.Transport.path_table.pop(dest_bytes, None)
+                    removed += 1
+    except Exception:
+        pass
+    return removed
+
+
 def prune_cross_zone_paths(serial_peer_hashes=None):
     """Drop LAN paths for serial-only peers and serial paths for in-scope LAN peers."""
     serial_peers = {
