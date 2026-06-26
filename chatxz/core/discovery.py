@@ -353,7 +353,7 @@ class PeerDiscovery:
             "name": name or hash_hex[:8],
             "app": app_name,
             "last_seen": time.time(),
-            "via": "rns",
+            "via": "serial" if (not announce_ip and serial_discovery_active()) else "rns",
         }
         if announce_ip:
             peer["ip"] = announce_ip

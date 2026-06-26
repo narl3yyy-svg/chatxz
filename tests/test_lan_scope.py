@@ -141,6 +141,23 @@ class LanScopeTests(unittest.TestCase):
                 })
         self.assertEqual(len(disc.peers), 1)
 
+    def test_ipless_rns_peer_stored_as_serial_via(self):
+        from unittest.mock import patch
+
+        disc = PeerDiscovery()
+        peer_hash = "f" * 32
+        with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
+            with patch.object(disc, "_scope_ip", return_value="10.0.5.10"):
+                ok = disc._store_peer({
+                    "hash": peer_hash,
+                    "name": "UBUNTU",
+                    "via": "serial",
+                    "last_seen": __import__("time").time(),
+                })
+        self.assertTrue(ok)
+        self.assertEqual(disc.peers[peer_hash].get("via"), "serial")
+        self.assertNotIn("ip", disc.peers[peer_hash])
+
     def test_serial_via_peer_bypasses_scope(self):
         from unittest.mock import patch
 

@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.149": [
+        "Dual transport fix: when a peer has no in-scope LAN IP (USB serial neighbor), Connect goes straight to SerialInterface — no more failed LAN/UDP quick-connect to cross-subnet peers.",
+        "Stale UDP path entries are cleared before serial priming so Arch↔Ubuntu messaging works while Arch↔Windows stays on the pinned 10.10 LAN.",
+        "IP-less RNS discovers are tagged via=serial for reliable serial-first routing.",
+    ],
     "0.3.148": [
         "Fixed Ubuntu/Linux serial startup crash when USB was already in the RNS config — chatxz no longer hot-adds a duplicate SerialInterface on /dev/ttyUSB0 during boot.",
         "Serial dedupe now keeps the healthiest interface and stops reconnect loops without nulling the port handle (avoids RNS readLoop NoneType errors).",

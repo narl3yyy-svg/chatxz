@@ -236,6 +236,15 @@ def scrub_peer_path(hash_hex):
     return False
 
 
+def clear_peer_path_unless_family(hash_hex, family):
+    """Drop cached path when it points at a different transport family."""
+    scrub_peer_path(hash_hex)
+    _, path_iface = peer_path_entry(hash_hex)
+    if path_iface and interface_family(path_iface) != family:
+        return clear_peer_path(hash_hex)
+    return False
+
+
 def prune_stale_lan_paths():
     """Drop cached UDP/LAN paths when ethernet/Wi-Fi is not reachable."""
     removed = 0

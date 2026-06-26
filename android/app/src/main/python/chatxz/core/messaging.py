@@ -12,6 +12,7 @@ from chatxz.core.lan_rns import (
     clear_paths_except_families,
     clear_paths_on_family,
     clear_peer_path,
+    clear_peer_path_unless_family,
     detach_unhealthy_interfaces,
     interface_family,
     interface_is_healthy,
@@ -407,29 +408,52 @@ class MessagingBackend:
             self._schedule_hub_queue_drain()
         return True
 
-    def _udp_connect_ready(self, dest_hex, peer_ip=None, peer_lan_down=False):
-        if peer_lan_down or not physical_lan_reachable() or not self._lan_transport_ready():
+    def _discovery_peer_meta(self, dest_hex, peer_ip=None, peer_lookup=None):
+        if not peer_lookup:
+            return None
+        try:
+            return peer_lookup(peer_ip, dest_hex)
+        except TypeError:
+            try:
+                return peer_lookup(dest_hex)
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def _should_prefer_serial_connect(self, dest_hex, peer_ip=None, peer_lookup=None):
+        """True when the peer is a direct USB neighbor (no usable in-scope LAN IP)."""
+        if not self._serial_transport_ready():
+            return False
+        if peer_ip and self._peer_lan_ip_usable(peer_ip):
+            return False
+        meta = self._discovery_peer_meta(dest_hex, peer_ip=peer_ip, peer_lookup=peer_lookup)
+        if meta:
+            if (meta.get("via") or "").strip() == "serial":
+                return True
+            if not (meta.get("ip") or "").strip():
+                return True
+        if not peer_ip:
+            return True
+        return False
+
+    def _udp_connect_ready(self, dest_hex, peer_ip=None, peer_lan_down=False, prefer_serial=False):
+        if prefer_serial or peer_lan_down or not physical_lan_reachable() or not self._lan_transport_ready():
             return False
         if not configured_udp_lan_enabled(load_settings_interfaces(self.config_dir)):
             return False
         if peer_ip:
-            return True
-        return (
-            self._peer_has_path_on_family(dest_hex, "udp")
-            or self._peer_has_path(dest_hex)
-        )
+            return self._peer_lan_ip_usable(peer_ip)
+        return self._peer_has_path_on_family(dest_hex, "udp")
 
-    def _tcp_connect_ready(self, dest_hex, peer_ip=None, peer_lan_down=False):
-        if peer_lan_down or not physical_lan_reachable() or not self._lan_transport_ready():
+    def _tcp_connect_ready(self, dest_hex, peer_ip=None, peer_lan_down=False, prefer_serial=False):
+        if prefer_serial or peer_lan_down or not physical_lan_reachable() or not self._lan_transport_ready():
             return False
         if not configured_tcp_lan_enabled(load_settings_interfaces(self.config_dir)):
             return False
         if peer_ip:
-            return True
-        return (
-            self._peer_has_path_on_family(dest_hex, "tcp")
-            or self._peer_has_path(dest_hex)
-        )
+            return self._peer_lan_ip_usable(peer_ip)
+        return self._peer_has_path_on_family(dest_hex, "tcp")
 
     def linked_peers(self):
         out = []
@@ -2310,6 +2334,7 @@ class MessagingBackend:
         if not self._serial_transport_ready():
             print("[connect] Serial path blocked — Serial in RNS: no")
             return False
+        clear_peer_path_unless_family(dest_hex, "serial")
         suppress_offline_lan_transports()
         dedupe_serial_interfaces()
         if timeout_s is None:
@@ -3618,10 +3643,29 @@ class MessagingBackend:
             self._ensure_runtime_serial_transport()
             lan_ready = self._lan_transport_ready() and physical_lan and not peer_lan_down
             serial_ready = self._serial_transport_ready()
-            serial_only = serial_ready and (not lan_ready or peer_lan_down)
+            prefer_serial = self._should_prefer_serial_connect(
+                dest_hex, peer_ip=peer_ip, peer_lookup=peer_lookup,
+            )
+            serial_only = serial_ready and (prefer_serial or not lan_ready or peer_lan_down)
             prune_stale_lan_paths()
+            if prefer_serial:
+                clear_peer_path_unless_family(dest_hex, "serial")
+                peer_ip = None
 
-            if self._tcp_connect_ready(dest_hex, peer_ip, peer_lan_down):
+            if serial_ready and prefer_serial:
+                self._prime_serial_path(dest_hex, timeout_s=12.0 if not physical_lan else 8.0)
+                print(f"[connect] Serial peer — quick connect ({QUICK_OUTBOUND_TIMEOUT_S}s)")
+                if self._establish_outbound_link(
+                    destination, dest_hex, clean, old_link=old_link,
+                    timeout_s=QUICK_OUTBOUND_TIMEOUT_S,
+                ):
+                    adopt = self._link_for_peer(dest_hex) or self.active_link
+                    return self._finish_connect(dest_hex, link=adopt)
+                if self._peer_link_active(dest_hex, clean):
+                    adopt = self._link_for_peer(dest_hex) or self._find_active_link_for_peer(dest_hex, clean)
+                    return self._finish_connect(dest_hex, link=adopt)
+
+            if self._tcp_connect_ready(dest_hex, peer_ip, peer_lan_down, prefer_serial=prefer_serial):
                 if peer_ip:
                     self._prime_tcp_path(dest_hex, peer_ip=peer_ip, timeout_s=2.5)
                 print(f"[connect] LAN/TCP path ready — quick connect ({QUICK_OUTBOUND_TIMEOUT_S}s)")
@@ -3634,7 +3678,7 @@ class MessagingBackend:
                     adopt = self._link_for_peer(dest_hex) or self._find_active_link_for_peer(dest_hex, clean)
                     return self._finish_connect(dest_hex, link=adopt)
 
-            if self._udp_connect_ready(dest_hex, peer_ip, peer_lan_down):
+            if self._udp_connect_ready(dest_hex, peer_ip, peer_lan_down, prefer_serial=prefer_serial):
                 if peer_ip:
                     self._prime_udp_path(dest_hex, peer_ip=peer_ip, timeout_s=2.5)
                 print(f"[connect] LAN/UDP path ready — quick connect ({QUICK_OUTBOUND_TIMEOUT_S}s)")

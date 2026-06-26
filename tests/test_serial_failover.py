@@ -28,6 +28,60 @@ class _FakeSerialIface:
             self.serial = None
 
 
+class SerialConnectPreferenceTests(unittest.TestCase):
+    def _backend(self):
+        ident = _FakeIdentity("a" * 32)
+        backend = MessagingBackend(
+            identity=ident,
+            config_dir="/tmp/chatxz-test",
+        )
+        backend.running = True
+        return backend
+
+    def test_should_prefer_serial_for_ipless_discovery_peer(self):
+        backend = self._backend()
+        peer_hash = "b" * 32
+        lookup = lambda _ip, _h: {"hash": peer_hash, "name": "UBUNTU", "via": "serial"}
+        with patch.object(backend, "_serial_transport_ready", return_value=True):
+            self.assertTrue(
+                backend._should_prefer_serial_connect(peer_hash, peer_ip=None, peer_lookup=lookup)
+            )
+
+    def test_should_not_prefer_serial_when_in_scope_lan_ip(self):
+        backend = self._backend()
+        peer_hash = "c" * 32
+        with patch.object(backend, "_serial_transport_ready", return_value=True):
+            with patch.object(backend, "_peer_lan_ip_usable", return_value=True):
+                self.assertFalse(
+                    backend._should_prefer_serial_connect(
+                        peer_hash, peer_ip="10.10.10.2", peer_lookup=None,
+                    )
+                )
+
+    def test_udp_connect_ready_false_for_stale_non_udp_path(self):
+        backend = self._backend()
+        peer_hash = "d" * 32
+        with patch("chatxz.core.messaging.physical_lan_reachable", return_value=True):
+            with patch.object(backend, "_lan_transport_ready", return_value=True):
+                with patch("chatxz.core.messaging.configured_udp_lan_enabled", return_value=True):
+                    with patch.object(backend, "_peer_has_path_on_family", return_value=False):
+                        with patch.object(backend, "_peer_has_path", return_value=True):
+                            self.assertFalse(
+                                backend._udp_connect_ready(
+                                    peer_hash, peer_ip=None, prefer_serial=False,
+                                )
+                            )
+
+    def test_udp_connect_ready_false_when_serial_preferred(self):
+        backend = self._backend()
+        with patch("chatxz.core.messaging.physical_lan_reachable", return_value=True):
+            with patch.object(backend, "_lan_transport_ready", return_value=True):
+                with patch("chatxz.core.messaging.configured_udp_lan_enabled", return_value=True):
+                    self.assertFalse(
+                        backend._udp_connect_ready("e" * 32, peer_ip="10.10.10.2", prefer_serial=True)
+                    )
+
+
 class SerialRuntimeEnsureTests(unittest.TestCase):
     def test_ensure_runtime_serial_waits_for_existing_interface(self):
         iface = _FakeSerialIface("/dev/ttyUSB0", online=False)
