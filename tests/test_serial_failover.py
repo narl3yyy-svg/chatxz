@@ -274,6 +274,47 @@ class FailoverPreferenceTests(unittest.TestCase):
             backend.on_serial_transport_attached(MagicMock(port="/dev/ttyUSB0"))
         burst.assert_called_once()
 
+    def test_queue_send_link_honors_serial_hint_over_udp(self):
+        backend = self._backend()
+        peer = "f1c2ac9061239f7c096701f02969729c"
+        serial_iface = MagicMock()
+        udp_iface = MagicMock()
+        serial_link = _FakeLink("11" * 16, rtt=0.02, iface=serial_iface)
+        udp_link = _FakeLink("22" * 16, rtt=0.002, iface=udp_iface)
+        backend.links[serial_link.link_id] = serial_link
+        backend.links[udp_link.link_id] = udp_link
+        backend._link_peer_hashes[serial_link.link_id] = peer
+        backend._link_peer_hashes[udp_link.link_id] = "87a012c46dc2274afccae6fe597b8675"
+        backend.peer_links[peer] = serial_link
+        backend.peer_transport_resolver = lambda _h: {
+            "hash": peer,
+            "name": "UBUNTU",
+            "via": "serial",
+        }
+        with patch("chatxz.core.messaging.interface_family", side_effect=lambda i: (
+            "serial" if i is serial_iface else "udp"
+        )):
+            chosen = backend._queue_send_link(peer, link_hint=serial_link)
+        self.assertIs(chosen, serial_link)
+
+    def test_queue_send_link_rejects_wrong_peer_udp_link(self):
+        backend = self._backend()
+        peer = "f1c2ac9061239f7c096701f02969729c"
+        udp_iface = MagicMock()
+        udp_link = _FakeLink("22" * 16, rtt=0.002, iface=udp_iface)
+        backend.links[udp_link.link_id] = udp_link
+        backend._link_peer_hashes[udp_link.link_id] = "87a012c46dc2274afccae6fe597b8675"
+        backend.peer_transport_resolver = lambda _h: {
+            "hash": peer,
+            "name": "UBUNTU",
+            "via": "serial",
+        }
+        with patch("chatxz.core.messaging.interface_family", return_value="udp"):
+            with patch.object(backend, "_links_for_peer", return_value=[]):
+                with patch.object(backend, "_link_for_peer", return_value=None):
+                    chosen = backend._queue_send_link(peer, link_hint=udp_link)
+        self.assertIsNone(chosen)
+
 
 if __name__ == "__main__":
     unittest.main()

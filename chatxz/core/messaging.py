@@ -163,7 +163,8 @@ class MessagingBackend:
                  display_name="", auto_announce=False,
                  receive_dir=None, peer_resolver=None, on_queue_sent=None,
                  http_port=8742, lan_transfer_enabled=False,
-                 peer_endpoint_resolver=None, peer_scope_checker=None):
+                 peer_endpoint_resolver=None, peer_scope_checker=None,
+                 peer_transport_resolver=None):
         self.identity = identity
         self.config_dir = config_dir
         self.receive_dir = receive_dir or os.path.join(config_dir, "received")
@@ -208,6 +209,7 @@ class MessagingBackend:
         self.lan_transfer_enabled = bool(lan_transfer_enabled)
         self.peer_endpoint_resolver = peer_endpoint_resolver
         self.peer_scope_checker = peer_scope_checker
+        self.peer_transport_resolver = peer_transport_resolver
         self._link_peer_hashes = {}
         self._link_handoff = False
         self._last_handoff = False
@@ -249,9 +251,67 @@ class MessagingBackend:
         if canon and not self._is_self_hash(canon):
             self._link_peer_hashes[link.link_id] = canon
 
-    def _peer_allowed_by_scope(self, peer_hash, link=None):
-        if link and interface_family(self._link_attached_interface(link)) == "serial":
+    def _peer_discovery_meta(self, peer_hash):
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown":
+            return None
+        if self.peer_transport_resolver:
+            try:
+                return self.peer_transport_resolver(peer)
+            except Exception:
+                return None
+        return None
+
+    def _peer_expected_transport_families(self, peer_hash):
+        """Transport families allowed for a peer (serial vs LAN isolation)."""
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown" or is_hub_peer_hash(peer):
+            return set()
+        meta = self._peer_discovery_meta(peer)
+        if meta:
+            via = (meta.get("via") or "").strip()
+            ip = (meta.get("ip") or "").strip()
+            if via == "serial":
+                return {"serial"}
+            if ip and self._peer_lan_ip_usable(ip):
+                return {"udp", "lan", "tcp"}
+            if not ip and self._serial_transport_ready():
+                return {"serial"}
+        if self._peer_has_path_on_family(peer, "serial") and not self._peer_has_path_on_family(peer, "udp"):
+            if not self._peer_has_path_on_family(peer, "tcp"):
+                return {"serial"}
+        if self._peer_has_path_on_family(peer, "udp") or self._peer_has_path_on_family(peer, "tcp"):
+            return {"udp", "lan", "tcp"}
+        return set()
+
+    def _link_matches_peer(self, link, peer_hash):
+        if not link:
+            return False
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown":
+            return False
+        cached = self._peer_for_link(link)
+        return bool(cached and self.hashes_equivalent(cached, peer))
+
+    def _link_acceptable_for_peer(self, link, peer_hash):
+        if not link:
+            return False
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown":
+            return False
+        expected = self._peer_expected_transport_families(peer)
+        if not expected:
             return True
+        fam = interface_family(self._link_attached_interface(link))
+        if fam == "serial":
+            return "serial" in expected
+        if fam in ("udp", "lan", "tcp"):
+            return bool(expected & {"udp", "lan", "tcp"})
+        return fam in expected
+
+    def _peer_allowed_by_scope(self, peer_hash, link=None):
+        if link and not self._link_acceptable_for_peer(link, peer_hash):
+            return False
         if not self.peer_scope_checker or not peer_hash or peer_hash == "unknown":
             return True
         if is_hub_peer_hash(peer_hash):
@@ -1453,12 +1513,18 @@ class MessagingBackend:
         if resolved and resolved != "unknown" and not self._is_self_hash(resolved):
             return self.dest_hash_for(resolved)
         if self.active_peer_hash and not self._is_self_hash(self.active_peer_hash):
-            if not is_hub_peer_hash(self.active_peer_hash) and self._incoming_matches_active_session(link):
+            if (
+                not is_hub_peer_hash(self.active_peer_hash)
+                and self._incoming_matches_active_session(link)
+                and self._link_acceptable_for_peer(link, self.active_peer_hash)
+            ):
                 return self.dest_hash_for(self.active_peer_hash)
         return peer_hash or "unknown"
 
     def _incoming_matches_active_session(self, link):
         if not self.active_peer_hash or not self.active_link:
+            return False
+        if not self._link_acceptable_for_peer(link, self.active_peer_hash):
             return False
         try:
             ident = link.get_remote_identity()
@@ -1536,6 +1602,8 @@ class MessagingBackend:
         for link in self._links_for_peer(peer):
             if not self._link_interface_healthy(link):
                 continue
+            if not self._link_acceptable_for_peer(link, peer):
+                continue
             iface = self._link_attached_interface(link)
             if hub_p2p and self._link_is_hub_transport(iface):
                 continue
@@ -1546,6 +1614,8 @@ class MessagingBackend:
         if best:
             return best
         for link in self._links_for_peer(peer):
+            if not self._link_acceptable_for_peer(link, peer):
+                continue
             iface = self._link_attached_interface(link)
             if hub_p2p and self._link_is_hub_transport(iface):
                 continue
@@ -1650,13 +1720,23 @@ class MessagingBackend:
         peer = self.dest_hash_for(peer_hash)
         if not peer or peer == "unknown":
             return None
+        if link_hint and self._link_matches_peer(link_hint, peer):
+            if self._link_acceptable_for_peer(link_hint, peer):
+                return link_hint
         best = self._best_outgoing_link(peer)
-        if best:
-            if not link_hint:
-                return best
-            if self._link_path_score(best) >= self._link_path_score(link_hint):
-                return best
-        return link_hint or best or self._link_for_peer(peer)
+        if best and self._link_acceptable_for_peer(best, peer):
+            return best
+        hinted = link_hint if (
+            link_hint
+            and self._link_matches_peer(link_hint, peer)
+            and self._link_acceptable_for_peer(link_hint, peer)
+        ) else None
+        if hinted:
+            return hinted
+        fallback = self._link_for_peer(peer)
+        if fallback and self._link_acceptable_for_peer(fallback, peer):
+            return fallback
+        return None
 
     def _hub_send_targets(self, hub_server_hash=None, hub_server_mode=False):
         tcp_peers = self._hub_tcp_linked_peers()

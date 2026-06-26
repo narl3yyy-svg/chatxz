@@ -30,6 +30,11 @@ def patch_tcp_server_ifac_netname():
 def apply_chatxz_rns_tuning():
     """Raise RNS MTU above the 500B default for much faster LAN file transfers."""
     patch_tcp_server_ifac_netname()
+    try:
+        from chatxz.core.transport_isolation import apply_transport_isolation
+        apply_transport_isolation()
+    except Exception:
+        pass
     import RNS
 
     mtu = CHATXZ_RNS_MTU

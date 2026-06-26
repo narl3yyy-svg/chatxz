@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.150": [
+        "Critical cross-talk fix: queued messages to a serial peer (Ubuntu) can no longer leak out over an active LAN link (Windows).",
+        "RNS path requests no longer bridge between SerialInterface and UDP/LAN when both are up — stops Windows appearing on Ubuntu's serial discovery list.",
+        "Out-of-scope LAN peers are rejected (not stripped) when serial is active; only direct 1-hop serial neighbors are discovered IP-less.",
+    ],
     "0.3.149": [
         "Dual transport fix: when a peer has no in-scope LAN IP (USB serial neighbor), Connect goes straight to SerialInterface — no more failed LAN/UDP quick-connect to cross-subnet peers.",
         "Stale UDP path entries are cleared before serial priming so Arch↔Ubuntu messaging works while Arch↔Windows stays on the pinned 10.10 LAN.",

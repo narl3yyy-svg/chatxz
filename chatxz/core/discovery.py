@@ -132,8 +132,7 @@ class PeerDiscovery:
         if peer_in_scope(ip, scope):
             return candidate
         if serial_discovery_active():
-            candidate.pop("ip", None)
-            return candidate
+            return None
         return None
 
     def _peer_allowed(self, peer):
@@ -348,12 +347,25 @@ class PeerDiscovery:
         if app_name != APP_NAME:
             return
 
+        via = "rns"
+        if not announce_ip and serial_discovery_active():
+            from chatxz.core.lan_rns import peer_path_hops, peer_path_on_family
+
+            path_iface = peer_path_on_family(hash_hex, "serial")
+            if path_iface:
+                hops = peer_path_hops(hash_hex)
+                if hops is not None and hops <= 1:
+                    via = "serial"
+                else:
+                    return
+            else:
+                return
         peer = {
             "hash": hash_hex,
             "name": name or hash_hex[:8],
             "app": app_name,
             "last_seen": time.time(),
-            "via": "serial" if (not announce_ip and serial_discovery_active()) else "rns",
+            "via": via,
         }
         if announce_ip:
             peer["ip"] = announce_ip

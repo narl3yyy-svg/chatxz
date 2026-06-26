@@ -204,6 +204,46 @@ def peer_path_entry(hash_hex):
     return None, None
 
 
+def peer_path_hops(hash_hex):
+    """Hop count from the local path table (None when unknown)."""
+    entry, _ = peer_path_entry(hash_hex)
+    if not entry or len(entry) <= 2:
+        return None
+    try:
+        return int(entry[2])
+    except Exception:
+        return None
+
+
+def is_lan_transport_family(family):
+    return family in ("udp", "lan", "tcp")
+
+
+def prune_cross_zone_paths(serial_peer_hashes=None):
+    """Drop LAN paths for serial-only peers and serial paths for in-scope LAN peers."""
+    serial_peers = {
+        (h or "").replace(":", "").strip().lower()
+        for h in (serial_peer_hashes or ())
+        if (h or "").strip()
+    }
+    removed = 0
+    try:
+        with RNS.Transport.path_table_lock:
+            for dest_bytes, entry in list(RNS.Transport.path_table.items()):
+                if not entry or len(entry) <= 5:
+                    continue
+                iface = entry[5]
+                fam = interface_family(iface)
+                dest_hex = dest_bytes.hex()
+                if dest_hex in serial_peers:
+                    if is_lan_transport_family(fam):
+                        RNS.Transport.path_table.pop(dest_bytes, None)
+                        removed += 1
+    except Exception:
+        pass
+    return removed
+
+
 def peer_path_on_family(hash_hex, family):
     """Return path interface for peer when it uses the given transport family."""
     scrub_peer_path(hash_hex)

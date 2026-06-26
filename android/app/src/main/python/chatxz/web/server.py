@@ -653,9 +653,8 @@ class ChatWebServer:
         from chatxz.core.lan_rns import interface_family, peer_path_on_family
         from chatxz.utils.lan_scope import peer_in_scope
 
-        if link and self.messaging:
-            if interface_family(self.messaging._link_attached_interface(link)) == "serial":
-                return True
+        if link and self.messaging and not self.messaging._link_acceptable_for_peer(link, peer_hash):
+            return False
         if is_hub_peer_hash(peer_hash):
             return True
         scope = self._discovery_scope_ip()
@@ -1435,6 +1434,7 @@ class ChatWebServer:
             lan_transfer_enabled=(self.host in ("0.0.0.0", "::")),
             peer_endpoint_resolver=self._peer_endpoint_for_transfer,
             peer_scope_checker=self._peer_in_discovery_scope,
+            peer_transport_resolver=lambda h: self._discovery_peer_for_connect(None, h),
         )
         self.voice_recorder = VoiceRecorder(self.config_dir)
         dest = self.messaging.start()

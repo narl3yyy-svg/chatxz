@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.149
+**Current version:** 0.3.150
 
 ## Download
 
@@ -238,6 +238,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.150** — **Cross-talk fix:** serial and LAN transports are isolated — messages to Ubuntu cannot leak to Windows; rebroadcasted LAN peers no longer appear on serial discovery
 - **v0.3.149** — **Dual LAN + serial connect:** Arch↔Windows stays on pinned LAN; Arch↔Ubuntu uses serial first (clears stale UDP paths, skips bogus LAN quick-connect)
 - **v0.3.148** — **Serial startup fix:** no duplicate hot-add when RNS already loaded `/dev/ttyUSB0` from config — fixes Ubuntu `NoneType is_open` crash on startup
 - **v0.3.147** — **Serial discovery fix:** serial announces carry no LAN IP; cross-subnet peers kept in Discovered (IP stripped); connect uses serial when peer IP is outside pinned scope; no spurious RNS discovery logs for rejected LAN peers
