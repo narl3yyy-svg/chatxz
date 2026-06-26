@@ -406,8 +406,6 @@ class MessagingBackend:
             return False
         if not configured_tcp_lan_enabled(load_settings_interfaces(self.config_dir)):
             return False
-        if self._hub_transport_active():
-            return False
         if peer_ip:
             return True
         return (
@@ -427,7 +425,11 @@ class MessagingBackend:
         return out
 
     def _hub_tcp_linked_peers(self):
-        """Peers reachable only over TCP hub transport (not UDP/serial P2P)."""
+        """Peers on hub TCP transport only (not TCP LAN P2P dials)."""
+        role, _ = self._load_hub_settings()
+        if role == "off":
+            return []
+        hub_host, hub_port = self._hub_endpoint_from_settings()
         out = []
         for peer in self.linked_peers():
             if not peer or is_hub_peer_hash(peer):
@@ -435,7 +437,12 @@ class MessagingBackend:
             link = self._link_for_peer(peer)
             if not link:
                 continue
-            if interface_family(self._link_attached_interface(link)) == "tcp":
+            if self._link_is_hub_transport(
+                self._link_attached_interface(link),
+                role=role,
+                hub_host=hub_host,
+                hub_port=hub_port,
+            ):
                 out.append(peer)
         return out
 
@@ -445,7 +452,13 @@ class MessagingBackend:
         role, _ = self._load_hub_settings()
         if role == "off":
             return False
-        return interface_family(self._link_attached_interface(link)) == "tcp"
+        hub_host, hub_port = self._hub_endpoint_from_settings()
+        return self._link_is_hub_transport(
+            self._link_attached_interface(link),
+            role=role,
+            hub_host=hub_host,
+            hub_port=hub_port,
+        )
 
     def disconnect_peer(self, peer_hash, user_initiated=False):
         peer = self.dest_hash_for(peer_hash)
@@ -730,6 +743,42 @@ class MessagingBackend:
             )
         except Exception:
             return "off", ""
+
+    def _hub_endpoint_from_settings(self):
+        try:
+            import json
+            import os
+            from chatxz.utils.helpers import get_config_dir
+            path = os.path.join(self.config_dir or get_config_dir(), "settings.json")
+            with open(path, encoding="utf-8") as fh:
+                settings = json.load(fh)
+            return (
+                (settings.get("hub_host") or "").strip(),
+                int(settings.get("hub_port") or 4242),
+            )
+        except Exception:
+            return "", 4242
+
+    def _link_is_hub_transport(self, iface, role=None, hub_host=None, hub_port=None):
+        if iface is None or interface_family(iface) != "tcp":
+            return False
+        if role is None:
+            role, _ = self._load_hub_settings()
+        if role == "off":
+            return False
+        if hub_host is None or hub_port is None:
+            hub_host, hub_port = self._hub_endpoint_from_settings()
+        if role == "client":
+            target = (getattr(iface, "target_host", None) or "").strip()
+            port = int(
+                getattr(iface, "target_port", None)
+                or getattr(iface, "port", None)
+                or 4242
+            )
+            return bool(hub_host) and target == hub_host and port == hub_port
+        if role == "server":
+            return type(iface).__name__ == "TCPServerInterface"
+        return False
 
     def _hub_transport_active(self):
         role, _ = self._load_hub_settings()
@@ -1930,7 +1979,9 @@ class MessagingBackend:
                 self._burst_serial_announce(count=3, interval=0.3)
             return
         prune_dead_serial_interfaces()
-        if tcp_lan and not self._hub_transport_active():
+        hub_role, _ = self._load_hub_settings()
+        use_tcp_lan = tcp_lan and hub_role != "server"
+        if use_tcp_lan:
             ensure_runtime_tcp_lan_server(config_dir=self.config_dir)
             if peer_ip:
                 ensure_tcp_client_to_peer(peer_ip, config_dir=self.config_dir)
@@ -1946,7 +1997,7 @@ class MessagingBackend:
                     RNS.Transport.identity.announce()
                 except Exception:
                     pass
-        else:
+        elif udp_lan:
             udp_iface = udp_interface_online()
             if udp_iface:
                 self._announce_on_interface(udp_iface, app_data=announce_data)
@@ -1959,6 +2010,15 @@ class MessagingBackend:
                     RNS.Transport.identity.announce()
                 except Exception:
                     pass
+        elif self._serial_transport_ready():
+            self._burst_serial_announce(count=3, interval=0.3)
+            return
+        else:
+            self.destination.announce(app_data=announce_data)
+            try:
+                RNS.Transport.identity.announce()
+            except Exception:
+                pass
         if peer_ip and udp_lan:
             packet = build_announce_packet(self.destination, announce_data)
             unicast_announce_packet(packet, peer_ip=peer_ip, subnet_probe=False)
@@ -1974,19 +2034,23 @@ class MessagingBackend:
         interfaces = load_settings_interfaces(self.config_dir)
         tcp_lan = configured_tcp_lan_enabled(interfaces)
         udp_lan = configured_udp_lan_enabled(interfaces)
-        if tcp_lan and not self._hub_transport_active():
+        hub_role, _ = self._load_hub_settings()
+        use_tcp_lan = tcp_lan and hub_role != "server"
+        if use_tcp_lan:
             ensure_runtime_tcp_lan_server(config_dir=self.config_dir)
             tcp_iface = tcp_server_interface_online() or tcp_client_interface_online()
             if tcp_iface:
                 self._announce_on_interface(tcp_iface, app_data=announce_data)
             else:
                 self.destination.announce(app_data=announce_data)
-        else:
+        elif udp_lan:
             udp_iface = udp_interface_online()
             if udp_iface:
                 self._announce_on_interface(udp_iface, app_data=announce_data)
             else:
                 self.destination.announce(app_data=announce_data)
+        else:
+            self.destination.announce(app_data=announce_data)
         if unicast_subnet is None:
             unicast_subnet = True
         lan_ok = (

@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.140": [
+        "Hub client + TCP LAN: switching Primary LAN transport to TCP LAN now works while staying a hub client — P2P peers connect over TCP, group chat stays on the hub link.",
+        "Hub relay no longer treats TCP LAN peer links as hub clients (fixes accidental group-chat leak over LAN TCP).",
+    ],
     "0.3.139": [
         "Hub group chat is isolated to TCP hub transport — P2P-only peers (hub off) no longer receive group messages relayed from the hub server.",
         "Group messages are dropped on receive when hub mode is off, and hub server relay targets only TCP-connected hub clients.",

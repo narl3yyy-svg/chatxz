@@ -1009,23 +1009,25 @@ class ChatWebServer:
             if not hub_host:
                 settings["rns_interfaces"] = normalize_interface_list(interfaces)
                 return settings
+            # Keep TCP LAN listener for P2P; only disable dedicated hub-server preset.
             for iface in interfaces:
-                if self._is_tcp_server_iface(iface):
+                if iface.get("preset") == "tcp_server":
                     iface["enabled"] = False
             updated = False
             for iface in interfaces:
-                if self._is_tcp_client_iface(iface):
-                    iface["target_host"] = hub_host
-                    iface["target_port"] = hub_port
-                    iface["enabled"] = True
-                    iface["type"] = "TCPClientInterface"
-                    updated = True
-                    break
+                if iface.get("preset") != "tcp_client":
+                    continue
+                iface["target_host"] = hub_host
+                iface["target_port"] = hub_port
+                iface["enabled"] = True
+                iface["type"] = "TCPClientInterface"
+                updated = True
+                break
             if not updated:
                 interfaces = add_interface(interfaces, "tcp_client")
                 interfaces = normalize_interface_list(interfaces)
                 client = next(
-                    i for i in interfaces if self._is_tcp_client_iface(i)
+                    i for i in interfaces if i.get("preset") == "tcp_client"
                 )
                 client["target_host"] = hub_host
                 client["target_port"] = hub_port
@@ -1467,7 +1469,7 @@ class ChatWebServer:
         except Exception as exc:
             print(f"[network] Startup announce failed: {exc}")
 
-        if configured_tcp_lan_enabled(interfaces) and settings.get("hub_role", "off") == "off":
+        if configured_tcp_lan_enabled(interfaces) and settings.get("hub_role", "off") != "server":
             tcp_srv = ensure_runtime_tcp_lan_server(settings, self.config_dir)
             if tcp_srv:
                 print(f"[tcp-lan] TCP LAN server listening on 0.0.0.0:{getattr(tcp_srv, 'listen_port', 4242)}")
@@ -2729,7 +2731,7 @@ class ChatWebServer:
                 continue
             if configured_udp_lan_enabled(interfaces):
                 await self._run_blocking(patch_udp_interface_unicast)
-            if configured_tcp_lan_enabled(interfaces) and hub_role == "off":
+            if configured_tcp_lan_enabled(interfaces) and hub_role != "server":
                 await self._run_blocking(ensure_runtime_tcp_lan_server, settings, self.config_dir)
             await self._run_blocking(ensure_runtime_serial, interfaces)
 

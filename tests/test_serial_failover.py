@@ -85,11 +85,22 @@ class FailoverPreferenceTests(unittest.TestCase):
     def test_failover_families_prefer_lan_by_default(self):
         backend = self._backend()
         peer = "4a2aa1dbbed382886b0333274e546ba8"
-        with patch.object(backend, "_has_online_family", side_effect=lambda fam: fam in ("udp", "serial")):
-            with patch.object(backend, "_serial_transport_ready", return_value=True):
-                with patch("chatxz.core.messaging.physical_lan_reachable", return_value=True):
-                    with patch.object(backend, "_serial_faster_than_lan", return_value=False):
-                        families = backend._failover_families_to_try(peer)
+        udp_only = [{
+            "id": "udp1",
+            "preset": "udp_lan",
+            "type": "UDPInterface",
+            "enabled": True,
+        }]
+        with patch.object(backend, "_hub_transport_active", return_value=False):
+            with patch(
+                "chatxz.core.messaging.load_settings_interfaces",
+                return_value=udp_only,
+            ):
+                with patch.object(backend, "_has_online_family", side_effect=lambda fam: fam in ("udp", "serial")):
+                    with patch.object(backend, "_serial_transport_ready", return_value=True):
+                        with patch("chatxz.core.messaging.physical_lan_reachable", return_value=True):
+                            with patch.object(backend, "_serial_faster_than_lan", return_value=False):
+                                families = backend._failover_families_to_try(peer)
         self.assertEqual(families[0], "udp")
         self.assertIn("serial", families)
 

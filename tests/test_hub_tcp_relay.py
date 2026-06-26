@@ -93,7 +93,7 @@ class HubClientRemoteTests(unittest.TestCase):
             [i.get("preset") for i in before],
         )
 
-    def test_hub_client_disables_tcp_server_listener(self):
+    def test_hub_client_keeps_tcp_lan_listener(self):
         from chatxz.web.server import ChatWebServer
 
         server = ChatWebServer.__new__(ChatWebServer)
@@ -111,12 +111,11 @@ class HubClientRemoteTests(unittest.TestCase):
             }],
         }
         out = server._apply_hub_settings(settings)
-        servers = [
+        tcp_lan = next(
             i for i in out["rns_interfaces"]
-            if i.get("type") == "TCPServerInterface"
-        ]
-        self.assertTrue(servers)
-        self.assertTrue(all(not s.get("enabled") for s in servers))
+            if i.get("preset") == "tcp_lan"
+        )
+        self.assertTrue(tcp_lan.get("enabled"))
 
 
 class HubMessageFormatTests(unittest.TestCase):
@@ -135,19 +134,27 @@ class HubMessageFormatTests(unittest.TestCase):
 
 
 class HubRelayIsolationTests(unittest.TestCase):
-    def _backend(self, hub_role="server"):
+    def _backend(self, hub_role="server", hub_host="10.0.30.109"):
         ident = MagicMock()
         ident.hash = bytes.fromhex("a" * 32)
         tmp = tempfile.mkdtemp()
         settings_path = os.path.join(tmp, "settings.json")
         with open(settings_path, "w", encoding="utf-8") as fh:
-            json.dump({"hub_role": hub_role}, fh)
+            json.dump({
+                "hub_role": hub_role,
+                "hub_host": hub_host,
+                "hub_port": 4242,
+            }, fh)
         backend = MessagingBackend(identity=ident, config_dir=tmp)
 
         class UDPInterface:
             pass
 
         class TCPClientInterface:
+            target_host = hub_host
+            target_port = 4242
+
+        class TCPServerInterface:
             pass
 
         udp_link = MagicMock()
@@ -157,11 +164,16 @@ class HubRelayIsolationTests(unittest.TestCase):
         tcp_a = MagicMock()
         tcp_a.link_id = "tcp1"
         tcp_a.mtu = 500
-        tcp_a.attached_interface = TCPClientInterface()
+        if hub_role == "server":
+            tcp_a.attached_interface = TCPServerInterface()
+            tcp_b_iface = TCPServerInterface()
+        else:
+            tcp_a.attached_interface = TCPClientInterface()
+            tcp_b_iface = TCPClientInterface()
         tcp_b = MagicMock()
         tcp_b.link_id = "tcp2"
         tcp_b.mtu = 500
-        tcp_b.attached_interface = TCPClientInterface()
+        tcp_b.attached_interface = tcp_b_iface
 
         backend.peer_links = {
             "b" * 32: udp_link,
@@ -176,7 +188,7 @@ class HubRelayIsolationTests(unittest.TestCase):
         return backend, udp_link, tcp_a, tcp_b
 
     def test_hub_tcp_peers_excludes_udp_p2p(self):
-        backend, _, tcp_a, tcp_b = self._backend()
+        backend, _, _, _ = self._backend()
         peers = backend._hub_tcp_linked_peers()
         self.assertEqual(set(peers), {"c" * 32, "d" * 32})
 
@@ -190,8 +202,19 @@ class HubRelayIsolationTests(unittest.TestCase):
             targets = {call.args[0] for call in pkt.call_args_list}
             self.assertEqual(targets, {tcp_b})
 
-    def test_send_hub_message_never_targets_udp_link(self):
+    def test_send_hub_message_never_targets_udp_or_tcp_lan_peers(self):
         backend, udp_link, tcp_a, tcp_b = self._backend(hub_role="server")
+
+        class TCPClientInterface:
+            target_host = "10.0.30.101"
+            target_port = 4242
+
+        lan_link = MagicMock()
+        lan_link.link_id = "lan1"
+        lan_link.mtu = 500
+        lan_link.attached_interface = TCPClientInterface()
+        backend.peer_links["e" * 32] = lan_link
+        backend.links["lan1"] = lan_link
         with patch("chatxz.core.messaging.RNS.Packet") as pkt:
             backend.send_hub_message(
                 "remote group",

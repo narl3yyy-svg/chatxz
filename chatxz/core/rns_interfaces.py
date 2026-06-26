@@ -1002,7 +1002,8 @@ def ensure_runtime_tcp_lan_server(settings=None, config_dir=None):
                 settings = json.load(fh)
         except Exception:
             return None
-    if (settings.get("hub_role") or "off") != "off":
+    hub_role = settings.get("hub_role") or "off"
+    if hub_role == "server":
         return None
     if not configured_tcp_lan_enabled(settings.get("rns_interfaces")):
         return None
@@ -1038,7 +1039,7 @@ def ensure_tcp_client_to_peer(peer_ip, port=None, settings=None, config_dir=None
                 settings = json.load(fh)
         except Exception:
             return None
-    if (settings.get("hub_role") or "off") == "client":
+    if (settings.get("hub_role") or "off") == "server":
         return None
     if not configured_tcp_lan_enabled(settings.get("rns_interfaces")):
         return None
