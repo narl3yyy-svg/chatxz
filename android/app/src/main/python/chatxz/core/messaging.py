@@ -1967,12 +1967,12 @@ class MessagingBackend:
             and not lan_discovery_configured(load_settings_interfaces(self.config_dir))
         )
 
-    def _announce_payload(self):
+    def _announce_payload(self, include_lan_ip=True):
         payload = {
             "app": APP_NAME,
             "name": self.display_name or "",
         }
-        if lan_discovery_configured(load_settings_interfaces(self.config_dir)):
+        if include_lan_ip and lan_discovery_configured(load_settings_interfaces(self.config_dir)):
             try:
                 from chatxz.utils.platform import discovery_scope_ip
 
@@ -1982,6 +1982,22 @@ class MessagingBackend:
             except Exception:
                 pass
         return json.dumps(payload).encode("utf-8")
+
+    def _peer_lan_ip_usable(self, peer_ip):
+        """False when peer IPv4 is outside our pinned LAN scope (use serial instead)."""
+        host = (peer_ip or "").strip()
+        if not host:
+            return False
+        try:
+            from chatxz.utils.platform import discovery_scope_ip
+            from chatxz.utils.lan_scope import peer_in_scope
+
+            scope = (discovery_scope_ip() or "").strip()
+            if not scope:
+                return True
+            return peer_in_scope(host, scope)
+        except Exception:
+            return True
 
     def _announce_on_interface(self, iface, app_data=None):
         if not self.destination or not iface:
@@ -2006,7 +2022,7 @@ class MessagingBackend:
             return 0
         burst = count or SERIAL_ANNOUNCE_BURST_COUNT
         gap = interval if interval is not None else SERIAL_ANNOUNCE_BURST_INTERVAL_S
-        announce_data = self._announce_payload()
+        announce_data = self._announce_payload(include_lan_ip=False)
         for attempt in range(burst):
             self._announce_on_interface(iface, app_data=announce_data)
             if attempt < burst - 1 and gap > 0:
@@ -3489,6 +3505,13 @@ class MessagingBackend:
             if len(clean) != 32:
                 print(f"[connect] Invalid hash length ({len(clean)} chars, expected 32)")
                 return False
+            if peer_ip and not self._peer_lan_ip_usable(peer_ip):
+                if self._serial_transport_ready() or self._peer_has_path_on_family(clean, "serial"):
+                    print(
+                        f"[connect] Peer LAN IP {peer_ip} outside scope — "
+                        "using serial path"
+                    )
+                peer_ip = None
             if peer_ip:
                 register_udp_peer_ip(peer_ip)
 

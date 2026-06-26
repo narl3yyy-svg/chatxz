@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
 
-**Current version:** 0.3.146
+**Current version:** 0.3.147
 
 ## Download
 
@@ -238,6 +238,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.3.147** — **Serial discovery fix:** serial announces carry no LAN IP; cross-subnet peers kept in Discovered (IP stripped); connect uses serial when peer IP is outside pinned scope; no spurious RNS discovery logs for rejected LAN peers
 - **v0.3.146** — **Serial across subnets:** Announce bursts on USB serial when LAN is also enabled; serial peers/links bypass pinned LAN scope (Arch on 10.0.30.x ↔ Ubuntu on 10.0.5.x over serial works)
 - **v0.3.145** — **Strict pinned LAN isolation:** 10.0.5.x and 10.10.10.x on the same NIC no longer chat; discovery, connect, inbound links, and messages all enforce /24 scope; RNS announces carry pinned IPv4
 - **v0.3.144** — **Hub TCP subnet guard:** no dial to hub host on another subnet when LAN is pinned (10.0.5.x vs 10.0.30.x); hub **Off** fully disables saved hub TCP client

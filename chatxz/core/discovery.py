@@ -114,21 +114,31 @@ class PeerDiscovery:
         except Exception:
             return None
 
-    def _peer_allowed(self, peer):
-        """True when peer may be stored or refreshed under the active LAN scope."""
+    def _sanitize_peer_scope(self, peer):
+        """Drop cross-subnet LAN IPs when serial bridge is active; return False to reject."""
         candidate = dict(peer or {})
         if (candidate.get("via") or "").strip() == "serial":
-            return True
+            candidate.pop("ip", None)
+            return candidate
         scope = self._scope_ip()
         if not scope:
-            return True
+            return candidate
         ip = (candidate.get("ip") or "").strip()
         if not ip:
             candidate = self._attach_peer_ip(candidate, scope_only=True)
             ip = (candidate.get("ip") or "").strip()
         if not ip:
-            return serial_discovery_active()
-        return peer_in_scope(ip, scope)
+            return candidate if serial_discovery_active() else None
+        if peer_in_scope(ip, scope):
+            return candidate
+        if serial_discovery_active():
+            candidate.pop("ip", None)
+            return candidate
+        return None
+
+    def _peer_allowed(self, peer):
+        """True when peer may be stored or refreshed under the active LAN scope."""
+        return self._sanitize_peer_scope(peer) is not None
 
     def purge_out_of_scope(self, scope_ip):
         """Remove discovery entries outside the active LAN /24 scope."""
@@ -261,27 +271,38 @@ class PeerDiscovery:
     def _store_peer(self, peer):
         hash_hex = normalize_hash(peer.get("hash"))
         if not hash_hex:
-            return
+            return False
         peer["hash"] = hash_hex
-        if not self._peer_allowed(peer):
+        sanitized = self._sanitize_peer_scope(peer)
+        if not sanitized:
             self._remove_peer_entry(hash_hex)
-            return
+            return False
+        peer = sanitized
         removed, peer = self._evict_superseded_peers(peer)
         if removed:
             self._notify_peer_evicted(removed, peer)
         existing = self.peers.get(hash_hex)
         if existing:
             new_ip = (peer.get("ip") or "").strip()
+            scope = self._scope_ip()
+            if scope and existing.get("ip") and not peer_in_scope(existing.get("ip"), scope):
+                if serial_discovery_active():
+                    existing.pop("ip", None)
+                elif not new_ip or peer_in_scope(new_ip, scope):
+                    existing.pop("ip", None)
             if new_ip and new_ip != (existing.get("ip") or "").strip():
-                if self._peer_allowed({"ip": new_ip}):
+                if not scope or peer_in_scope(new_ip, scope):
                     existing["ip"] = new_ip
                     existing["port"] = peer.get("port", existing.get("port", 8742))
-                elif self._scope_ip():
+                elif serial_discovery_active():
+                    existing.pop("ip", None)
+                elif scope:
                     self._remove_peer_entry(hash_hex)
-                    return
+                    return False
             elif peer.get("ip") and not existing.get("ip"):
-                existing["ip"] = peer["ip"]
-                existing["port"] = peer.get("port", 8742)
+                if not scope or peer_in_scope(peer["ip"], scope):
+                    existing["ip"] = peer["ip"]
+                    existing["port"] = peer.get("port", 8742)
             if peer.get("identity_hash") and not existing.get("identity_hash"):
                 existing["identity_hash"] = peer["identity_hash"]
             if peer.get("pubkey") and not existing.get("pubkey"):
@@ -301,6 +322,7 @@ class PeerDiscovery:
                 self.on_peer_seen(peer)
             except Exception as e:
                 print(f"[discovery] on_peer_seen error: {e}")
+        return True
 
     def _on_announce(self, destination_hash, app_data, announced_identity=None):
         if not self.running or not self.accept_peers:
@@ -344,11 +366,18 @@ class PeerDiscovery:
                 ).decode("ascii")
             except Exception:
                 pass
-        self._store_peer(peer)
+        if not self._store_peer(peer):
+            return
         via = peer.get("via", "rns")
+        label = name or hash_hex[:12]
+        ip_hint = (self.peers.get(hash_hex) or {}).get("ip")
+        if ip_hint:
+            label = f"{label} ({ip_hint})"
+        elif via == "serial" or serial_discovery_active():
+            label = f"{label} (serial)"
         self._log_once(
             hash_hex,
-            f"[discovery] RNS peer discovered ({via}): {name or hash_hex[:12]}...",
+            f"[discovery] RNS peer discovered ({via}): {label}...",
         )
 
     def _on_beacon(self, data, my_dest_hash, my_identity_hash=None, source_ip=None):

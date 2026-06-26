@@ -72,15 +72,34 @@ class LanScopeTests(unittest.TestCase):
         disc = PeerDiscovery()
         from unittest.mock import patch
 
-        with patch("chatxz.core.discovery.PeerDiscovery._scope_ip", return_value="10.10.10.37"):
-            disc._store_peer({
-                "hash": "f" * 32,
-                "ip": "10.0.5.10",
-                "name": "UBUNTU",
-                "via": "rns",
-                "last_seen": __import__("time").time(),
-            })
+        with patch("chatxz.core.discovery.serial_discovery_active", return_value=False):
+            with patch("chatxz.core.discovery.PeerDiscovery._scope_ip", return_value="10.10.10.37"):
+                disc._store_peer({
+                    "hash": "f" * 32,
+                    "ip": "10.0.5.10",
+                    "name": "UBUNTU",
+                    "via": "rns",
+                    "last_seen": __import__("time").time(),
+                })
         self.assertEqual(len(disc.peers), 0)
+
+    def test_store_peer_strips_cross_subnet_ip_for_serial_bridge(self):
+        disc = PeerDiscovery()
+        from unittest.mock import patch
+
+        peer_hash = "g" * 32
+        with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
+            with patch("chatxz.core.discovery.PeerDiscovery._scope_ip", return_value="10.0.30.112"):
+                ok = disc._store_peer({
+                    "hash": peer_hash,
+                    "ip": "10.0.5.10",
+                    "name": "UBUNTU",
+                    "via": "rns",
+                    "last_seen": __import__("time").time(),
+                })
+        self.assertTrue(ok)
+        self.assertIn(peer_hash, disc.peers)
+        self.assertNotIn("ip", disc.peers[peer_hash])
 
     def test_store_peer_drops_existing_peer_on_subnet_move(self):
         disc = PeerDiscovery()

@@ -650,7 +650,7 @@ class ChatWebServer:
 
     def _peer_in_discovery_scope(self, peer_hash, link=None):
         from chatxz.core.discovery import normalize_hash, serial_discovery_active
-        from chatxz.core.lan_rns import interface_family
+        from chatxz.core.lan_rns import interface_family, peer_path_on_family
         from chatxz.utils.lan_scope import peer_in_scope
 
         if link and self.messaging:
@@ -664,6 +664,8 @@ class ChatWebServer:
         target = normalize_hash(peer_hash or "")
         if not target:
             return False
+        if self.messaging and peer_path_on_family(target, "serial") is not None:
+            return True
         peer_ip = ""
         peer_via = ""
         meta = self._discovery_peer_for_connect(None, target)
