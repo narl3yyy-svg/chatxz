@@ -1139,19 +1139,33 @@ def local_ipv4_addresses():
     return [ip] if ip else []
 
 
+def discovery_scope_ip():
+    """Primary LAN IPv4 for discovery scoping (pinned address or auto-selected NIC)."""
+    ip = get_lan_ip_preference()
+    if ip:
+        return ip
+    return lan_ip()
+
+
 def lan_broadcast():
     """Subnet broadcast address for RNS UDP announces (Android needs directed broadcast)."""
+    ip = get_lan_ip_preference() or lan_ip()
+    if ip:
+        parts = ip.split(".")
+        if len(parts) == 4:
+            directed = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+            for iface in list_network_interfaces():
+                if not iface.get("up"):
+                    continue
+                for key in ("broadcast", "subnet_broadcast"):
+                    if iface.get(key) == directed:
+                        return directed
+            return directed
     for iface in list_network_interfaces():
         if iface.get("up") and iface.get("broadcast"):
             return iface["broadcast"]
         if iface.get("up") and iface.get("subnet_broadcast"):
             return iface["subnet_broadcast"]
-
-    ip = lan_ip()
-    if ip:
-        parts = ip.split(".")
-        if len(parts) == 4:
-            return f"{parts[0]}.{parts[1]}.{parts[2]}.255"
     return "255.255.255.255"
 
 

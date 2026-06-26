@@ -3,6 +3,12 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.138": [
+        "Changing Settings → Network IPv4 now drops all active links and clears cached RNS paths — messages no longer cross subnets after a NIC change.",
+        "Beacon discovery strictly rejects peers outside your LAN /24 (no more 10.0.30.x on 10.10.100.x).",
+        "RNS broadcast address follows your pinned IPv4 instead of falling back to 255.255.255.255.",
+        "Ctrl+C shuts down cleanly on Linux; Ctrl+Z suspend is disabled in run.sh to avoid stuck ports.",
+    ],
     "0.3.137": [
         "Network panel (sidebar 🌐) shows live discovery/link status only.",
         "All network configuration (IPv4 pin, UDP/TCP LAN, hub, serial) lives under Settings → Network.",

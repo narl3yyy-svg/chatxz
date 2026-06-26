@@ -3527,8 +3527,9 @@ function saveLanInterface() {
     .then(r => r.json())
     .then(d => {
       if (d.status === 'ok') {
-        toast(lan_interface ? `LAN pinned to ${lan_interface}` : 'LAN interface: auto');
+        toast(lan_interface ? `LAN pinned — active links cleared` : 'LAN auto — active links cleared');
         refreshNetworkStatus(true);
+        if (activePeer) { activePeer = null; updatePeerUI(); }
       } else {
         toast('Failed: ' + (d.error || 'unknown'));
       }

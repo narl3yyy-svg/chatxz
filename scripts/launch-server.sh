@@ -45,6 +45,11 @@ launch_with_group() {
 main() {
     ensure_serial_groups
 
+    # Ctrl+Z suspends the process and leaves ports open — disable it in this terminal.
+    if command -v stty >/dev/null 2>&1 && [ -t 0 ]; then
+        stty susp undef 2>/dev/null || true
+    fi
+
     STOP_SCRIPT="$DIR/scripts/stop-chatxz.sh"
     if [ -x "$STOP_SCRIPT" ]; then
         bash "$STOP_SCRIPT" || true

@@ -43,5 +43,41 @@ class LanScopeTests(unittest.TestCase):
         self.assertNotIn("10.0.30.101", ips)
 
 
+    def test_beacon_rejects_cross_subnet_peer_ip(self):
+        disc = PeerDiscovery()
+        disc.accept_peers = True
+        disc.running = True
+        from unittest.mock import patch
+
+        beacon = {
+            "app": "chatxz",
+            "hash": "c" * 32,
+            "name": "ARCH",
+            "ip": "10.0.30.112",
+            "port": 8742,
+            "identity_hash": "d" * 32,
+            "pubkey": "dGVzdA==",
+        }
+        with patch("chatxz.utils.platform.discovery_scope_ip", return_value="10.10.100.4"):
+            accepted = disc._on_beacon(
+                beacon,
+                my_dest_hash="a" * 32,
+                my_identity_hash="b" * 32,
+                source_ip="10.10.100.12",
+            )
+        self.assertFalse(accepted)
+        self.assertEqual(len(disc.peers), 0)
+
+    def test_lan_broadcast_uses_pinned_ip(self):
+        from unittest.mock import patch
+        from chatxz.utils.platform import lan_broadcast, set_lan_interface_preference
+
+        set_lan_interface_preference("10.10.100.4")
+        with patch("chatxz.utils.platform.list_network_interfaces", return_value=[]):
+            with patch("chatxz.utils.platform.lan_ip", return_value=None):
+                self.assertEqual(lan_broadcast(), "10.10.100.255")
+        set_lan_interface_preference("")
+
+
 if __name__ == "__main__":
     unittest.main()

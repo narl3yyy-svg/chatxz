@@ -92,6 +92,20 @@ class PeerDiscovery:
         self.peers.clear()
         self._last_log.clear()
 
+    def purge_out_of_scope(self, scope_ip):
+        """Remove discovery entries outside the active LAN /24 scope."""
+        scope = (scope_ip or "").strip()
+        if not scope:
+            return 0
+        removed = 0
+        for key in list(self.peers.keys()):
+            peer = self.peers.get(key) or {}
+            ip = (peer.get("ip") or "").strip()
+            if ip and not same_lan_scope(ip, scope):
+                del self.peers[key]
+                removed += 1
+        return removed
+
     def purge_hashes(self, hashes):
         """Remove stale discovery entries by destination or identity hash."""
         targets = {
@@ -294,19 +308,20 @@ class PeerDiscovery:
         peer_ip = (data.get("ip") or peer.get("ip") or "").strip()
         source = (source_ip or "").strip()
         try:
-            from chatxz.utils.platform import lan_ip
-            local_ip = (lan_ip() or "").strip()
+            from chatxz.utils.platform import discovery_scope_ip
+            local_ip = (discovery_scope_ip() or "").strip()
         except Exception:
             local_ip = ""
         if local_ip:
             if peer_ip and not same_lan_scope(peer_ip, local_ip):
-                if source and same_lan_scope(source, local_ip):
-                    peer_ip = source
-                else:
-                    return False
-            elif not peer_ip and source and not same_lan_scope(source, local_ip):
                 return False
-        peer["ip"] = peer_ip or source or peer.get("ip")
+            effective_ip = peer_ip or source
+            if not effective_ip or not same_lan_scope(effective_ip, local_ip):
+                return False
+            peer_ip = effective_ip
+        else:
+            peer_ip = peer_ip or source or peer.get("ip")
+        peer["ip"] = peer_ip
         peer["port"] = data.get("port", peer.get("port", 8742))
         name = peer.get("name") or hash_hex[:8]
         peer["name"] = name

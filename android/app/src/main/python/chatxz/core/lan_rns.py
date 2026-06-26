@@ -275,6 +275,11 @@ def clear_paths_on_family(family):
     return removed
 
 
+def clear_all_lan_paths():
+    """Drop every cached UDP/LAN path (e.g. after NIC/subnet change)."""
+    return clear_paths_on_family("udp") + clear_paths_on_family("lan")
+
+
 def clear_paths_except_families(keep_families):
     """Drop path-table entries not on one of the kept transport families."""
     keep = {f for f in (keep_families or ()) if f}

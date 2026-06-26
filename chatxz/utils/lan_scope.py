@@ -1,6 +1,15 @@
 """Shared LAN subnet matching for discovery, contacts, and UI."""
 
 
+def peer_in_scope(peer_ip, scope_ip):
+    """True when peer IPv4 is on the same discovery scope as scope_ip."""
+    peer = (peer_ip or "").strip()
+    scope = (scope_ip or "").strip()
+    if not peer or not scope:
+        return False
+    return same_lan_scope(peer, scope)
+
+
 def same_lan_scope(ip_a, ip_b):
     """True when two IPv4 addresses are on the same LAN discovery scope.
 

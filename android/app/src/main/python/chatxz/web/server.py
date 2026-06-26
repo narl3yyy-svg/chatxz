@@ -90,6 +90,7 @@ from chatxz.utils.platform import (
     invalidate_desktop_interface_cache,
     parse_lan_interface_value,
     set_lan_interface_preference,
+    discovery_scope_ip,
     android_storage_dirs,
     patch_embedded_signals,
     list_network_interfaces,
@@ -644,7 +645,57 @@ class ChatWebServer:
                     if entry_ip and entry_ip != "disconnected":
                         return entry_ip
         # Auto mode: scope discovery to primary LAN /24 (not entire 10/8 or all NICs).
-        return detect_lan_ip()
+        return detect_lan_ip() or discovery_scope_ip()
+
+    def _peer_in_discovery_scope(self, peer_hash):
+        from chatxz.core.discovery import normalize_hash
+        from chatxz.utils.lan_scope import peer_in_scope
+
+        scope = self._discovery_scope_ip()
+        if not scope:
+            return True
+        target = normalize_hash(peer_hash or "")
+        if not target:
+            return False
+        peer_ip = ""
+        meta = self._discovery_peer_for_connect(None, target)
+        if meta:
+            peer_ip = (meta.get("ip") or "").strip()
+        if not peer_ip and self.discovery:
+            for peer in self.discovery.peers.values():
+                ph = normalize_hash(peer.get("hash"))
+                ih = normalize_hash(peer.get("identity_hash"))
+                if target in (ph, ih):
+                    peer_ip = (peer.get("ip") or "").strip()
+                    break
+        if not peer_ip:
+            return False
+        return peer_in_scope(peer_ip, scope)
+
+    def _apply_lan_scope_change(self):
+        """Drop links/paths/peers when the user changes LAN IPv4 scope."""
+        from chatxz.core.lan_rns import clear_all_lan_paths
+
+        scope = self._discovery_scope_ip()
+        invalidate_desktop_interface_cache(use_powershell=sys.platform == "win32")
+        apply_lan_interface_preference(self.config_dir)
+        if self.messaging:
+            self.messaging.disconnect_all_peers(clear_session=False)
+        clear_all_lan_paths()
+        if self.discovery:
+            if scope:
+                removed = self.discovery.purge_out_of_scope(scope)
+                if removed:
+                    print(f"[network] Purged {removed} out-of-scope peer(s)")
+            else:
+                self.discovery.clear_peers()
+        if self.lan_beacon:
+            self.lan_beacon.ip = detect_lan_ip()
+        self.active_peer = None
+        print(
+            f"[network] LAN scope changed — links cleared"
+            + (f" (scope={scope})" if scope else "")
+        )
 
     def _interfaces_for_picker(self, refresh=False):
         """All local NICs/IPv4 addresses for setup/settings dropdowns (unfiltered)."""
@@ -3251,10 +3302,12 @@ class ChatWebServer:
                         settings.get("rns_interfaces"), preset
                     )
                     config_dirty = True
+            lan_scope_changed = False
             if "lan_interface" in data:
                 settings["lan_interface"] = (data.get("lan_interface") or "").strip()
                 set_lan_interface_preference(settings["lan_interface"])
                 config_dirty = True
+                lan_scope_changed = True
             if "auto_interface_enabled" in data:
                 settings["auto_interface_enabled"] = bool(data["auto_interface_enabled"])
                 config_dirty = True
@@ -3280,6 +3333,8 @@ class ChatWebServer:
             if setup_fast:
                 if self.messaging:
                     self.messaging.display_name = settings.get("name", "")
+                if lan_scope_changed:
+                    asyncio.create_task(asyncio.to_thread(self._apply_lan_scope_change))
                 if config_dirty or hub_changed:
                     asyncio.create_task(
                         asyncio.to_thread(self._write_rns_config, settings)
@@ -3292,6 +3347,8 @@ class ChatWebServer:
                     "status": "ok",
                     "settings": self._settings_api_payload(settings),
                 })
+            if lan_scope_changed:
+                await asyncio.to_thread(self._apply_lan_scope_change)
             if config_dirty or hub_changed:
                 await asyncio.to_thread(self._write_rns_config, settings)
             if hub_changed:
@@ -3300,6 +3357,21 @@ class ChatWebServer:
                 self._apply_auto_announce_settings(settings)
             if self.messaging:
                 self.messaging.display_name = settings.get("name", "")
+            if lan_scope_changed and self.websockets and self._loop:
+                await self._broadcast({
+                    "type": "link_closed",
+                    "data": {
+                        "peer": self.active_peer,
+                        "reason": "lan_scope_changed",
+                        "linked_peers": (
+                            self.messaging.linked_peers() if self.messaging else []
+                        ),
+                    },
+                })
+                await self._broadcast({
+                    "type": "peers",
+                    "data": self._scoped_peers(),
+                })
             self._apply_received_dir(settings)
             self._apply_retention()
             self._save_history()
@@ -4230,6 +4302,12 @@ class ChatWebServer:
                 if not target_hash and self.messaging._session_peer_hash:
                     target_hash = self.messaging._session_peer_hash
                 if target_hash:
+                    if not self._peer_in_discovery_scope(target_hash):
+                        await ws.send_str(json.dumps({
+                            "type": "info",
+                            "data": "Peer is outside your LAN scope — change Settings → Network IPv4 or reconnect on the same subnet",
+                        }))
+                        return
                     peer_ip = None
                     meta = self._discovery_peer_for_connect(None, target_hash)
                     if meta:
@@ -4563,24 +4641,44 @@ class ChatWebServer:
         asyncio.set_event_loop(loop)
         runner = AppRunner(app, access_log=None)
         stopping = False
+        self._loop = loop
 
         async def _start():
             await runner.setup()
             site = TCPSite(runner, self.host, self.port, reuse_address=True)
             await site.start()
 
-        def _stop_loop():
+        def _stop_loop(signum=None, frame=None):
             nonlocal stopping
             if stopping:
-                return
+                try:
+                    self._teardown_network_stack()
+                except Exception:
+                    pass
+                os._exit(130 if signum == signal.SIGINT else 0)
             stopping = True
+            self._shutting_down = True
+            if self.messaging:
+                self.messaging.shutdown_requested = True
+            try:
+                self._teardown_network_stack()
+            except Exception:
+                pass
             loop.call_soon_threadsafe(loop.stop)
 
         if sys.platform != "win32":
             try:
-                loop.add_signal_handler(signal.SIGINT, _stop_loop)
-                loop.add_signal_handler(signal.SIGTERM, _stop_loop)
+                loop.add_signal_handler(signal.SIGINT, lambda: _stop_loop(signal.SIGINT))
+                loop.add_signal_handler(signal.SIGTERM, lambda: _stop_loop(signal.SIGTERM))
             except (NotImplementedError, RuntimeError, ValueError):
+                signal.signal(signal.SIGINT, _stop_loop)
+                signal.signal(signal.SIGTERM, _stop_loop)
+            try:
+                signal.signal(signal.SIGTSTP, lambda s, f: print(
+                    "\n[shutdown] Ctrl+Z suspends the server — use Ctrl+C to stop",
+                    flush=True,
+                ))
+            except (AttributeError, ValueError, OSError):
                 pass
 
         try:
@@ -4594,6 +4692,7 @@ class ChatWebServer:
         finally:
             if not stopping:
                 stopping = True
+            self._shutting_down = True
             try:
                 loop.run_until_complete(runner.cleanup())
             except Exception:
