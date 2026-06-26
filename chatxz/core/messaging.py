@@ -162,7 +162,7 @@ class MessagingBackend:
                  display_name="", auto_announce=False,
                  receive_dir=None, peer_resolver=None, on_queue_sent=None,
                  http_port=8742, lan_transfer_enabled=False,
-                 peer_endpoint_resolver=None):
+                 peer_endpoint_resolver=None, peer_scope_checker=None):
         self.identity = identity
         self.config_dir = config_dir
         self.receive_dir = receive_dir or os.path.join(config_dir, "received")
@@ -206,6 +206,7 @@ class MessagingBackend:
         self.http_port = int(http_port or 8742)
         self.lan_transfer_enabled = bool(lan_transfer_enabled)
         self.peer_endpoint_resolver = peer_endpoint_resolver
+        self.peer_scope_checker = peer_scope_checker
         self._link_peer_hashes = {}
         self._link_handoff = False
         self._last_handoff = False
@@ -246,6 +247,16 @@ class MessagingBackend:
         canon = self.canonical_connect_hash(peer_hash, link=link)
         if canon and not self._is_self_hash(canon):
             self._link_peer_hashes[link.link_id] = canon
+
+    def _peer_allowed_by_scope(self, peer_hash):
+        if not self.peer_scope_checker or not peer_hash or peer_hash == "unknown":
+            return True
+        if is_hub_peer_hash(peer_hash):
+            return True
+        try:
+            return bool(self.peer_scope_checker(peer_hash))
+        except Exception:
+            return True
 
     def _link_for_peer(self, peer_hash):
         peer = self.dest_hash_for(peer_hash)
@@ -1950,10 +1961,20 @@ class MessagingBackend:
         )
 
     def _announce_payload(self):
-        return json.dumps({
+        payload = {
             "app": APP_NAME,
             "name": self.display_name or "",
-        }).encode("utf-8")
+        }
+        if lan_discovery_configured(load_settings_interfaces(self.config_dir)):
+            try:
+                from chatxz.utils.platform import discovery_scope_ip
+
+                ip = (discovery_scope_ip() or "").strip()
+                if ip:
+                    payload["ip"] = ip
+            except Exception:
+                pass
+        return json.dumps(payload).encode("utf-8")
 
     def _announce_on_interface(self, iface, app_data=None):
         if not self.destination or not iface:
@@ -2828,6 +2849,17 @@ class MessagingBackend:
             print("[messaging] Rejected inbound link — hub group is not a real peer")
             return
 
+        if not self._peer_allowed_by_scope(peer_hash):
+            try:
+                link.teardown()
+            except Exception:
+                pass
+            print(
+                f"[messaging] Rejected inbound link from {peer_hash[:16]}... "
+                "(outside LAN scope)"
+            )
+            return
+
         if self.active_link and self.active_peer_hash and not is_hub_peer_hash(self.active_peer_hash):
             same_peer = (
                 self.hashes_equivalent(peer_hash, self.active_peer_hash)
@@ -2982,6 +3014,13 @@ class MessagingBackend:
             try:
                 chat_msg = ChatMessage.from_json(message.decode("utf-8"))
                 remote_hash = self.dest_hash_for(self._peer_for_link(link))
+                if remote_hash and not self._peer_allowed_by_scope(remote_hash):
+                    if chat_msg.msg_type not in ("__receipt", "__read_receipt"):
+                        print(
+                            f"[messaging] Dropped {chat_msg.msg_type} from "
+                            f"{remote_hash[:16]}... (outside LAN scope)"
+                        )
+                    return
 
                 if chat_msg.msg_type == "__receipt":
                     try:

@@ -652,6 +652,8 @@ class ChatWebServer:
         from chatxz.core.discovery import normalize_hash
         from chatxz.utils.lan_scope import peer_in_scope
 
+        if is_hub_peer_hash(peer_hash):
+            return True
         scope = self._discovery_scope_ip()
         if not scope:
             return True
@@ -662,7 +664,7 @@ class ChatWebServer:
         meta = self._discovery_peer_for_connect(None, target)
         if meta:
             peer_ip = (meta.get("ip") or "").strip()
-        if not peer_ip and self.discovery:
+        if not peer_ip and getattr(self, "discovery", None):
             for peer in self.discovery.peers.values():
                 ph = normalize_hash(peer.get("hash"))
                 ih = normalize_hash(peer.get("identity_hash"))
@@ -692,6 +694,11 @@ class ChatWebServer:
                 self.discovery.clear_peers()
         if self.lan_beacon:
             self.lan_beacon.ip = detect_lan_ip()
+        if self.messaging:
+            try:
+                self.messaging.announce()
+            except Exception:
+                pass
         self.active_peer = None
         print(
             f"[network] LAN scope changed — links cleared"
@@ -1410,6 +1417,7 @@ class ChatWebServer:
             http_port=self.port,
             lan_transfer_enabled=(self.host in ("0.0.0.0", "::")),
             peer_endpoint_resolver=self._peer_endpoint_for_transfer,
+            peer_scope_checker=self._peer_in_discovery_scope,
         )
         self.voice_recorder = VoiceRecorder(self.config_dir)
         dest = self.messaging.start()
@@ -1527,6 +1535,18 @@ class ChatWebServer:
                 if self.debug:
                     print("[hub] Dropped group message (hub disabled)")
                 return
+        elif (
+            sender_hash
+            and sender_hash != "system"
+            and not is_hub_peer_hash(sender_hash)
+            and not self._peer_in_discovery_scope(sender_hash)
+        ):
+            if self.debug:
+                print(
+                    f"[network] Dropped message from {sender_hash[:16]}... "
+                    "(outside LAN scope)"
+                )
+            return
             chat_peer = HUB_GROUP_PEER
             if sender_hash and sender_hash != "system":
                 sender = self._peer_dest_hash(sender_hash)
@@ -1773,6 +1793,13 @@ class ChatWebServer:
         clean = self._peer_dest_hash(peer_hash)
         if not clean:
             return False
+        scope_ip = self._discovery_scope_ip()
+        if (
+            scope_ip
+            and not is_hub_peer_hash(clean)
+            and not self._peer_in_discovery_scope(clean)
+        ):
+            return False
         if self.messaging:
             if self.messaging.active_peer_hash and self._peers_equivalent(
                 clean, self.messaging.active_peer_hash
@@ -1782,7 +1809,7 @@ class ChatWebServer:
                 if self._peers_equivalent(clean, linked):
                     return True
         if self.discovery:
-            return self.discovery.peer_is_current(clean)
+            return self.discovery.peer_is_current(clean, scope_ip=scope_ip)
         return False
 
     def _resolve_current_peer_hash(self, peer_hash, peer_ip=None):
@@ -1794,7 +1821,7 @@ class ChatWebServer:
             if current:
                 return self._peer_dest_hash(current.get("hash"))
         if self.discovery:
-            for peer in self.discovery.get_peers():
+            for peer in self._scoped_peers():
                 if self._peers_equivalent(peer.get("hash"), clean):
                     return self._peer_dest_hash(peer.get("hash"))
                 if peer.get("identity_hash") and self._peers_equivalent(
@@ -1958,13 +1985,15 @@ class ChatWebServer:
                 self._loop
             )
 
-    def _register_link_peer_in_discovery(self, peer_hash):
+    def _register_link_peer_in_discovery(self, peer_hash, peer_ip=None):
         if not self.discovery or not peer_hash:
             return
         name = self._peer_display_name(peer_hash) or peer_hash[:8]
         settings = self.load_settings()
         via = "tcp_hub" if settings.get("hub_role", "off") != "off" else "link"
-        self.discovery.register_link_peer(peer_hash, name=name, via=via)
+        self.discovery.register_link_peer(
+            peer_hash, name=name, via=via, ip=peer_ip,
+        )
 
     def _maybe_update_hub_server_hash(self, peer_hash):
         settings = self.load_settings()
@@ -1990,7 +2019,25 @@ class ChatWebServer:
                 resolved = fixed
         elif not resolved:
             resolved = self._peer_dest_hash(peer_hash)
-        self._register_link_peer_in_discovery(resolved)
+        if (
+            resolved
+            and not is_hub_peer_hash(resolved)
+            and not self._peer_in_discovery_scope(resolved)
+        ):
+            if self.messaging and link:
+                try:
+                    link.teardown()
+                except Exception:
+                    pass
+            print(
+                f"[connect] Rejected link from {resolved[:16]}... (outside LAN scope)"
+            )
+            return
+        peer_ip = ""
+        meta = self._discovery_peer_for_connect(None, resolved)
+        if meta:
+            peer_ip = (meta.get("ip") or "").strip()
+        self._register_link_peer_in_discovery(resolved, peer_ip=peer_ip or None)
         self._maybe_update_hub_server_hash(resolved)
         user_disconnected = bool(
             self.messaging and self.messaging.is_user_disconnected(resolved)
@@ -2181,7 +2228,7 @@ class ChatWebServer:
         by_hash = None
         by_rns = None
         by_ip = None
-        for p in self.discovery.get_peers():
+        for p in self._scoped_peers():
             ph = normalize_hash(p.get("hash"))
             ih = normalize_hash(p.get("identity_hash"))
             if peer_ip and p.get("ip") == peer_ip:
@@ -2204,13 +2251,13 @@ class ChatWebServer:
             return resolved
         from chatxz.core.discovery import normalize_hash
         clean = normalize_hash(resolved)
-        for p in self.discovery.get_peers():
+        for p in self._scoped_peers():
             ph = normalize_hash(p.get("hash"))
             ih = normalize_hash(p.get("identity_hash"))
             if clean and (ph == clean or ih == clean):
                 return self._resolve_peer_hash(p.get("hash"))
         if peer_ip and not clean:
-            for p in self.discovery.get_peers():
+            for p in self._scoped_peers():
                 if p.get("ip") == peer_ip:
                     return self._resolve_peer_hash(p.get("hash"))
         return resolved

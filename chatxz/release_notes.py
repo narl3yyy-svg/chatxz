@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.145": [
+        "Pinned LAN scope is enforced end-to-end — peers on a different /24 (e.g. 10.0.5.x vs 10.10.10.x on the same NIC) are dropped from discovery, blocked on connect, and rejected for inbound links and messages.",
+        "RNS announces now include the pinned IPv4 so peers update when you switch interfaces; stale cross-subnet entries are removed automatically.",
+        "Changing LAN scope tears down out-of-scope links and re-announces on the new subnet.",
+    ],
     "0.3.144": [
         "Hub TCP no longer dials when hub host is on a different subnet than your pinned LAN (e.g. hub 10.0.30.109 while pinned to 10.0.5.37) — stops Connection refused spam in logs.",
         "Setting hub mode to Off now disables and removes the saved hub TCP client (was left enabled in RNS config).",

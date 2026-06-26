@@ -68,6 +68,68 @@ class LanScopeTests(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertEqual(len(disc.peers), 0)
 
+    def test_store_peer_rejects_cross_subnet_when_scoped(self):
+        disc = PeerDiscovery()
+        from unittest.mock import patch
+
+        with patch("chatxz.core.discovery.PeerDiscovery._scope_ip", return_value="10.10.10.37"):
+            disc._store_peer({
+                "hash": "f" * 32,
+                "ip": "10.0.5.10",
+                "name": "UBUNTU",
+                "via": "rns",
+                "last_seen": __import__("time").time(),
+            })
+        self.assertEqual(len(disc.peers), 0)
+
+    def test_store_peer_drops_existing_peer_on_subnet_move(self):
+        disc = PeerDiscovery()
+        now = __import__("time").time()
+        peer_hash = "e" * 32
+        disc.peers[peer_hash] = {
+            "hash": peer_hash,
+            "ip": "10.0.5.37",
+            "name": "ARCH",
+            "last_seen": now,
+            "via": "beacon",
+        }
+        evicted = []
+        disc.on_peer_evicted = lambda removed, new: evicted.append(removed)
+        from unittest.mock import patch
+
+        with patch("chatxz.core.discovery.PeerDiscovery._scope_ip", return_value="10.0.5.10"):
+            disc._store_peer({
+                "hash": peer_hash,
+                "ip": "10.10.10.37",
+                "name": "ARCH",
+                "via": "rns",
+                "last_seen": now,
+            })
+        self.assertNotIn(peer_hash, disc.peers)
+        self.assertEqual(evicted, [[peer_hash]])
+
+    def test_scoped_peers_hide_ipless_entries(self):
+        disc = PeerDiscovery()
+        disc.accept_peers = True
+        now = __import__("time").time()
+        disc.peers["x"] = {
+            "hash": "x" * 32,
+            "name": "NOIP",
+            "last_seen": now,
+            "via": "rns",
+        }
+        disc.peers["y"] = {
+            "hash": "y" * 32,
+            "ip": "10.0.5.10",
+            "name": "UBUNTU",
+            "last_seen": now,
+            "via": "beacon",
+        }
+        scoped = disc.get_peers(scope_ip="10.0.5.37")
+        names = {p.get("name") for p in scoped}
+        self.assertIn("UBUNTU", names)
+        self.assertNotIn("NOIP", names)
+
     def test_lan_broadcast_uses_pinned_ip(self):
         from unittest.mock import patch
         from chatxz.utils.platform import lan_broadcast, set_lan_interface_preference

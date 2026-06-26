@@ -74,6 +74,8 @@ class DiscoveryIdentityTests(unittest.TestCase):
         self.assertEqual(peers[0]["hash"], "newhash123456789012345678901234")
 
     def test_rns_announce_evicts_same_name_peer(self):
+        from unittest.mock import patch
+
         disc = PeerDiscovery()
         disc.accept_peers = True
         disc.peers["8503195b200ad31536053584f86c9908"] = {
@@ -83,12 +85,13 @@ class DiscoveryIdentityTests(unittest.TestCase):
             "last_seen": time.time(),
             "via": "beacon",
         }
-        disc._store_peer({
-            "hash": "a68cdfa88742c19a1edec7c2ae021f25",
-            "name": "ubuntu",
-            "last_seen": time.time(),
-            "via": "rns",
-        })
+        with patch("chatxz.core.discovery.PeerDiscovery._scope_ip", return_value=None):
+            disc._store_peer({
+                "hash": "a68cdfa88742c19a1edec7c2ae021f25",
+                "name": "ubuntu",
+                "last_seen": time.time(),
+                "via": "rns",
+            })
         self.assertEqual(len(disc.peers), 1)
         self.assertIn("a68cdfa88742c19a1edec7c2ae021f25", disc.peers)
 

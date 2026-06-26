@@ -4,7 +4,7 @@ import time
 import RNS
 
 from chatxz.core.lan_rns import register_udp_peer_ip
-from chatxz.utils.lan_scope import same_lan_scope
+from chatxz.utils.lan_scope import peer_in_scope, same_lan_scope
 
 def discovery_timeout_s():
     return 300
@@ -92,6 +92,29 @@ class PeerDiscovery:
         self.peers.clear()
         self._last_log.clear()
 
+    def _scope_ip(self):
+        """Pinned/auto LAN IPv4 used for discovery isolation (None when unscoped)."""
+        try:
+            from chatxz.utils.platform import discovery_scope_ip
+
+            return (discovery_scope_ip() or "").strip() or None
+        except Exception:
+            return None
+
+    def _peer_allowed(self, peer):
+        """True when peer may be stored or refreshed under the active LAN scope."""
+        scope = self._scope_ip()
+        if not scope:
+            return True
+        candidate = dict(peer or {})
+        ip = (candidate.get("ip") or "").strip()
+        if not ip:
+            candidate = self._attach_peer_ip(candidate, scope_only=True)
+            ip = (candidate.get("ip") or "").strip()
+        if not ip:
+            return False
+        return peer_in_scope(ip, scope)
+
     def purge_out_of_scope(self, scope_ip):
         """Remove discovery entries outside the active LAN /24 scope."""
         scope = (scope_ip or "").strip()
@@ -130,27 +153,31 @@ class PeerDiscovery:
             self._last_log.pop(f"beacon-id:{target}", None)
         return removed
 
-    def _attach_peer_ip(self, peer):
+    def _attach_peer_ip(self, peer, scope_only=False):
         if (peer.get("ip") or "").strip():
             return peer
+        scope = self._scope_ip() if scope_only else None
         name = (peer.get("name") or "").strip()
         ident = normalize_hash(peer.get("identity_hash"))
         for existing in self.peers.values():
-            if not existing.get("ip"):
+            existing_ip = (existing.get("ip") or "").strip()
+            if not existing_ip:
+                continue
+            if scope and not peer_in_scope(existing_ip, scope):
                 continue
             if name and existing.get("name") == name:
-                peer["ip"] = existing["ip"]
+                peer["ip"] = existing_ip
                 peer["port"] = existing.get("port", 8742)
                 return peer
             if ident and normalize_hash(existing.get("identity_hash")) == ident:
-                peer["ip"] = existing["ip"]
+                peer["ip"] = existing_ip
                 peer["port"] = existing.get("port", 8742)
                 return peer
         return peer
 
     def _evict_superseded_peers(self, peer):
         """Drop older entries for the same host when identity/hash changes."""
-        peer = self._attach_peer_ip(dict(peer))
+        peer = self._attach_peer_ip(dict(peer), scope_only=bool(self._scope_ip()))
         ip = (peer.get("ip") or "").strip()
         new_hash = normalize_hash(peer.get("hash"))
         new_ident = normalize_hash(peer.get("identity_hash"))
@@ -188,23 +215,42 @@ class PeerDiscovery:
         except Exception as e:
             print(f"[discovery] on_peer_evicted error: {e}")
 
-    def register_link_peer(self, peer_hash, name="", via="link"):
+    def _remove_peer_entry(self, hash_hex):
+        """Drop a peer and notify listeners (e.g. scope change or subnet move)."""
+        clean = normalize_hash(hash_hex)
+        if not clean or clean not in self.peers:
+            return
+        del self.peers[clean]
+        self._last_log.pop(clean, None)
+        self._last_log.pop(f"beacon:{clean}", None)
+        self._last_log.pop(f"beacon-id:{clean}", None)
+        self._notify_peer_evicted([clean], None)
+
+    def register_link_peer(self, peer_hash, name="", via="link", ip=None):
         """Register a peer learned from an established RNS link (e.g. TCP hub)."""
         hash_hex = normalize_hash(peer_hash)
         if not hash_hex:
             return
-        self._store_peer({
+        record = {
             "hash": hash_hex,
             "name": (name or hash_hex[:8]).strip() or hash_hex[:8],
             "via": via,
             "last_seen": time.time(),
-        })
+        }
+        if ip:
+            record["ip"] = (ip or "").strip()
+        if not self._peer_allowed(record):
+            return
+        self._store_peer(record)
 
     def _store_peer(self, peer):
         hash_hex = normalize_hash(peer.get("hash"))
         if not hash_hex:
             return
         peer["hash"] = hash_hex
+        if not self._peer_allowed(peer):
+            self._remove_peer_entry(hash_hex)
+            return
         removed, peer = self._evict_superseded_peers(peer)
         if removed:
             self._notify_peer_evicted(removed, peer)
@@ -212,8 +258,12 @@ class PeerDiscovery:
         if existing:
             new_ip = (peer.get("ip") or "").strip()
             if new_ip and new_ip != (existing.get("ip") or "").strip():
-                existing["ip"] = new_ip
-                existing["port"] = peer.get("port", existing.get("port", 8742))
+                if self._peer_allowed({"ip": new_ip}):
+                    existing["ip"] = new_ip
+                    existing["port"] = peer.get("port", existing.get("port", 8742))
+                elif self._scope_ip():
+                    self._remove_peer_entry(hash_hex)
+                    return
             elif peer.get("ip") and not existing.get("ip"):
                 existing["ip"] = peer["ip"]
                 existing["port"] = peer.get("port", 8742)
@@ -248,11 +298,13 @@ class PeerDiscovery:
         name = ""
         app_name = ""
 
+        announce_ip = ""
         if app_data:
             try:
                 data = json.loads(app_data.decode("utf-8"))
                 app_name = data.get("app", "")
                 name = data.get("name", "")
+                announce_ip = (data.get("ip") or "").strip()
             except Exception:
                 pass
 
@@ -266,6 +318,8 @@ class PeerDiscovery:
             "last_seen": time.time(),
             "via": "rns",
         }
+        if announce_ip:
+            peer["ip"] = announce_ip
         if identity_hex and identity_hex != hash_hex:
             peer["identity_hash"] = identity_hex
         if announced_identity:
@@ -313,15 +367,17 @@ class PeerDiscovery:
         except Exception:
             local_ip = ""
         if local_ip:
-            if peer_ip and not same_lan_scope(peer_ip, local_ip):
+            if peer_ip and not peer_in_scope(peer_ip, local_ip):
                 return False
             effective_ip = peer_ip or source
-            if not effective_ip or not same_lan_scope(effective_ip, local_ip):
+            if not effective_ip or not peer_in_scope(effective_ip, local_ip):
                 return False
             peer_ip = effective_ip
         else:
             peer_ip = peer_ip or source or peer.get("ip")
         peer["ip"] = peer_ip
+        if not self._peer_allowed(peer):
+            return False
         peer["port"] = data.get("port", peer.get("port", 8742))
         name = peer.get("name") or hash_hex[:8]
         peer["name"] = name
@@ -465,7 +521,8 @@ class PeerDiscovery:
         for peer in deduped.values():
             ip = (peer.get("ip") or "").strip()
             if not ip:
-                no_ip_peers.append(peer)
+                if not scope_ip:
+                    no_ip_peers.append(peer)
                 continue
             existing = collapsed.get(ip)
             if not existing:
@@ -483,8 +540,15 @@ class PeerDiscovery:
                     hashes.add(clean)
         return hashes
 
-    def peer_is_current(self, peer_hash):
+    def peer_is_current(self, peer_hash, scope_ip=None):
         clean = normalize_hash(peer_hash)
         if not clean:
             return False
-        return clean in self.current_hashes()
+        scope = scope_ip if scope_ip is not None else self._scope_ip()
+        hashes = set()
+        for peer in self.get_peers(scope_ip=scope):
+            for key in ("hash", "identity_hash"):
+                entry = normalize_hash(peer.get(key))
+                if entry:
+                    hashes.add(entry)
+        return clean in hashes
