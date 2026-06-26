@@ -3,8 +3,21 @@ import json
 import time
 import RNS
 
-from chatxz.core.lan_rns import register_udp_peer_ip
+from chatxz.core.lan_rns import register_udp_peer_ip, serial_interface_online
+from chatxz.core.rns_interfaces import configured_serial_enabled, load_settings_interfaces
 from chatxz.utils.lan_scope import peer_in_scope, same_lan_scope
+
+
+def serial_discovery_active():
+    """True when USB serial is configured and the RNS SerialInterface is online."""
+    try:
+        interfaces = load_settings_interfaces()
+        return (
+            configured_serial_enabled(interfaces)
+            and serial_interface_online() is not None
+        )
+    except Exception:
+        return False
 
 def discovery_timeout_s():
     return 300
@@ -103,16 +116,18 @@ class PeerDiscovery:
 
     def _peer_allowed(self, peer):
         """True when peer may be stored or refreshed under the active LAN scope."""
+        candidate = dict(peer or {})
+        if (candidate.get("via") or "").strip() == "serial":
+            return True
         scope = self._scope_ip()
         if not scope:
             return True
-        candidate = dict(peer or {})
         ip = (candidate.get("ip") or "").strip()
         if not ip:
             candidate = self._attach_peer_ip(candidate, scope_only=True)
             ip = (candidate.get("ip") or "").strip()
         if not ip:
-            return False
+            return serial_discovery_active()
         return peer_in_scope(ip, scope)
 
     def purge_out_of_scope(self, scope_ip):
@@ -518,10 +533,11 @@ class PeerDiscovery:
                 deduped[key] = peer
         collapsed = {}
         no_ip_peers = []
+        serial_peers = serial_discovery_active()
         for peer in deduped.values():
             ip = (peer.get("ip") or "").strip()
             if not ip:
-                if not scope_ip:
+                if not scope_ip or serial_peers or peer.get("via") == "serial":
                     no_ip_peers.append(peer)
                 continue
             existing = collapsed.get(ip)

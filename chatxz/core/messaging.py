@@ -248,13 +248,20 @@ class MessagingBackend:
         if canon and not self._is_self_hash(canon):
             self._link_peer_hashes[link.link_id] = canon
 
-    def _peer_allowed_by_scope(self, peer_hash):
+    def _peer_allowed_by_scope(self, peer_hash, link=None):
+        if link and interface_family(self._link_attached_interface(link)) == "serial":
+            return True
         if not self.peer_scope_checker or not peer_hash or peer_hash == "unknown":
             return True
         if is_hub_peer_hash(peer_hash):
             return True
         try:
-            return bool(self.peer_scope_checker(peer_hash))
+            return bool(self.peer_scope_checker(peer_hash, link=link))
+        except TypeError:
+            try:
+                return bool(self.peer_scope_checker(peer_hash))
+            except Exception:
+                return True
         except Exception:
             return True
 
@@ -2062,6 +2069,12 @@ class MessagingBackend:
                 RNS.Transport.identity.announce()
             except Exception:
                 pass
+        if (
+            self._serial_transport_ready()
+            and configured_serial_enabled(interfaces)
+            and (udp_lan or use_tcp_lan)
+        ):
+            self._burst_serial_announce(count=3, interval=0.25)
         if peer_ip and udp_lan:
             packet = build_announce_packet(self.destination, announce_data)
             unicast_announce_packet(packet, peer_ip=peer_ip, subnet_probe=False)
@@ -2110,7 +2123,15 @@ class MessagingBackend:
             if sent:
                 hint = f" + {sent} unicast" if sent else ""
                 print(f"[messaging] Announced on LAN (name={self.display_name or 'none'}{hint})")
+                if self._serial_transport_ready() and configured_serial_enabled(interfaces):
+                    self._burst_serial_announce(count=3, interval=0.25)
                 return
+        if (
+            self._serial_transport_ready()
+            and configured_serial_enabled(interfaces)
+            and lan_ok
+        ):
+            self._burst_serial_announce(count=3, interval=0.25)
         if lan_ok:
             print(f"[messaging] Announced on LAN (name={self.display_name or 'none'})")
         else:
@@ -2849,7 +2870,7 @@ class MessagingBackend:
             print("[messaging] Rejected inbound link — hub group is not a real peer")
             return
 
-        if not self._peer_allowed_by_scope(peer_hash):
+        if not self._peer_allowed_by_scope(peer_hash, link=link):
             try:
                 link.teardown()
             except Exception:
@@ -3014,7 +3035,7 @@ class MessagingBackend:
             try:
                 chat_msg = ChatMessage.from_json(message.decode("utf-8"))
                 remote_hash = self.dest_hash_for(self._peer_for_link(link))
-                if remote_hash and not self._peer_allowed_by_scope(remote_hash):
+                if remote_hash and not self._peer_allowed_by_scope(remote_hash, link=link):
                     if chat_msg.msg_type not in ("__receipt", "__read_receipt"):
                         print(
                             f"[messaging] Dropped {chat_msg.msg_type} from "

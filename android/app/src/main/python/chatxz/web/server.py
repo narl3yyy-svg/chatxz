@@ -648,10 +648,14 @@ class ChatWebServer:
         # Auto mode: scope discovery to primary LAN /24 (not entire 10/8 or all NICs).
         return detect_lan_ip() or discovery_scope_ip()
 
-    def _peer_in_discovery_scope(self, peer_hash):
-        from chatxz.core.discovery import normalize_hash
+    def _peer_in_discovery_scope(self, peer_hash, link=None):
+        from chatxz.core.discovery import normalize_hash, serial_discovery_active
+        from chatxz.core.lan_rns import interface_family
         from chatxz.utils.lan_scope import peer_in_scope
 
+        if link and self.messaging:
+            if interface_family(self.messaging._link_attached_interface(link)) == "serial":
+                return True
         if is_hub_peer_hash(peer_hash):
             return True
         scope = self._discovery_scope_ip()
@@ -661,18 +665,29 @@ class ChatWebServer:
         if not target:
             return False
         peer_ip = ""
+        peer_via = ""
         meta = self._discovery_peer_for_connect(None, target)
         if meta:
             peer_ip = (meta.get("ip") or "").strip()
+            peer_via = (meta.get("via") or "").strip()
         if not peer_ip and getattr(self, "discovery", None):
             for peer in self.discovery.peers.values():
                 ph = normalize_hash(peer.get("hash"))
                 ih = normalize_hash(peer.get("identity_hash"))
                 if target in (ph, ih):
                     peer_ip = (peer.get("ip") or "").strip()
+                    peer_via = (peer.get("via") or "").strip()
                     break
+        if peer_via == "serial":
+            return True
+        if self.messaging and target:
+            link_for_peer = self.messaging._link_for_peer(target)
+            if link_for_peer and interface_family(
+                self.messaging._link_attached_interface(link_for_peer)
+            ) == "serial":
+                return True
         if not peer_ip:
-            return False
+            return serial_discovery_active()
         return peer_in_scope(peer_ip, scope)
 
     def _apply_lan_scope_change(self):
@@ -1985,12 +2000,17 @@ class ChatWebServer:
                 self._loop
             )
 
-    def _register_link_peer_in_discovery(self, peer_hash, peer_ip=None):
+    def _register_link_peer_in_discovery(self, peer_hash, peer_ip=None, link=None):
         if not self.discovery or not peer_hash:
             return
+        from chatxz.core.lan_rns import interface_family
+
         name = self._peer_display_name(peer_hash) or peer_hash[:8]
         settings = self.load_settings()
         via = "tcp_hub" if settings.get("hub_role", "off") != "off" else "link"
+        if link and self.messaging:
+            if interface_family(self.messaging._link_attached_interface(link)) == "serial":
+                via = "serial"
         self.discovery.register_link_peer(
             peer_hash, name=name, via=via, ip=peer_ip,
         )
@@ -2022,7 +2042,7 @@ class ChatWebServer:
         if (
             resolved
             and not is_hub_peer_hash(resolved)
-            and not self._peer_in_discovery_scope(resolved)
+            and not self._peer_in_discovery_scope(resolved, link=link)
         ):
             if self.messaging and link:
                 try:
@@ -2037,7 +2057,9 @@ class ChatWebServer:
         meta = self._discovery_peer_for_connect(None, resolved)
         if meta:
             peer_ip = (meta.get("ip") or "").strip()
-        self._register_link_peer_in_discovery(resolved, peer_ip=peer_ip or None)
+        self._register_link_peer_in_discovery(
+            resolved, peer_ip=peer_ip or None, link=link,
+        )
         self._maybe_update_hub_server_hash(resolved)
         user_disconnected = bool(
             self.messaging and self.messaging.is_user_disconnected(resolved)
@@ -3106,6 +3128,18 @@ class ChatWebServer:
                         print("[network] RNS announce burst on serial (no LAN beacon)")
                     else:
                         await asyncio.to_thread(self.messaging._silent_announce)
+                        if (
+                            configured_serial_enabled(configured)
+                            and lan_discovery_configured(configured)
+                        ):
+                            burst = await asyncio.to_thread(
+                                self.messaging._burst_serial_announce, 4, 0.25,
+                            )
+                            if burst:
+                                print(
+                                    f"[network] RNS announce burst on serial "
+                                    f"({burst}×, LAN+serial mode)"
+                                )
                     if (
                         lan_discovery_configured(configured)
                         and lan_ip_reachable()
@@ -3115,7 +3149,7 @@ class ChatWebServer:
                             self.lan_beacon.send, 1, is_android()
                         )
                     elif configured_serial_enabled(configured) and lan_discovery_configured(configured):
-                        print("[network] RNS announce on serial + LAN paths")
+                        print("[network] LAN beacon + serial RNS announce (dual transport)")
                     elif not lan_discovery_configured(configured):
                         print("[network] No LAN transport configured — RNS announce on active paths only")
                     elif not lan_ip_reachable():

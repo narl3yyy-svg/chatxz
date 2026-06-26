@@ -108,7 +108,36 @@ class LanScopeTests(unittest.TestCase):
         self.assertNotIn(peer_hash, disc.peers)
         self.assertEqual(evicted, [[peer_hash]])
 
-    def test_scoped_peers_hide_ipless_entries(self):
+    def test_ipless_peer_allowed_when_serial_active(self):
+        from unittest.mock import patch
+
+        disc = PeerDiscovery()
+        with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
+            with patch("chatxz.core.discovery.PeerDiscovery._scope_ip", return_value="10.0.5.37"):
+                disc._store_peer({
+                    "hash": "s" * 32,
+                    "name": "SERIALPEER",
+                    "via": "rns",
+                    "last_seen": __import__("time").time(),
+                })
+        self.assertEqual(len(disc.peers), 1)
+
+    def test_serial_via_peer_bypasses_scope(self):
+        from unittest.mock import patch
+
+        disc = PeerDiscovery()
+        with patch("chatxz.core.discovery.PeerDiscovery._scope_ip", return_value="10.0.30.2"):
+            disc._store_peer({
+                "hash": "t" * 32,
+                "name": "REMOTE",
+                "via": "serial",
+                "last_seen": __import__("time").time(),
+            })
+        self.assertIn("t" * 32, disc.peers)
+
+    def test_scoped_peers_hide_ipless_entries_without_serial(self):
+        from unittest.mock import patch
+
         disc = PeerDiscovery()
         disc.accept_peers = True
         now = __import__("time").time()
@@ -125,7 +154,8 @@ class LanScopeTests(unittest.TestCase):
             "last_seen": now,
             "via": "beacon",
         }
-        scoped = disc.get_peers(scope_ip="10.0.5.37")
+        with patch("chatxz.core.discovery.serial_discovery_active", return_value=False):
+            scoped = disc.get_peers(scope_ip="10.0.5.37")
         names = {p.get("name") for p in scoped}
         self.assertIn("UBUNTU", names)
         self.assertNotIn("NOIP", names)

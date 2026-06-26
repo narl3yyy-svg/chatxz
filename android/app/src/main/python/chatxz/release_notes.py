@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.146": [
+        "Serial + LAN dual transport: tapping Announce now bursts RNS announces on USB serial even when UDP LAN is up — fixes Arch↔Ubuntu serial discovery across different pinned subnets.",
+        "LAN scope isolation no longer blocks serial peers (no IP / via serial) or links on SerialInterface — cross-subnet USB chat works while LAN stays scoped.",
+    ],
     "0.3.145": [
         "Pinned LAN scope is enforced end-to-end — peers on a different /24 (e.g. 10.0.5.x vs 10.10.10.x on the same NIC) are dropped from discovery, blocked on connect, and rejected for inbound links and messages.",
         "RNS announces now include the pinned IPv4 so peers update when you switch interfaces; stale cross-subnet entries are removed automatically.",
