@@ -2850,6 +2850,7 @@ class ChatWebServer:
             from chatxz.core.lan_rns import (
                 clear_paths_on_family,
                 prune_bridged_lan_paths,
+                prune_cross_zone_paths,
                 prune_stale_lan_paths,
                 suppress_offline_lan_transports,
             )
@@ -2867,6 +2868,16 @@ class ChatWebServer:
                 await self._run_blocking(clear_paths_on_family, "serial")
             await self._run_blocking(prune_stale_lan_paths)
             await self._run_blocking(prune_bridged_lan_paths)
+            serial_peers = []
+            if self.discovery:
+                for p in self.discovery.get_peers():
+                    if (p.get("via") or "").strip() == "serial":
+                        for key in ("hash", "identity_hash"):
+                            h = (p.get(key) or "").strip()
+                            if h:
+                                serial_peers.append(h)
+            if serial_peers:
+                await self._run_blocking(prune_cross_zone_paths, serial_peers)
             peer = self._peer_dest_hash(
                 self.messaging.active_peer_hash
                 or getattr(self.messaging, "_session_peer_hash", None)

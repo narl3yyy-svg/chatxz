@@ -663,6 +663,73 @@ body::before {
   font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--text3); margin: 14px 0 8px;
 }
+.net-hero {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 14px 16px; border-radius: var(--radius-md);
+  background: linear-gradient(135deg, rgba(124,106,239,0.12), rgba(88,196,220,0.08));
+  border: 1px solid rgba(124,106,239,0.22); margin-bottom: 16px;
+}
+.net-hero-icon {
+  width: 40px; height: 40px; border-radius: 12px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--primary-soft); font-size: 18px;
+}
+.net-hero-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.net-hero-desc { font-size: 11px; color: var(--text2); line-height: 1.45; }
+.net-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+@media (max-width: 520px) { .net-grid { grid-template-columns: 1fr; } }
+.net-panel {
+  padding: 14px; border-radius: var(--radius-md);
+  background: rgba(0,0,0,0.18); border: 1px solid var(--border);
+}
+.net-panel-label {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text3); margin-bottom: 10px;
+}
+.net-transport-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
+.net-transport-card {
+  padding: 12px; border-radius: var(--radius-sm); cursor: pointer;
+  border: 1px solid var(--border); background: rgba(0,0,0,0.12);
+  transition: border-color var(--transition), background var(--transition);
+}
+.net-transport-card:hover { border-color: var(--border-strong); background: var(--surface-hover); }
+.net-transport-card.active {
+  border-color: rgba(124,106,239,0.55); background: var(--primary-soft);
+}
+.net-transport-card strong { display: block; font-size: 12px; color: var(--text); margin-bottom: 3px; }
+.net-transport-card span { font-size: 10px; color: var(--text3); line-height: 1.35; }
+.net-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.net-chip {
+  font-size: 10px; padding: 4px 8px; border-radius: 999px;
+  background: rgba(255,255,255,0.05); color: var(--text2);
+  border: 1px solid var(--border);
+}
+.net-chip.up { color: var(--success); border-color: rgba(61,214,140,0.25); background: var(--success-soft); }
+.net-chip.down { color: var(--text3); }
+.net-serial-panel {
+  margin: 14px 0; padding: 14px; border-radius: var(--radius-md);
+  border: 1px solid rgba(88,196,220,0.25); background: rgba(88,196,220,0.06);
+}
+.net-serial-panel h5 {
+  font-size: 12px; font-weight: 600; color: var(--accent); margin: 0 0 6px;
+  display: flex; align-items: center; gap: 6px;
+}
+.net-advanced summary {
+  cursor: pointer; font-size: 12px; font-weight: 500; color: var(--text2);
+  padding: 10px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: rgba(0,0,0,0.1);
+  list-style: none; user-select: none;
+}
+.net-advanced summary::-webkit-details-marker { display: none; }
+.net-advanced[open] summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom-color: transparent; }
+.net-advanced-body {
+  padding: 12px; border: 1px solid var(--border); border-top: none;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: rgba(0,0,0,0.08);
+}
+.net-preset-bar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.net-preset-bar .btn-block { flex: 1; min-width: 72px; font-size: 11px; padding: 8px 6px; }
+.net-divider { height: 1px; background: var(--border); margin: 16px 0; }
 .settings-row-split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 @media (max-width: 520px) { .settings-row-split { grid-template-columns: 1fr; } }
 .iface-preset-hint {
@@ -1222,61 +1289,85 @@ body.sidebar-open #sidebar-backdrop { display: block; }
         </div>
         <div class="settings-card" id="network-settings-card">
           <h4>📡 Network</h4>
-          <p class="field-hint" style="margin-bottom:12px">Pick which IPv4 address to use for discovery, then how chat connects over that network.</p>
 
-          <div class="settings-subhead">1. Your IPv4 address</div>
-          <div class="settings-section">
-            <label>IPv4 address</label>
-            <div class="field-row">
-              <select id="settings-lan-interface" onchange="saveLanInterface()">
-                <option value="">Auto — prefer Wi-Fi / Ethernet over VPN</option>
-              </select>
-              <button type="button" id="lan-refresh-btn" class="btn-block" onclick="refreshLanInterfaces(true, this, true)" style="width:auto;white-space:nowrap;padding:0 12px;height:40px" title="Rescan IPv4 addresses">↻</button>
+          <div class="net-hero">
+            <div class="net-hero-icon">📡</div>
+            <div>
+              <div class="net-hero-title">How peers find you</div>
+              <div class="net-hero-desc">Pin your IPv4 subnet, pick LAN transport, and optionally add USB serial for off-LAN links. Dual transport keeps serial and LAN isolated.</div>
             </div>
-            <div id="lan-interface-summary" class="field-hint" style="margin-top:8px"></div>
-            <p class="field-hint">Each IPv4 on your PC is listed separately. Choose <strong>Auto</strong> on most PCs, or pin a specific address (including VPN/custom aliases).</p>
           </div>
 
-          <div class="settings-subhead">2. Chat transport</div>
-          <div class="settings-section">
-            <label>How peers connect on LAN</label>
-            <select id="settings-lan-transport" onchange="applyLanTransport()">
-              <option value="udp_lan">UDP LAN — default for Wi-Fi / Ethernet</option>
-              <option value="tcp_lan">TCP LAN — direct TCP links</option>
-            </select>
-            <p id="settings-lan-transport-hint" class="field-hint">Restart chatxz after changing transport.</p>
+          <div class="net-grid">
+            <div class="net-panel">
+              <div class="net-panel-label">LAN identity</div>
+              <label style="font-size:11px;color:var(--text2);margin-bottom:6px;display:block">IPv4 address</label>
+              <div class="field-row">
+                <select id="settings-lan-interface" onchange="saveLanInterface()">
+                  <option value="">Auto — prefer Wi-Fi / Ethernet</option>
+                </select>
+                <button type="button" id="lan-refresh-btn" class="btn-block" onclick="refreshLanInterfaces(true, this, true)" style="width:auto;white-space:nowrap;padding:0 12px;height:40px" title="Rescan IPv4 addresses">↻</button>
+              </div>
+              <div id="lan-interface-summary" class="net-chip-row"></div>
+              <p class="field-hint" style="margin-top:8px">Pin the subnet peers should use (e.g. 10.10.10.x). Auto picks the default route.</p>
+            </div>
+            <div class="net-panel">
+              <div class="net-panel-label">LAN transport</div>
+              <select id="settings-lan-transport" onchange="applyLanTransport(); syncTransportCards();" style="display:none">
+                <option value="udp_lan">UDP LAN</option>
+                <option value="tcp_lan">TCP LAN</option>
+              </select>
+              <div class="net-transport-cards" id="net-transport-cards">
+                <div class="net-transport-card" data-transport="udp_lan" onclick="pickLanTransport('udp_lan')">
+                  <strong>UDP LAN</strong>
+                  <span>Default — fast discovery on Wi-Fi / Ethernet</span>
+                </div>
+                <div class="net-transport-card" data-transport="tcp_lan" onclick="pickLanTransport('tcp_lan')">
+                  <strong>TCP LAN</strong>
+                  <span>Direct TCP links — useful for fixed hosts</span>
+                </div>
+              </div>
+              <p id="settings-lan-transport-hint" class="field-hint" style="margin-top:8px">Restart chatxz after changing transport.</p>
+            </div>
           </div>
-          <label class="setup-toggle" style="margin-bottom:10px">
+
+          <label class="setup-toggle" style="margin-bottom:12px">
             <input type="checkbox" id="settings-auto-announce" onchange="saveAutoAnnounce()">
-            <span><strong>Auto-announce</strong>Broadcast your presence on the LAN every ~30s. Off = manual 📡 Announce only.</span>
+            <span><strong>Auto-announce</strong>Broadcast on LAN every ~30s. Off = manual 📡 Announce from the Network panel.</span>
           </label>
 
-          <details id="network-advanced-details" style="margin:12px 0 8px">
-            <summary style="cursor:pointer;font-size:12px;color:var(--text2);user-select:none">Advanced transport presets (Serial, TCP Hub, extra interfaces)</summary>
-            <div style="margin-top:10px">
-              <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-                <button type="button" class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('udp_lan')">+ UDP LAN</button>
-                <button type="button" class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('tcp_lan')">+ TCP LAN</button>
-                <button type="button" class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('tcp_client')">+ TCP Client</button>
-                <button type="button" class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('tcp_server')">+ TCP Hub</button>
-                <button type="button" class="btn-block" style="flex:1;min-width:88px" onclick="addRnsInterface('serial')">+ Serial</button>
+          <div class="net-serial-panel" id="net-serial-panel" style="display:none">
+            <h5>🔌 USB Serial</h5>
+            <p class="field-hint" id="serial-setup-hint" style="margin:0">Plug in USB serial, pick device + baud (57600 default), Apply, then restart. File transfers use confirmed chunks (window=2) for reliability.</p>
+          </div>
+
+          <details id="network-advanced-details" class="net-advanced" style="margin:12px 0">
+            <summary>Advanced — interfaces, hub, serial ports</summary>
+            <div class="net-advanced-body">
+              <div class="net-preset-bar">
+                <button type="button" class="btn-block" onclick="addRnsInterface('udp_lan')">+ UDP</button>
+                <button type="button" class="btn-block" onclick="addRnsInterface('tcp_lan')">+ TCP</button>
+                <button type="button" class="btn-block" onclick="addRnsInterface('tcp_client')">+ Client</button>
+                <button type="button" class="btn-block" onclick="addRnsInterface('tcp_server')">+ Hub</button>
+                <button type="button" class="btn-block" onclick="addRnsInterface('serial')">+ Serial</button>
               </div>
               <div id="serial-devices-panel" class="serial-devices-panel" style="display:none"></div>
               <div id="rns-interfaces-list" style="font-size:11px;color:var(--text2)">Loading...</div>
               <label id="auto-interface-toggle" style="display:none;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin-top:10px">
                 <input type="checkbox" id="settings-auto-interface" onchange="saveAutoInterface()">
-                RNS AutoInterface (IPv6 LAN mesh — Linux/macOS when UDP LAN is active)
+                RNS AutoInterface (IPv6 mesh — Linux/macOS with UDP LAN)
               </label>
-              <div id="serial-permission-hint" style="display:none;margin-top:6px;font-size:10px;color:var(--warn,#e8a838);line-height:1.45"></div>
-              <div id="serial-setup-hint" style="margin-top:6px;font-size:10px;color:var(--text3)">Serial: plug in USB, pick device + baud (57600), click Apply. Restart after changes.</div>
+              <div id="serial-permission-hint" style="display:none;margin-top:8px;font-size:10px;color:var(--warning);line-height:1.45"></div>
             </div>
           </details>
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin-bottom:8px">
-            <input type="checkbox" id="settings-network-auto-reset" onchange="saveNetworkAutoReset()">
-            Auto-reset beacon counters weekly
-          </label>
-          <p class="field-hint" style="margin-top:8px">Live link status, beacon counters, and Announce are on the sidebar <strong>Network</strong> panel.</p>
 
+          <label class="setup-toggle" style="margin-bottom:8px">
+            <input type="checkbox" id="settings-network-auto-reset" onchange="saveNetworkAutoReset()">
+            <span><strong>Auto-reset</strong>Clear beacon counters weekly</span>
+          </label>
+          <p class="field-hint">Live status and 📡 Announce are in the sidebar <strong>Network</strong> panel.</p>
+
+          <div class="net-divider"></div>
           <div class="settings-subhead">Hub group chat (optional)</div>
           <div class="settings-section">
             <label>Hub mode</label>
@@ -1717,18 +1808,31 @@ function renderLanInterfaceSummary(interfaces) {
   if (!el) return;
   const items = (interfaces || []).filter(i => i?.name);
   if (!items.length) {
-    el.textContent = 'No network cards detected — click ↻ to rescan.';
+    el.innerHTML = '<span class="net-chip down">No interfaces — tap ↻</span>';
     return;
   }
-  const lines = items.slice(0, 8).map(iface => {
+  el.innerHTML = items.slice(0, 6).map(iface => {
     const ip = iface.ip && iface.ip !== 'disconnected' ? iface.ip : 'no IP';
-    const kind = iface.kind && iface.kind !== 'other' ? ` · ${iface.kind}` : '';
-    const gw = iface.gateway_iface ? ' · default route' : '';
-    const mark = iface.up ? 'up' : 'down';
-    return `${iface.name}: ${ip} (${mark}${kind}${gw})`;
+    const cls = iface.up && ip !== 'no IP' ? 'up' : 'down';
+    const gw = iface.gateway_iface ? ' ★' : '';
+    return `<span class="net-chip ${cls}" title="${escapeHtml(iface.name)}">${escapeHtml(iface.name)}: ${escapeHtml(ip)}${gw}</span>`;
+  }).join('') + (items.length > 6 ? `<span class="net-chip">+${items.length - 6}</span>` : '');
+}
+
+function syncTransportCards() {
+  const sel = document.getElementById('settings-lan-transport');
+  const val = sel?.value || 'udp_lan';
+  document.querySelectorAll('.net-transport-card').forEach(card => {
+    card.classList.toggle('active', card.dataset.transport === val);
   });
-  if (items.length > 8) lines.push(`+ ${items.length - 8} more`);
-  el.innerHTML = lines.map(l => `<div>${escapeHtml(l)}</div>`).join('');
+}
+
+function pickLanTransport(mode) {
+  const sel = document.getElementById('settings-lan-transport');
+  if (!sel) return;
+  sel.value = mode;
+  syncTransportCards();
+  applyLanTransport();
 }
 
 function applySettingsToForm(s, ifaces) {
@@ -3154,6 +3258,8 @@ function loadRnsInterfaces() {
     updatePlatformHints();
     const baudRates = portData.baud_rates || SERIAL_BAUD_RATES;
     const hasSerial = items.some(i => i.preset === 'serial' || i.type === 'SerialInterface');
+    const serialPanel = document.getElementById('net-serial-panel');
+    if (serialPanel) serialPanel.style.display = hasSerial ? 'block' : 'none';
     if (hasSerial) renderSerialDevicesPanel(window._serialPorts, portData);
     else {
       const panel = document.getElementById('serial-devices-panel');
@@ -3256,6 +3362,7 @@ function updateLanTransportSelect(interfaces) {
   if (!sel) return;
   sel.value = currentLanTransportPreset(interfaces);
   updateLanTransportHubHint();
+  syncTransportCards();
 }
 
 function applyLanTransport() {

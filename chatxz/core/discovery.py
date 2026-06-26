@@ -299,9 +299,12 @@ class PeerDiscovery:
                     self._remove_peer_entry(hash_hex)
                     return False
             elif peer.get("ip") and not existing.get("ip"):
-                if not scope or peer_in_scope(peer["ip"], scope):
-                    existing["ip"] = peer["ip"]
-                    existing["port"] = peer.get("port", 8742)
+                if (existing.get("via") or "").strip() != "serial":
+                    if not scope or peer_in_scope(peer["ip"], scope):
+                        existing["ip"] = peer["ip"]
+                        existing["port"] = peer.get("port", 8742)
+            if (existing.get("via") or "").strip() == "serial":
+                existing.pop("ip", None)
             if peer.get("identity_hash") and not existing.get("identity_hash"):
                 existing["identity_hash"] = peer["identity_hash"]
             if peer.get("pubkey") and not existing.get("pubkey"):
@@ -360,6 +363,8 @@ class PeerDiscovery:
                     return
             else:
                 return
+        if via == "serial":
+            announce_ip = ""
         peer = {
             "hash": hash_hex,
             "name": name or hash_hex[:8],

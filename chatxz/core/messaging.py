@@ -36,6 +36,12 @@ from chatxz.core.lan_rns import (
 )
 from chatxz.utils.platform import is_android, lan_ip, physical_lan_reachable
 from chatxz.core.lan_transfer import register_offer, remove_offer
+from chatxz.core.serial_transfer import (
+    is_serial_interface,
+    tune_incoming_resource,
+    tune_outgoing_resource,
+    tune_serial_link,
+)
 from chatxz.core.rns_interfaces import (
     configured_serial_enabled,
     configured_tcp_lan_enabled,
@@ -279,6 +285,17 @@ class MessagingBackend:
                 return {"udp", "lan", "tcp"}
             if not ip and self._serial_transport_ready():
                 return {"serial"}
+            if ip and not self._peer_lan_ip_usable(ip) and self._peer_has_path_on_family(peer, "serial"):
+                return {"serial"}
+        if self._serial_transport_ready() and self._lan_transport_ready():
+            if self._peer_has_path_on_family(peer, "serial"):
+                if not self._peer_has_path_on_family(peer, "udp") and not self._peer_has_path_on_family(peer, "tcp"):
+                    return {"serial"}
+                meta = meta or self._peer_discovery_meta(peer)
+                if meta and (meta.get("via") or "").strip() == "serial":
+                    return {"serial"}
+                if meta and not (meta.get("ip") or "").strip():
+                    return {"serial"}
         if self._peer_has_path_on_family(peer, "serial") and not self._peer_has_path_on_family(peer, "udp"):
             if not self._peer_has_path_on_family(peer, "tcp"):
                 return {"serial"}
@@ -1692,20 +1709,31 @@ class MessagingBackend:
         return self._link_for_peer(peer)
 
     def _best_transfer_link(self, peer_hash=None):
-        """Prefer TCP/LAN over UDP for bulk file transfers (higher throughput)."""
+        """Pick the best link for bulk transfer, respecting serial/LAN transport zones."""
         peer = self.dest_hash_for(
             peer_hash or self.active_peer_hash or self._session_peer_hash or ""
         )
         if not peer or peer == "unknown":
             return None
-        prefer = ("tcp", "lan", "udp", "serial")
+        expected = self._peer_expected_transport_families(peer)
+        if expected == {"serial"}:
+            prefer = ("serial",)
+        else:
+            prefer = ("tcp", "lan", "udp", "serial")
         best = None
         best_score = -1
         for link in self._links_for_peer(peer):
             if not self._link_interface_healthy(link):
                 continue
+            if not self._link_acceptable_for_peer(link, peer):
+                continue
             iface = self._link_attached_interface(link)
             fam = interface_family(iface)
+            if expected:
+                if fam == "serial" and "serial" not in expected:
+                    continue
+                if fam in ("udp", "lan", "tcp") and not (expected & {"udp", "lan", "tcp"}):
+                    continue
             fam_rank = len(prefer) - prefer.index(fam) if fam in prefer else 0
             score = self._link_path_score(link) + fam_rank * 5
             if score > best_score:
@@ -2987,6 +3015,13 @@ class MessagingBackend:
     def _optimise_link_mtu(self, link):
         try:
             iface = self._link_attached_interface(link)
+            if is_serial_interface(iface):
+                tune_serial_link(link, iface)
+                print(
+                    f"[messaging] Serial link tuned for file transfer "
+                    f"(MTU {getattr(link, 'mtu', '?')}, window=2)"
+                )
+                return
             hw_mtu = getattr(iface, "HW_MTU", None) if iface else None
             current = int(getattr(link, "mtu", 500) or 500)
             if hw_mtu and current < hw_mtu:
@@ -3011,6 +3046,13 @@ class MessagingBackend:
                 pass
         return None, self.http_port
 
+    def _resource_started_callback(self, link):
+        def callback(resource):
+            tune_incoming_resource(
+                resource, self._link_attached_interface(link),
+            )
+        return callback
+
     def _setup_link(self, link):
         self.links[link.link_id] = link
         self._optimise_link_mtu(link)
@@ -3020,6 +3062,8 @@ class MessagingBackend:
             link.set_resource_strategy(RNS.Link.ACCEPT_APP)
             link.set_resource_callback(self._resource_accept_callback(link))
             link.set_resource_concluded_callback(self._resource_concluded(link))
+            if hasattr(link, "set_resource_started_callback"):
+                link.set_resource_started_callback(self._resource_started_callback(link))
             print(f"[messaging] Resource strategy ACCEPT_APP for link {link.link_id.hex()[:12]}")
         except Exception as e:
             print(f"[messaging] Failed to set resource strategy: {e}")
@@ -3067,6 +3111,30 @@ class MessagingBackend:
             )
             return
 
+        incoming_fam = interface_family(self._link_attached_interface(link))
+        expected = self._peer_expected_transport_families(peer_hash)
+        if expected:
+            if incoming_fam == "serial" and "serial" not in expected:
+                try:
+                    link.teardown()
+                except Exception:
+                    pass
+                print(
+                    f"[messaging] Rejected serial inbound from {peer_hash[:16]}... "
+                    "(LAN peer)"
+                )
+                return
+            if incoming_fam in ("udp", "lan", "tcp") and not (expected & {"udp", "lan", "tcp"}):
+                try:
+                    link.teardown()
+                except Exception:
+                    pass
+                print(
+                    f"[messaging] Rejected LAN inbound from {peer_hash[:16]}... "
+                    "(serial peer)"
+                )
+                return
+
         if self.active_link and self.active_peer_hash and not is_hub_peer_hash(self.active_peer_hash):
             same_peer = (
                 self.hashes_equivalent(peer_hash, self.active_peer_hash)
@@ -3095,8 +3163,13 @@ class MessagingBackend:
                 old_healthy = self._link_interface_healthy(self.active_link)
                 incoming_fam = interface_family(self._link_attached_interface(link))
                 old_fam = interface_family(self._link_attached_interface(self.active_link))
+                peer_expected = self._peer_expected_transport_families(peer_hash)
                 prefer_serial = (
                     incoming_fam == "serial"
+                    and peer_expected == {"serial"}
+                ) or (
+                    incoming_fam == "serial"
+                    and not peer_expected
                     and (
                         self._failover_in_progress
                         or not physical_lan_reachable()
@@ -4403,19 +4476,32 @@ class MessagingBackend:
                 xfer_iface = self._link_attached_interface(xfer_link)
                 xfer_fam = interface_family(xfer_iface)
                 fast_path = xfer_fam in ("tcp", "lan", "udp")
+                serial_path = is_serial_interface(xfer_iface)
                 compress = (
-                    msg_type not in (MESSAGE_TYPE_IMAGE, MESSAGE_TYPE_VIDEO)
+                    not serial_path
+                    and msg_type not in (MESSAGE_TYPE_IMAGE, MESSAGE_TYPE_VIDEO)
                     and fsize > 65536
                     and ext not in _NO_COMPRESS_SUFFIXES
                     and not fast_path
                 )
-                resource = RNS.Resource(f, link,
-                             callback=self._resource_send_callback(fname, transfer_id, fsize),
-                             progress_callback=wrapped_progress,
-                             auto_compress=compress)
+                timeout_s = None
+                if serial_path:
+                    from chatxz.core.serial_transfer import serial_transfer_timeout_s, serial_baud_from_interface
+                    timeout_s = serial_transfer_timeout_s(
+                        fsize, serial_baud_from_interface(xfer_iface),
+                    )
+                resource = RNS.Resource(
+                    f, link,
+                    callback=self._resource_send_callback(fname, transfer_id, fsize),
+                    progress_callback=wrapped_progress,
+                    auto_compress=compress,
+                    timeout=timeout_s,
+                )
+                tune_outgoing_resource(resource, xfer_iface)
                 resource_holder["resource"] = resource
                 self._active_resources[transfer_id] = resource
-                print(f"[messaging] Sent file: {fname} ({fsize} bytes) via {xfer_fam or 'unknown'}")
+                mode = "serial (window=2)" if serial_path else (xfer_fam or "unknown")
+                print(f"[messaging] Sent file: {fname} ({fsize} bytes) via {mode}")
                 self._sent_messages[chat_msg.msg_id] = chat_msg
                 return chat_msg
             except Exception as e:
