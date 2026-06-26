@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.148": [
+        "Fixed Ubuntu/Linux serial startup crash when USB was already in the RNS config — chatxz no longer hot-adds a duplicate SerialInterface on /dev/ttyUSB0 during boot.",
+        "Serial dedupe now keeps the healthiest interface and stops reconnect loops without nulling the port handle (avoids RNS readLoop NoneType errors).",
+    ],
     "0.3.147": [
         "Serial RNS announces no longer embed a LAN IPv4 — cross-subnet USB peers (Arch 10.0.30.x ↔ Ubuntu 10.0.5.x) stay in Discovered and connect over SerialInterface.",
         "Out-of-scope LAN IPs are stripped (not stored) when serial is active; misleading RNS discovery logs for rejected peers are suppressed.",

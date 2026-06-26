@@ -2,6 +2,7 @@
 
 import os
 import sys
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -9,6 +10,62 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from chatxz.core import rns_interfaces as ri
 from chatxz.core.messaging import MessagingBackend
+
+
+class _FakeSerial:
+    def __init__(self, open_=True):
+        self.is_open = open_
+
+
+class _FakeSerialIface:
+    def __init__(self, port, online=False, ready=False):
+        self.port = port
+        self.online = online
+        if ready:
+            self.mode = 1
+            self.serial = _FakeSerial(True)
+        else:
+            self.serial = None
+
+
+class SerialRuntimeEnsureTests(unittest.TestCase):
+    def test_ensure_runtime_serial_waits_for_existing_interface(self):
+        iface = _FakeSerialIface("/dev/ttyUSB0", online=False)
+        with patch.object(ri, "configured_serial_port", return_value=("/dev/ttyUSB0", 57600)):
+            with patch.object(ri, "serial_port_accessible", return_value=True):
+                with patch.object(ri, "find_serial_interface", return_value=iface):
+                    with patch.object(ri, "serial_interface_is_ready", side_effect=[False, True]):
+                        with patch.object(ri, "hot_add_serial_interface") as hot_add:
+                            with patch.object(ri, "time") as mock_time:
+                                mock_time.sleep = lambda _: None
+                                mock_time.time = time.time
+                                result = ri.ensure_runtime_serial([])
+        hot_add.assert_not_called()
+        self.assertIs(result, iface)
+
+    def test_ensure_runtime_serial_returns_initializing_interface_without_hot_add(self):
+        iface = _FakeSerialIface("/dev/ttyUSB0", online=False)
+        with patch.object(ri, "configured_serial_port", return_value=("/dev/ttyUSB0", 57600)):
+            with patch.object(ri, "serial_port_accessible", return_value=True):
+                with patch.object(ri, "find_serial_interface", return_value=iface):
+                    with patch.object(ri, "serial_interface_is_ready", return_value=False):
+                        with patch.object(ri, "hot_add_serial_interface") as hot_add:
+                            with patch.object(ri, "time") as mock_time:
+                                mock_time.sleep = lambda _: None
+                                mock_time.time = time.time
+                                result = ri.ensure_runtime_serial([])
+        hot_add.assert_not_called()
+        self.assertIs(result, iface)
+
+    def test_hot_add_serial_skips_when_interface_already_present(self):
+        iface = _FakeSerialIface("/dev/ttyUSB0", online=True, ready=True)
+        with patch.object(ri, "serial_port_accessible", return_value=True):
+            with patch.object(ri, "dedupe_serial_interfaces"):
+                with patch.object(ri, "find_serial_interface", return_value=iface):
+                    with patch("RNS.Interfaces.SerialInterface.SerialInterface") as ctor:
+                        result = ri.hot_add_serial_interface("/dev/ttyUSB0")
+        ctor.assert_not_called()
+        self.assertIs(result, iface)
 
 
 class SerialConfigTests(unittest.TestCase):

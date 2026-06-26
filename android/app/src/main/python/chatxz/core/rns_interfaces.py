@@ -694,6 +694,54 @@ def configured_serial_port(settings_interfaces=None):
     return "", SERIAL_DEFAULT_BAUD
 
 
+def find_serial_interface(port):
+    """Return the first RNS SerialInterface bound to port, if any."""
+    port = (port or "").strip()
+    if not port:
+        return None
+    try:
+        import RNS
+        for iface in getattr(RNS.Transport, "interfaces", []) or []:
+            if type(iface).__name__ != "SerialInterface":
+                continue
+            if getattr(iface, "port", None) == port:
+                return iface
+    except Exception:
+        pass
+    return None
+
+
+def serial_interface_is_ready(iface):
+    """True when a SerialInterface has finished opening and is usable."""
+    if not iface or not hasattr(iface, "mode"):
+        return False
+    if not getattr(iface, "online", False):
+        return False
+    serial = getattr(iface, "serial", None)
+    if serial is None:
+        return False
+    try:
+        return bool(serial.is_open)
+    except Exception:
+        return False
+
+
+def _serial_interface_score(iface):
+    score = 0
+    if hasattr(iface, "mode"):
+        score += 1
+    if getattr(iface, "online", False):
+        score += 2
+    serial = getattr(iface, "serial", None)
+    if serial is not None:
+        try:
+            if serial.is_open:
+                score += 4
+        except Exception:
+            pass
+    return score
+
+
 def _stop_serial_reconnect(iface):
     iface.online = False
     try:
@@ -703,11 +751,8 @@ def _stop_serial_reconnect(iface):
     serial = getattr(iface, "serial", None)
     if serial is not None:
         try:
-            serial.close()
-        except Exception:
-            pass
-        try:
-            iface.serial = None
+            if getattr(serial, "is_open", False):
+                serial.close()
         except Exception:
             pass
 
@@ -773,12 +818,11 @@ def dedupe_serial_interfaces(port=None):
         if prev is None:
             keepers[p] = iface
             continue
-        drop = iface
-        if getattr(prev, "online", False) and not getattr(iface, "online", False):
-            drop = iface
-        elif getattr(iface, "online", False) and not getattr(prev, "online", False):
+        if _serial_interface_score(iface) > _serial_interface_score(prev):
             keepers[p] = iface
             drop = prev
+        else:
+            drop = iface
         _stop_serial_reconnect(drop)
         try:
             RNS.Transport.remove_interface(drop)
@@ -874,15 +918,9 @@ def hot_add_serial_interface(port, speed=SERIAL_DEFAULT_BAUD, ifac_size=16):
         return None
 
     dedupe_serial_interfaces(port)
-    for iface in getattr(RNS.Transport, "interfaces", []) or []:
-        if type(iface).__name__ != "SerialInterface":
-            continue
-        if getattr(iface, "port", None) != port:
-            continue
-        if getattr(iface, "online", False) and hasattr(iface, "mode"):
-            return iface
-        remove_serial_interfaces(port)
-        break
+    existing = find_serial_interface(port)
+    if existing:
+        return existing
 
     name = f"Serial {port}"
     try:
@@ -1183,36 +1221,26 @@ def ensure_runtime_serial(settings_interfaces=None):
     port, speed = configured_serial_port(settings_interfaces)
     if not port:
         return None
-    existing = None
-    try:
-        import RNS
-        for iface in getattr(RNS.Transport, "interfaces", []) or []:
-            if type(iface).__name__ == "SerialInterface" and getattr(iface, "port", None) == port:
-                existing = iface
-                break
-    except Exception:
-        existing = None
-    if existing:
-        if getattr(existing, "online", False) and hasattr(existing, "mode"):
-            return existing
-        if not serial_port_accessible(port):
-            remove_serial_interfaces(port)
-            return None
+    if not serial_port_accessible(port):
         remove_serial_interfaces(port)
+        return None
+    existing = find_serial_interface(port)
+    if existing:
+        if serial_interface_is_ready(existing):
+            return existing
+        for _ in range(20):
+            time.sleep(0.1)
+            existing = find_serial_interface(port)
+            if existing and serial_interface_is_ready(existing):
+                return existing
+        if find_serial_interface(port):
+            return find_serial_interface(port)
     if serial_port_accessible(port):
         added = hot_add_serial_interface(port, speed=speed)
         if added:
             return added
         print(f"[serial] Hot-add skipped for {port} — interface already loaded or port busy")
-        try:
-            import RNS
-            for iface in getattr(RNS.Transport, "interfaces", []) or []:
-                if type(iface).__name__ == "SerialInterface" and getattr(iface, "port", None) == port:
-                    if getattr(iface, "online", False):
-                        return iface
-        except Exception:
-            pass
-        return None
+        return find_serial_interface(port)
     global _last_serial_unavail_log
     now = time.time()
     if now - _last_serial_unavail_log >= 30.0:
