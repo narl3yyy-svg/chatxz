@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.142": [
+        "Linux Settings → Network lists every IPv4 on a NIC — secondary addresses from ip addr add (e.g. 10.0.5.37 and 10.10.10.37 on enp2s0) now appear in the picker.",
+        "Pin a specific address with NIC|IP (e.g. enp2s0|10.0.5.37) to scope discovery and beacons to that subnet.",
+    ],
     "0.3.141": [
         "Settings → Network shows a clear warning when TCP LAN is unavailable or limited because hub mode is on.",
         "Hub server blocks switching to TCP LAN (port 4242 is reserved for group relay); hub client explains TCP LAN is for local P2P only.",

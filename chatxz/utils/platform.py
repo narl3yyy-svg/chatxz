@@ -335,7 +335,7 @@ def _java_lan_addresses():
 
 
 def _linux_iface_ipv4(ifname):
-    """IPv4 address assigned to a Linux network interface, or None."""
+    """Primary IPv4 on a Linux interface (SIOCGIFADDR), or None."""
     import fcntl
     import socket
     import struct
@@ -351,6 +351,55 @@ def _linux_iface_ipv4(ifname):
     except OSError:
         pass
     return None
+
+
+def _linux_ipv4_addr_map():
+    """Map interface name -> IPv4 list (excl. loopback/link-local), via iproute2."""
+    try:
+        proc = subprocess.run(
+            ["ip", "-j", "-4", "addr", "show"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        raw = (proc.stdout or "").strip()
+        if proc.returncode != 0 or not raw:
+            return {}
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            data = [data]
+    except Exception:
+        return {}
+
+    result = {}
+    for row in data or []:
+        name = str(row.get("ifname") or "").strip()
+        if not name:
+            continue
+        for addr in row.get("addr_info") or []:
+            if str(addr.get("family") or "") != "inet":
+                continue
+            ip = str(addr.get("local") or "").strip()
+            if not ip or ip.startswith(("127.", "169.254.")):
+                continue
+            bucket = result.setdefault(name, [])
+            if ip not in bucket:
+                bucket.append(ip)
+    return result
+
+
+def _linux_iface_ipv4_addrs(ifname, addr_map=None):
+    """All IPv4 addresses on an interface; primary (SIOCGIFADDR) listed first."""
+    if addr_map is None:
+        addr_map = _linux_ipv4_addr_map()
+    addrs = list(addr_map.get(ifname) or [])
+    primary = _linux_iface_ipv4(ifname)
+    if primary:
+        if primary in addrs:
+            addrs.remove(primary)
+        addrs.insert(0, primary)
+    return addrs
 
 
 def _linux_iface_operstate(ifname):
@@ -405,12 +454,12 @@ def _linux_iface_broadcast(ip):
     return f"{parts[0]}.{parts[1]}.{parts[2]}.255"
 
 
-def _linux_iface_usable(ifname):
+def _linux_iface_usable(ifname, addr_map=None):
     """True when an interface can carry LAN/RNS traffic."""
     if not ifname or ifname == "lo" or _linux_skip_iface(ifname):
         return False
-    ip = _linux_iface_ipv4(ifname)
-    if ip and not ip.startswith("169.254."):
+    addrs = _linux_iface_ipv4_addrs(ifname, addr_map=addr_map)
+    if addrs and not addrs[0].startswith("169.254."):
         if _linux_is_tunnel_iface(ifname):
             return True
         return _linux_iface_link_up(ifname)
@@ -430,10 +479,11 @@ def _linux_iface_kind(ifname):
     return "other"
 
 
-def _linux_iface_entry(ifname):
+def _linux_iface_entry(ifname, ip=None, addr_map=None):
     tunnel = _linux_is_tunnel_iface(ifname)
-    ip = _linux_iface_ipv4(ifname)
-    usable = _linux_iface_usable(ifname)
+    if ip is None:
+        ip = _linux_iface_ipv4(ifname)
+    usable = _linux_iface_usable(ifname, addr_map=addr_map)
     subnet = _linux_iface_broadcast(ip) if usable and ip and not tunnel else None
     return {
         "name": ifname,
@@ -445,15 +495,17 @@ def _linux_iface_entry(ifname):
     }
 
 
-def _linux_lan_ip_from_name(ifname):
+def _linux_lan_ip_from_name(ifname, ip_hint=None, addr_map=None):
     if not ifname or ifname == "lo" or _linux_skip_iface(ifname):
         return None
-    if not _linux_iface_usable(ifname):
+    if not _linux_iface_usable(ifname, addr_map=addr_map):
         return None
-    ip = _linux_iface_ipv4(ifname)
-    if ip and not ip.startswith("169.254."):
-        return ip
-    return None
+    for ip in _linux_iface_ipv4_addrs(ifname, addr_map=addr_map):
+        if ip_hint and ip != ip_hint:
+            continue
+        if ip and not ip.startswith("169.254."):
+            return ip
+    return ip_hint or None
 
 
 def _linux_iface_auto_priority(ifname, ip):
@@ -478,17 +530,20 @@ def _linux_lan_ip():
 
     best_ip = None
     best_score = -1
+    addr_map = _linux_ipv4_addr_map()
     try:
         for ifname in sorted(os.listdir("/sys/class/net")):
             if ifname == "lo" or _linux_skip_iface(ifname):
                 continue
-            ip = _linux_lan_ip_from_name(ifname)
-            if not ip:
+            if not _linux_iface_usable(ifname, addr_map=addr_map):
                 continue
-            score = _linux_iface_auto_priority(ifname, ip)
-            if score > best_score:
-                best_score = score
-                best_ip = ip
+            for ip in _linux_iface_ipv4_addrs(ifname, addr_map=addr_map):
+                if not ip or ip.startswith("169.254."):
+                    continue
+                score = _linux_iface_auto_priority(ifname, ip)
+                if score > best_score:
+                    best_score = score
+                    best_ip = ip
     except OSError:
         pass
     return best_ip
@@ -496,11 +551,17 @@ def _linux_lan_ip():
 
 def _linux_enumerate_interfaces():
     entries = []
+    addr_map = _linux_ipv4_addr_map()
     try:
         for ifname in sorted(os.listdir("/sys/class/net")):
             if ifname == "lo" or _linux_skip_iface(ifname):
                 continue
-            entries.append(_linux_iface_entry(ifname))
+            ips = _linux_iface_ipv4_addrs(ifname, addr_map=addr_map)
+            if not ips:
+                entries.append(_linux_iface_entry(ifname, addr_map=addr_map))
+            else:
+                for ip in ips:
+                    entries.append(_linux_iface_entry(ifname, ip=ip, addr_map=addr_map))
     except OSError:
         pass
     return entries

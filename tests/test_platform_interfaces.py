@@ -35,14 +35,16 @@ class LinuxInterfaceHelpers(unittest.TestCase):
         with patch.object(plat, "is_android", return_value=False):
             with patch("os.listdir", return_value=["lo", "enp2s0", "wg0", "veth0"]):
                 with patch.object(plat, "_linux_iface_entry") as mock_entry:
-                    mock_entry.side_effect = lambda n: {
-                        "name": n,
-                        "kind": "vpn" if n == "wg0" else "ethernet",
-                        "ip": "10.0.0.1" if n != "lo" else "disconnected",
-                        "broadcast": None,
-                        "subnet_broadcast": None,
-                        "up": n != "lo",
-                    }
+                    def fake_entry(n, ip=None, addr_map=None):
+                        return {
+                            "name": n,
+                            "kind": "vpn" if n == "wg0" else "ethernet",
+                            "ip": ip or ("10.0.0.1" if n != "lo" else "disconnected"),
+                            "broadcast": None,
+                            "subnet_broadcast": None,
+                            "up": n != "lo",
+                        }
+                    mock_entry.side_effect = fake_entry
                     names = [e["name"] for e in plat.enumerate_lan_interfaces()]
         self.assertIn("enp2s0", names)
         self.assertIn("wg0", names)
@@ -61,6 +63,38 @@ class LinuxInterfaceHelpers(unittest.TestCase):
         finally:
             plat.set_lan_interface_preference(None)
 
+
+    def test_enumerate_lists_all_ipv4_on_same_nic(self):
+        addr_map = {
+            "enp2s0": ["10.0.30.112", "10.10.10.37", "10.0.5.37"],
+        }
+        with patch.object(plat, "is_android", return_value=False):
+            with patch.object(plat, "_linux_ipv4_addr_map", return_value=addr_map):
+                with patch("os.listdir", return_value=["lo", "enp2s0", "veth0"]):
+                    with patch.object(plat, "_linux_skip_iface", side_effect=lambda n: n == "veth0"):
+                        with patch.object(plat, "_linux_iface_usable", return_value=True):
+                            entries = [
+                                e for e in plat._linux_enumerate_interfaces()
+                                if e.get("name") == "enp2s0"
+                            ]
+        ips = sorted(e["ip"] for e in entries)
+        self.assertEqual(ips, ["10.0.30.112", "10.0.5.37", "10.10.10.37"])
+
+    def test_pinned_secondary_ipv4_resolution(self):
+        plat.set_lan_interface_preference("enp2s0|10.0.5.37")
+        try:
+            addr_map = {"enp2s0": ["10.0.30.112", "10.0.5.37", "10.10.10.37"]}
+            entries = [
+                plat._linux_iface_entry("enp2s0", ip=ip, addr_map=addr_map)
+                for ip in addr_map["enp2s0"]
+            ]
+            with patch.object(plat, "_linux_enumerate_interfaces", return_value=entries):
+                self.assertEqual(plat.lan_ip(), "10.0.5.37")
+                filtered = plat._filter_interfaces_for_lan(entries)
+                self.assertEqual(len(filtered), 1)
+                self.assertEqual(filtered[0]["ip"], "10.0.5.37")
+        finally:
+            plat.set_lan_interface_preference(None)
 
     def test_physical_lan_skips_vpn(self):
         with patch.object(plat, "is_android", return_value=False):
