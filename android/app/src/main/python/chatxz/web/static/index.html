@@ -299,7 +299,7 @@ body::before {
 .field-row { display: flex; gap: 8px; }
 .field-row input { flex: 1; }
 
-#settings-screen input, #settings-screen select,
+#settings-screen input:not([type="checkbox"]), #settings-screen select,
 #connect-panel input, .dialog input, .dialog select {
   width: 100%; background: rgba(0,0,0,0.25);
   border: 1px solid var(--border); border-radius: var(--radius-md);
@@ -307,7 +307,11 @@ body::before {
   margin-bottom: 0; outline: none; font-family: inherit;
   transition: all var(--transition);
 }
-#settings-screen input:focus, #settings-screen select:focus,
+#settings-screen input[type="checkbox"] {
+  width: 18px; height: 18px; padding: 0; margin: 0; flex-shrink: 0;
+  accent-color: var(--primary); cursor: pointer;
+}
+#settings-screen input:not([type="checkbox"]):focus, #settings-screen select:focus,
 #connect-panel input:focus, .dialog input:focus {
   border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft);
 }
@@ -660,18 +664,18 @@ body::before {
 .setup-toggle input { margin-top: 2px; }
 .setup-toggle strong { display: block; color: var(--text); margin-bottom: 2px; }
 .settings-toggle-card {
-  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 16px;
   padding: 14px 16px; border-radius: var(--radius-md);
   border: 1px solid var(--border); background: rgba(0,0,0,0.12);
   margin-bottom: 10px; cursor: pointer; user-select: none;
   transition: border-color var(--transition), background var(--transition);
 }
 .settings-toggle-card:hover { border-color: var(--border-strong); background: rgba(255,255,255,0.04); }
-.settings-toggle-card input[type="checkbox"] {
-  width: 18px; height: 18px; flex-shrink: 0; margin: 0; cursor: pointer;
-  accent-color: var(--primary);
+.settings-toggle-card .toggle-text { min-width: 0; }
+.settings-toggle-card .toggle-switch {
+  display: flex; align-items: center; justify-content: center;
+  width: 36px; flex-shrink: 0;
 }
-.settings-toggle-card .toggle-text { flex: 1; min-width: 0; }
 .settings-toggle-card .toggle-text strong {
   display: block; font-size: 13px; color: var(--text); margin-bottom: 3px;
 }
@@ -1572,7 +1576,9 @@ body.sidebar-open #sidebar-backdrop { display: block; }
               <strong>Auto-announce</strong>
               <span>Broadcast on LAN every ~30s. Turn off to announce manually with the sidebar 📡 button.</span>
             </div>
-            <input type="checkbox" id="settings-auto-announce" onchange="saveAutoAnnounce()">
+            <div class="toggle-switch">
+              <input type="checkbox" id="settings-auto-announce" onchange="saveAutoAnnounce()">
+            </div>
           </label>
         </div>
 
@@ -1599,7 +1605,9 @@ body.sidebar-open #sidebar-backdrop { display: block; }
               <strong>RNS AutoInterface</strong>
               <span>IPv6 mesh discovery on Linux/macOS when UDP LAN is active.</span>
             </div>
-            <input type="checkbox" id="settings-auto-interface" onchange="saveAutoInterface()">
+            <div class="toggle-switch">
+              <input type="checkbox" id="settings-auto-interface" onchange="saveAutoInterface()">
+            </div>
           </label>
         </div>
 
@@ -1641,7 +1649,9 @@ body.sidebar-open #sidebar-backdrop { display: block; }
               <strong>Auto-reset</strong>
               <span>Clear beacon counters weekly so discovery stats stay readable.</span>
             </div>
-            <input type="checkbox" id="settings-network-auto-reset" onchange="saveNetworkAutoReset()">
+            <div class="toggle-switch">
+              <input type="checkbox" id="settings-network-auto-reset" onchange="saveNetworkAutoReset()">
+            </div>
           </label>
         </div>
       </section>

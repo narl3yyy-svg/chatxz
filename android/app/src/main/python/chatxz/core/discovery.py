@@ -290,6 +290,11 @@ class PeerDiscovery:
             self._remove_peer_entry(hash_hex)
             return False
         peer = sanitized
+        if serial_discovery_active():
+            from chatxz.core.lan_rns import peer_path_on_family
+            if peer_path_on_family(hash_hex, "serial"):
+                peer["via"] = "serial"
+                peer.pop("ip", None)
         removed, peer = self._evict_superseded_peers(peer)
         if removed:
             self._notify_peer_evicted(removed, peer)

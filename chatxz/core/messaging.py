@@ -317,6 +317,8 @@ class MessagingBackend:
             return False
         peer = self.dest_hash_for(peer_hash)
         if not peer or peer == "unknown":
+            if is_serial_interface(self._link_attached_interface(link)):
+                return True
             return False
         expected = self._peer_expected_transport_families(peer)
         if not expected:
@@ -372,9 +374,13 @@ class MessagingBackend:
         return closed
 
     def _peer_allowed_by_scope(self, peer_hash, link=None):
+        if not peer_hash or peer_hash == "unknown":
+            if link and is_serial_interface(self._link_attached_interface(link)):
+                return True
+            return not self.peer_scope_checker
         if link and not self._link_acceptable_for_peer(link, peer_hash):
             return False
-        if not self.peer_scope_checker or not peer_hash or peer_hash == "unknown":
+        if not self.peer_scope_checker:
             return True
         if is_hub_peer_hash(peer_hash):
             return True
@@ -996,15 +1002,22 @@ class MessagingBackend:
         return configured_serial_enabled(interfaces) and lan_discovery_configured(interfaces)
 
     def _session_reconnect_min_idle(self):
+        peer = self.dest_hash_for(self._session_peer_hash or self.active_peer_hash or "")
+        if peer and self._peer_expected_transport_families(peer) == {"serial"}:
+            return SESSION_RECONNECT_MIN_IDLE_S
         if self._dual_path_configured():
             return DUAL_PATH_RECONNECT_MIN_IDLE_S
         return SESSION_RECONNECT_MIN_IDLE_S
 
     def _failover_cooldown(self):
+        peer = self.dest_hash_for(self._session_peer_hash or self.active_peer_hash or "")
+        serial_only = bool(peer and self._peer_expected_transport_families(peer) == {"serial"})
         disconnected = (
             not self.active_link
             and bool(self.dest_hash_for(self._session_peer_hash or ""))
         )
+        if serial_only:
+            return self._failover_cooldown_s
         if self._dual_path_configured():
             if disconnected:
                 return DUAL_PATH_DISCONNECTED_COOLDOWN_S
@@ -1447,6 +1460,16 @@ class MessagingBackend:
                 needs, reason = self.link_needs_failover()
                 if needs:
                     return needs, reason
+            return False, ""
+        healthy_links = [
+            link for link in self._links_for_peer(peer)
+            if self._link_interface_healthy(link)
+        ]
+        if healthy_links:
+            self._adopt_healthy_peer_link(peer)
+            return False, ""
+        in_grace = (time.time() - self._last_link_established_at) < LINK_FAILOVER_GRACE_S
+        if in_grace and self._links_for_peer(peer):
             return False, ""
         if self._failover_in_progress:
             return False, ""
@@ -3666,12 +3689,22 @@ class MessagingBackend:
         now = time.time()
         if self._failover_in_progress:
             return False
-        if now - self._failover_last_attempt < self._failover_cooldown():
-            return False
         peer = self.dest_hash_for(self._session_peer_hash or self.active_peer_hash or "")
         if not peer or peer == "unknown":
             return False
         if self.is_user_disconnected(peer):
+            return False
+        if self._has_active_transfer():
+            if self._peer_link_active(peer):
+                return True
+            return False
+        if self._peer_link_active(peer):
+            link = self._link_for_peer(peer) or self.active_link
+            if link and self._link_interface_healthy(link):
+                if not self.active_link or getattr(self.active_link, "link_id", None) != getattr(link, "link_id", None):
+                    self._adopt_healthy_peer_link(peer)
+                return True
+        if now - self._failover_last_attempt < self._failover_cooldown():
             return False
         if not self.active_peer_hash:
             self.active_peer_hash = peer

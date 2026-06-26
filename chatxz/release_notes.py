@@ -3,6 +3,12 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.155": [
+        "Settings toggle cards fixed — checkboxes no longer stretch full width; text and switch lay out cleanly.",
+        "Serial link stability: accept inbound serial links before peer hash resolves; stop failover from tearing down healthy serial sessions.",
+        "Serial-only peers use longer reconnect cooldown (no 4s reconnect loop); large file transfers block failover while active.",
+        "Serial discovery peers stay on serial transport — bridged LAN announces no longer overwrite them.",
+    ],
     "0.3.154": [
         "Network status, Refresh, Announce, and Reset moved into Settings → Network — sidebar Network button removed.",
         "Serial file transfers: no failover during active transfers; link close no longer hijacks to a different peer; longer serial timeouts.",
