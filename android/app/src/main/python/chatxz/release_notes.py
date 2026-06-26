@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.153": [
+        "Settings opens as a full-page view with left navigation (Profile, Storage, Network, System) instead of a cramped sidebar overlay.",
+        "Network settings reorganized: LAN discovery, transport cards, USB serial, and hub each have their own section — no duplicate Advanced UDP/TCP buttons.",
+        "IPv4 interface list is now a clean table instead of cramped chips.",
+    ],
     "0.3.150": [
         "Critical cross-talk fix: queued messages to a serial peer (Ubuntu) can no longer leak out over an active LAN link (Windows).",
         "RNS path requests no longer bridge between SerialInterface and UDP/LAN when both are up — stops Windows appearing on Ubuntu's serial discovery list.",
