@@ -800,17 +800,41 @@ class ChatWebServer:
     def _brand_logo_path(self):
         return os.path.join(self.config_dir, "brand_logo.png")
 
-    def _probe_interval_s(self):
+    def _probe_interval_s(self, transport="lan", settings=None):
         from chatxz.core.peer_probe import PROBE_INTERVAL_S, clamp_probe_interval
-        settings = self.load_settings()
-        return clamp_probe_interval(settings.get("probe_interval_s", PROBE_INTERVAL_S))
+        settings = settings or self.load_settings()
+        if transport == "serial":
+            return clamp_probe_interval(settings.get("serial_probe_interval_s", PROBE_INTERVAL_S))
+        return clamp_probe_interval(
+            settings.get("lan_probe_interval_s", settings.get("probe_interval_s", PROBE_INTERVAL_S)),
+        )
 
     def _apply_probe_interval_settings(self, settings=None):
-        interval = self._probe_interval_s()
+        from chatxz.core.peer_probe import clamp_announce_interval, clamp_probe_interval
+        settings = settings or self.load_settings()
+        lan_probe = clamp_probe_interval(
+            settings.get("lan_probe_interval_s", settings.get("probe_interval_s", 30)),
+        )
         if self.lan_beacon:
-            self.lan_beacon.set_interval(interval)
+            self.lan_beacon.set_interval(lan_probe or 30)
         if self.messaging:
-            self.messaging.announce_interval = interval
+            self.messaging.announce_interval = lan_probe or 30
+            self.messaging.lan_announce_interval_s = clamp_announce_interval(
+                settings.get("lan_announce_interval_s", 0),
+            )
+            self.messaging.serial_announce_interval_s = clamp_announce_interval(
+                settings.get("serial_announce_interval_s", 0),
+            )
+            auto = (
+                self.messaging.lan_announce_interval_s > 0
+                or self.messaging.serial_announce_interval_s > 0
+            )
+            self.messaging.auto_announce = auto
+            if auto and not self.messaging._announce_thread:
+                self.messaging._announce_thread = threading.Thread(
+                    target=self.messaging._announce_loop, daemon=True,
+                )
+                self.messaging._announce_thread.start()
 
     def _probe_discovered_peers(self):
         if not self.discovery or not self.discovery.accept_peers:
@@ -824,17 +848,22 @@ class ChatWebServer:
         )
 
         now = time.time()
-        probe_interval = self._probe_interval_s()
+        settings = self.load_settings()
         rtt_updated = False
         for peer in list(self.discovery.peers.values()):
             hash_hex = peer.get("hash") or ""
             via = (peer.get("via") or "").strip()
             ip = (peer.get("ip") or "").strip()
+            is_serial = via == "serial"
+            probe_interval = self._probe_interval_s(
+                "serial" if is_serial else "lan", settings=settings,
+            )
+            if probe_interval <= 0:
+                continue
             last_probe = float(peer.get("last_rtt_probe_at") or 0)
             if last_probe and (now - last_probe) < probe_interval:
                 continue
             peer["last_rtt_probe_at"] = now
-            is_serial = via == "serial"
             rtt = None
             if self.messaging:
                 rtt = link_rtt_ms(self.messaging, hash_hex)
@@ -1287,9 +1316,12 @@ class ChatWebServer:
             "hub_host": "",
             "hub_port": 4242,
             "hub_server_hash": "",
-            "auto_interface_enabled": True,
             "auto_announce": False,
             "probe_interval_s": 30,
+            "lan_announce_interval_s": 0,
+            "serial_announce_interval_s": 0,
+            "lan_probe_interval_s": 30,
+            "serial_probe_interval_s": 30,
             "setup_complete": False,
             "last_release_notes_seen": "",
         }
@@ -1298,6 +1330,13 @@ class ChatWebServer:
                 s = json.load(f)
                 for key, val in defaults.items():
                     s.setdefault(key, val)
+                if s.get("auto_announce") and not s.get("lan_announce_interval_s"):
+                    s["lan_announce_interval_s"] = 30
+                    s["serial_announce_interval_s"] = 30
+                if "lan_probe_interval_s" not in s and "probe_interval_s" in s:
+                    s["lan_probe_interval_s"] = s["probe_interval_s"]
+                    s["serial_probe_interval_s"] = s["probe_interval_s"]
+                s.pop("auto_interface_enabled", None)
                 needs_udp = standalone_needs_udp(
                     s.get("rns_interfaces"), s.get("hub_role", "off")
                 )
@@ -1520,16 +1559,22 @@ class ChatWebServer:
             print("[network] TCP LAN mode — beacon discovery active, direct TCP dial on connect")
         else:
             print("[network] LAN transport not configured — skipping beacon/unicast helpers")
-        self.identity = self.identity_mgr.load_or_create()
+        serial_enabled = configured_serial_enabled(interfaces)
+        self.identity = self.identity_mgr.load_or_create(serial_enabled=serial_enabled)
         my_ip = detect_lan_ip()
         if my_ip and lan_discovery_configured(interfaces):
             print(f"[network] Detected LAN IP: {my_ip}")
         elif configured_serial_enabled(interfaces) and not lan_discovery_configured(interfaces):
             print("[network] Serial-only transport — LAN IP detection skipped")
         received_dir = settings.get("received_dir", os.path.join(self.config_dir, "received"))
-        auto_announce = bool(settings.get("auto_announce", False))
+        from chatxz.core.peer_probe import clamp_announce_interval
+        lan_ann = clamp_announce_interval(settings.get("lan_announce_interval_s", 0))
+        ser_ann = clamp_announce_interval(settings.get("serial_announce_interval_s", 0))
+        if settings.get("auto_announce") and lan_ann == 0 and ser_ann == 0:
+            lan_ann = ser_ann = 30
+        auto_announce = lan_ann > 0 or ser_ann > 0 or bool(settings.get("auto_announce", False))
         self.messaging = MessagingBackend(
-            self.identity, self.config_dir,
+            self.identity_mgr.identity_lan, self.config_dir,
             on_message=self._on_message,
             on_progress=self._on_transfer_progress,
             on_link_established=self._on_link_established,
@@ -1545,7 +1590,11 @@ class ChatWebServer:
             peer_endpoint_resolver=self._peer_endpoint_for_transfer,
             peer_scope_checker=self._peer_in_discovery_scope,
             peer_transport_resolver=lambda h: self._discovery_peer_for_connect(None, h),
+            identity_serial=self.identity_mgr.identity_serial,
+            dual_identity_mode=True,
         )
+        self.messaging.lan_announce_interval_s = lan_ann
+        self.messaging.serial_announce_interval_s = ser_ann
         self.voice_recorder = VoiceRecorder(self.config_dir)
         dest = self.messaging.start()
         sent_ids = [
@@ -2414,10 +2463,21 @@ class ChatWebServer:
         connected = self.active_peer if link_active and self.active_peer else None
         linked_peers = self.messaging.linked_peers() if self.messaging else []
         settings = self.load_settings()
+        id_payload = self.identity_mgr.identity_payload() if hasattr(self.identity_mgr, "identity_payload") else {}
+        serial_connect = ""
+        if self.messaging and getattr(self.messaging, "my_dest_hash_serial", None):
+            serial_connect = normalize_hash(self.messaging.my_dest_hash_serial)
+        elif id_payload.get("serial"):
+            serial_connect = normalize_hash(id_payload["serial"].get("connect_hash") or "")
         return web.json_response({
             "hash": connect,
             "connect_hash": connect,
             "identity_hash": identity_raw,
+            "lan": id_payload.get("lan") or {"connect_hash": connect, "identity_hash": identity_raw},
+            "serial": id_payload.get("serial") or (
+                {"connect_hash": serial_connect, "identity_hash": self.identity_mgr.get_hex_hash("serial")}
+                if serial_connect or self.identity_mgr.get_hex_hash("serial") else None
+            ),
             "name": settings.get("name", ""),
             "connected": connected,
             "linked_peers": linked_peers,
@@ -2444,6 +2504,9 @@ class ChatWebServer:
                 ip=data.get("ip"),
                 port=data.get("port"),
                 identity_hash=data.get("identity_hash"),
+                via=data.get("via"),
+                lan_hash=data.get("lan_hash"),
+                serial_hash=data.get("serial_hash"),
             )
             self._schedule_contacts_broadcast()
             return web.json_response({"status": "ok", "contact": entry})
@@ -3404,11 +3467,12 @@ class ChatWebServer:
 
     ANNOUNCE_DEBOUNCE_SEC = 0.4
 
-    async def _perform_announce(self):
+    async def _perform_announce(self, transport=None):
         ok, err = await self._wait_for_rns()
         if not ok:
             return {"ok": False, "error": err or "not ready"}
 
+        transport = (transport or "all").strip().lower()
         now = time.time()
         debounced = False
         beacon_sent = 0
@@ -3421,34 +3485,27 @@ class ChatWebServer:
                     self._enable_discovery(clear=False)
                     settings = self.load_settings()
                     configured = settings.get("rns_interfaces")
-                    if configured_serial_enabled(configured) and not lan_discovery_configured(configured):
-                        await asyncio.to_thread(self.messaging._burst_serial_announce, 1)
-                        print("[network] RNS announce on serial (no LAN beacon)")
-                    else:
-                        await asyncio.to_thread(self.messaging._silent_announce)
-                        if (
-                            configured_serial_enabled(configured)
-                            and lan_discovery_configured(configured)
-                        ):
-                            sent = await asyncio.to_thread(
-                                self.messaging._burst_serial_announce, 1,
-                            )
-                            if sent:
-                                print("[network] RNS announce on serial (LAN+serial mode)")
-                    if (
-                        lan_discovery_configured(configured)
-                        and lan_ip_reachable()
-                        and self.lan_beacon
-                    ):
-                        beacon_sent = await asyncio.to_thread(
-                            self.lan_beacon.send, 1, is_android()
+                    do_lan = transport in ("lan", "all")
+                    do_serial = transport in ("serial", "usb", "all")
+                    if do_serial and configured_serial_enabled(configured):
+                        sent = await asyncio.to_thread(
+                            self.messaging._burst_serial_announce, 1, force=True,
                         )
-                    elif configured_serial_enabled(configured) and lan_discovery_configured(configured):
-                        print("[network] LAN beacon + serial RNS announce (dual transport)")
-                    elif not lan_discovery_configured(configured):
-                        print("[network] No LAN transport configured — RNS announce on active paths only")
-                    elif not lan_ip_reachable():
-                        print("[network] LAN disconnected — RNS announce on serial/other paths only")
+                        if sent:
+                            print("[network] Serial RNS announce")
+                    if do_lan and lan_discovery_configured(configured):
+                        await asyncio.to_thread(
+                            self.messaging._silent_announce, also_serial=False,
+                        )
+                        if lan_ip_reachable() and self.lan_beacon:
+                            beacon_sent = await asyncio.to_thread(
+                                self.lan_beacon.send, 1, is_android(),
+                            )
+                            print("[network] LAN RNS announce + beacon")
+                        else:
+                            print("[network] LAN RNS announce (beacon skipped — LAN down)")
+                    elif do_lan:
+                        print("[network] LAN transport not configured")
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -3469,7 +3526,14 @@ class ChatWebServer:
         }
 
     async def handle_announce(self, request):
-        result = await self._perform_announce()
+        transport = None
+        try:
+            if request.can_read_body:
+                data = await request.json()
+                transport = (data.get("transport") or "").strip().lower() or None
+        except Exception:
+            pass
+        result = await self._perform_announce(transport=transport)
         if not result.get("ok"):
             return web.json_response(
                 {"error": result.get("error") or "not ready"}, status=400
@@ -3749,14 +3813,26 @@ class ChatWebServer:
                 set_lan_interface_preference(settings["lan_interface"])
                 config_dirty = True
                 lan_scope_changed = True
-            if "auto_interface_enabled" in data:
-                settings["auto_interface_enabled"] = bool(data["auto_interface_enabled"])
-                config_dirty = True
+            if "lan_interface" in data and not (data.get("lan_interface") or "").strip():
+                return web.json_response(
+                    {"error": "LAN IPv4 interface is required — pick an address from the list"},
+                    status=400,
+                )
+            from chatxz.core.peer_probe import clamp_announce_interval, clamp_probe_interval
+            for key in ("lan_probe_interval_s", "serial_probe_interval_s", "probe_interval_s"):
+                if key in data:
+                    val = clamp_probe_interval(data.get(key))
+                    if key == "probe_interval_s":
+                        settings["probe_interval_s"] = val
+                        settings["lan_probe_interval_s"] = val
+                        settings["serial_probe_interval_s"] = val
+                    else:
+                        settings[key] = val
+            for key in ("lan_announce_interval_s", "serial_announce_interval_s"):
+                if key in data:
+                    settings[key] = clamp_announce_interval(data.get(key))
             if "auto_announce" in data:
                 settings["auto_announce"] = bool(data["auto_announce"])
-            if "probe_interval_s" in data:
-                from chatxz.core.peer_probe import clamp_probe_interval
-                settings["probe_interval_s"] = clamp_probe_interval(data.get("probe_interval_s"))
             if "setup_complete" in data:
                 settings["setup_complete"] = bool(data["setup_complete"])
             if "last_release_notes_seen" in data:
@@ -3835,37 +3911,43 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
-    async def _reload_identity_runtime(self, old_dest_hash="", old_identity_hash=""):
+    async def _reload_identity_runtime(self, old_dest_hash="", old_identity_hash="", role="lan"):
         from chatxz.core.discovery import normalize_hash
 
+        role = (role or "lan").strip().lower()
         old_dest = normalize_hash(old_dest_hash)
         old_ident = normalize_hash(old_identity_hash or old_dest_hash)
         my_dest_clean = ""
         my_ident_clean = ""
 
-        if self.messaging and self.identity:
-            dest = await asyncio.to_thread(self.messaging.rebind_identity, self.identity)
+        ident = self.identity_mgr.get_identity(role) if self.identity_mgr else self.identity
+        if self.messaging and ident:
+            dest = await asyncio.to_thread(self.messaging.rebind_identity, ident, role)
             my_hash = RNS.hexrep(dest.hash)
             my_dest_clean = my_hash.replace(":", "")
-            self.messaging.my_dest_hash = my_dest_clean
-            self.destination_hash = my_hash
+            if role == "serial":
+                self.messaging.my_dest_hash_serial = my_dest_clean
+            else:
+                self.messaging.my_dest_hash = my_dest_clean
+                self.destination_hash = my_hash
+                self.identity = ident
         elif self.identity_mgr:
-            my_ident_clean = (self.identity_mgr.get_hex_hash() or "").replace(":", "")
+            my_ident_clean = (self.identity_mgr.get_hex_hash(role) or "").replace(":", "")
 
         if self.identity_mgr:
-            my_ident_clean = (self.identity_mgr.get_hex_hash() or "").replace(":", "")
+            my_ident_clean = (self.identity_mgr.get_hex_hash(role) or "").replace(":", "")
 
-        if self.discovery:
+        if self.discovery and role == "lan":
             self.discovery.purge_hashes({old_dest, old_ident, my_dest_clean, my_ident_clean})
             self.discovery.clear_peers()
             self.discovery.accept_peers = True
 
-        if self.lan_beacon and my_dest_clean:
+        if self.lan_beacon and my_dest_clean and role == "lan":
             self.lan_beacon.dest_hash = my_dest_clean
             self.lan_beacon.identity_hash = my_ident_clean
             try:
                 self.lan_beacon.identity_pubkey = (
-                    self.identity.get_public_key() if self.identity else None
+                    ident.get_public_key() if ident else None
                 )
             except Exception:
                 self.lan_beacon.identity_pubkey = None
@@ -3899,10 +3981,21 @@ class ChatWebServer:
         try:
             from chatxz.core.discovery import normalize_hash
 
+            role = "lan"
+            try:
+                if request.can_read_body:
+                    data = await request.json()
+                    role = (data.get("role") or "lan").strip().lower()
+            except Exception:
+                pass
             old_dest = normalize_hash(self.destination_hash or "")
-            old_ident = normalize_hash(self.identity_mgr.get_hex_hash() if self.identity_mgr else "")
-            self.identity = self.identity_mgr.regenerate()
-            await self._reload_identity_runtime(old_dest, old_ident)
+            if role == "serial" and self.messaging:
+                old_dest = normalize_hash(getattr(self.messaging, "my_dest_hash_serial", "") or "")
+            old_ident = normalize_hash(self.identity_mgr.get_hex_hash(role) if self.identity_mgr else "")
+            self.identity = self.identity_mgr.regenerate(role)
+            if role == "lan":
+                self.identity = self.identity_mgr.identity_lan
+            await self._reload_identity_runtime(old_dest, old_ident, role=role)
             new_dest = normalize_hash(self.destination_hash or "")
             new_ident = normalize_hash(self.identity_mgr.get_hex_hash())
             return web.json_response({
@@ -5013,7 +5106,6 @@ class ChatWebServer:
             self._discovery_broadcaster(),
             self._peer_probe_loop(),
             self._history_maintenance_loop(),
-            self._link_failover_loop(),
             self._serial_watchdog_loop(),
             self._queue_retry_loop(),
         ):

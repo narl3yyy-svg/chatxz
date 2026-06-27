@@ -14,9 +14,10 @@ from chatxz.core.peer_probe import clamp_probe_interval, link_rtt_ms
 
 class ProbeIntervalTests(unittest.TestCase):
     def test_clamp_probe_interval_bounds(self):
-        self.assertEqual(clamp_probe_interval(3), 5)
+        self.assertEqual(clamp_probe_interval(0), 0)
+        self.assertEqual(clamp_probe_interval(3), 3)
         self.assertEqual(clamp_probe_interval(30), 30)
-        self.assertEqual(clamp_probe_interval(999), 300)
+        self.assertEqual(clamp_probe_interval(99999), 18000)
         self.assertEqual(clamp_probe_interval("bad"), 30)
 
     def test_peer_record_from_beacon_without_identity_registration(self):

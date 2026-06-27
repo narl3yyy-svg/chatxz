@@ -84,7 +84,8 @@ class PathSelectionTests(unittest.TestCase):
             self.assertEqual(len(peers), 1)
             self.assertEqual(peers[0].get("via"), "serial")
 
-    def test_get_peers_shows_single_fastest_path(self):
+    def test_get_peers_shows_both_lan_and_serial_paths(self):
+        """Dual-identity model: LAN and USB are separate discovery rows."""
         disc = PeerDiscovery()
         disc.accept_peers = True
         now = time.time()
@@ -108,9 +109,10 @@ class PathSelectionTests(unittest.TestCase):
         }
         with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
             peers = disc.get_peers(scope_ip="10.10.10.37")
-        self.assertEqual(len(peers), 1)
-        self.assertEqual(peers[0].get("via"), "rns")
-        self.assertEqual(peers[0].get("ip"), "10.10.10.37")
+        self.assertEqual(len(peers), 2)
+        vias = {p.get("via") for p in peers}
+        self.assertIn("serial", vias)
+        self.assertIn("rns", vias)
 
 
 class TimingConstantsTests(unittest.TestCase):

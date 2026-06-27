@@ -190,8 +190,11 @@ class MessagingBackend:
                  on_transfer_revoked=None,
                  http_port=8742, lan_transfer_enabled=False,
                  peer_endpoint_resolver=None, peer_scope_checker=None,
-                 peer_transport_resolver=None):
+                 peer_transport_resolver=None, identity_serial=None,
+                 dual_identity_mode=True):
         self.identity = identity
+        self.identity_serial = identity_serial
+        self.dual_identity_mode = bool(dual_identity_mode)
         self.config_dir = config_dir
         self.receive_dir = receive_dir or os.path.join(config_dir, "received")
         self.on_message = on_message
@@ -205,6 +208,10 @@ class MessagingBackend:
         self.auto_announce = auto_announce
         self.announce_interval = 30
         self.destination = None
+        self.destination_serial = None
+        self.my_dest_hash_serial = None
+        self.lan_announce_interval_s = 0
+        self.serial_announce_interval_s = 0
         self.links = {}
         self.active_link = None
         self.active_peer_hash = None
@@ -265,12 +272,26 @@ class MessagingBackend:
             return False
         if self.my_dest_hash and clean == normalize_hash(self.my_dest_hash):
             return True
+        if self.my_dest_hash_serial and clean == normalize_hash(self.my_dest_hash_serial):
+            return True
         try:
             if self.identity and clean == normalize_hash(RNS.hexrep(self.identity.hash)):
+                return True
+            if self.identity_serial and clean == normalize_hash(RNS.hexrep(self.identity_serial.hash)):
                 return True
         except Exception:
             pass
         return False
+
+    def _destination_for_interface(self, iface):
+        if iface and is_serial_interface(iface) and self.destination_serial:
+            return self.destination_serial
+        return self.destination
+
+    def _local_connect_hash_for_interface(self, iface):
+        if iface and is_serial_interface(iface) and self.my_dest_hash_serial:
+            return self.my_dest_hash_serial
+        return self.my_dest_hash
 
     def _cache_link_peer(self, link, peer_hash):
         if not link or not peer_hash or peer_hash == "unknown":
@@ -1418,6 +1439,8 @@ class MessagingBackend:
         return False
 
     def link_needs_failover(self):
+        if self.dual_identity_mode:
+            return False, ""
         if not self.active_link or not self.active_peer_hash:
             return False, ""
         if self._has_active_transfer():
@@ -1565,6 +1588,8 @@ class MessagingBackend:
 
     def session_needs_reconnect(self):
         """True when the primary session peer's RNS link is missing or unhealthy."""
+        if self.dual_identity_mode:
+            return False, ""
         if self._connect_in_progress:
             return False, ""
         if self._has_active_transfer():
@@ -2277,17 +2302,35 @@ class MessagingBackend:
             self._save_queue()
         return before - len(self.message_queue)
 
-    def start(self):
-        self.destination = RNS.Destination(
-            self.identity,
+    def _setup_inbound_destination(self, identity, attr_name):
+        if not identity:
+            return None
+        dest = RNS.Destination(
+            identity,
             RNS.Destination.IN,
             RNS.Destination.SINGLE,
             APP_NAME,
-            "messages"
+            "messages",
         )
-        self.destination.set_proof_strategy(RNS.Destination.PROVE_ALL)
-        self.destination.accepts_links(True)
-        self.destination.set_link_established_callback(self._link_callback)
+        dest.set_proof_strategy(RNS.Destination.PROVE_ALL)
+        dest.accepts_links(True)
+        dest.set_link_established_callback(self._link_callback)
+        setattr(self, attr_name, dest)
+        dest_hex = normalize_hash(RNS.hexrep(dest.hash))
+        ident_hex = normalize_hash(RNS.hexrep(identity.hash))
+        self.register_peer_mapping(dest_hex, ident_hex)
+        return dest
+
+    def start(self):
+        self.destination = self._setup_inbound_destination(self.identity, "destination")
+        if self.identity_serial:
+            self.destination_serial = self._setup_inbound_destination(
+                self.identity_serial, "destination_serial",
+            )
+            self.my_dest_hash_serial = normalize_hash(
+                RNS.hexrep(self.destination_serial.hash),
+            )
+            print(f"[identity] Serial endpoint {self.my_dest_hash_serial[:16]}...")
 
         if self.auto_announce:
             self._announce(also_serial=False)
@@ -2388,7 +2431,8 @@ class MessagingBackend:
             return True
 
     def _announce_on_interface(self, iface, app_data=None):
-        if not self.destination or not iface:
+        dest = self._destination_for_interface(iface)
+        if not dest or not iface:
             return False
         data = app_data if app_data is not None else self._announce_payload()
         if is_serial_interface(iface):
@@ -2398,9 +2442,11 @@ class MessagingBackend:
                 data = json.dumps(payload).encode("utf-8")
             except Exception:
                 pass
-        self.destination.announce(app_data=data, attached_interface=iface)
+        dest.announce(app_data=data, attached_interface=iface)
         try:
-            RNS.Transport.identity.announce(attached_interface=iface)
+            ident = self.identity_serial if is_serial_interface(iface) and self.identity_serial else self.identity
+            if ident:
+                ident.announce(attached_interface=iface)
         except Exception:
             pass
         return True
@@ -2424,7 +2470,9 @@ class MessagingBackend:
             or self._has_active_transfer()
         ):
             return 0
-        if not self.destination or not self._serial_transport_ready():
+        if not self._serial_transport_ready():
+            return 0
+        if not self.destination_serial and not self.destination:
             return 0
         suppress_offline_lan_transports()
         dedupe_serial_interfaces()
@@ -2845,7 +2893,14 @@ class MessagingBackend:
         if promote_active:
             self._send_link = link
         try:
-            link.identify(self.identity)
+            iface = self._link_attached_interface(link)
+            ident = (
+                self.identity_serial
+                if iface and is_serial_interface(iface) and self.identity_serial
+                else self.identity
+            )
+            if ident:
+                link.identify(ident)
         except Exception:
             pass
         print("[connect] Link established")
@@ -3003,21 +3058,36 @@ class MessagingBackend:
         )
 
     def _announce_loop(self):
+        lan_tick = 0
+        serial_tick = 0
         while self.running:
-            for _ in range(self.announce_interval):
-                if not self.running:
-                    return
-                time.sleep(1)
+            time.sleep(1)
+            if not self.running:
+                return
             if self._has_active_transfer() or not self._should_periodic_announce():
                 continue
             interfaces = load_settings_interfaces(self.config_dir)
             prune_dead_serial_interfaces()
-            if lan_discovery_configured(interfaces):
+            lan_iv = max(0, int(self.lan_announce_interval_s or 0))
+            ser_iv = max(0, int(self.serial_announce_interval_s or 0))
+            if lan_iv <= 0 and ser_iv <= 0 and not self.auto_announce:
+                continue
+            if lan_iv <= 0 and self.auto_announce:
+                lan_iv = self.announce_interval
+            if ser_iv <= 0 and self.auto_announce:
+                ser_iv = self.announce_interval
+            lan_tick += 1
+            serial_tick += 1
+            if lan_iv > 0 and lan_tick >= lan_iv and lan_discovery_configured(interfaces):
+                lan_tick = 0
                 self._silent_announce(also_serial=False)
             if (
-                configured_serial_enabled(interfaces)
+                ser_iv > 0
+                and serial_tick >= ser_iv
+                and configured_serial_enabled(interfaces)
                 and self._serial_transport_ready()
             ):
+                serial_tick = 0
                 self._burst_serial_announce(count=1)
 
     def cancel_all_transfers(self):
@@ -3038,10 +3108,10 @@ class MessagingBackend:
             except:
                 pass
 
-    def rebind_identity(self, identity):
-        """Hot-swap local identity and destination without restarting the process."""
+    def rebind_identity(self, identity, role="lan"):
+        """Hot-swap LAN or serial identity without restarting the process."""
+        role = (role or "lan").strip().lower()
         self.disconnect_all_peers(clear_session=True)
-        self.identity = identity
         self.identity_to_dest.clear()
         self.dest_to_identity.clear()
         self._link_peer_hashes.clear()
@@ -3051,26 +3121,30 @@ class MessagingBackend:
         self.active_peer_hash = None
         self._send_link = None
         self._session_peer_hash = None
-        self.destination = RNS.Destination(
-            self.identity,
-            RNS.Destination.IN,
-            RNS.Destination.SINGLE,
-            APP_NAME,
-            "messages",
-        )
-        self.destination.set_proof_strategy(RNS.Destination.PROVE_ALL)
-        self.destination.accepts_links(True)
-        self.destination.set_link_established_callback(self._link_callback)
-        dest_hex = normalize_hash(RNS.hexrep(self.destination.hash))
-        ident_hex = normalize_hash(RNS.hexrep(self.identity.hash))
-        self.my_dest_hash = dest_hex
-        self.register_peer_mapping(dest_hex, ident_hex)
-        try:
-            self._silent_announce()
-        except Exception as e:
-            print(f"[identity] Post-rebind announce failed: {e}")
-        print(f"[identity] Rebound messaging destination to {dest_hex[:16]}...")
-        return self.destination
+        if role == "serial":
+            self.identity_serial = identity
+            self.destination_serial = self._setup_inbound_destination(
+                identity, "destination_serial",
+            )
+            self.my_dest_hash_serial = normalize_hash(
+                RNS.hexrep(self.destination_serial.hash),
+            )
+            dest_hex = self.my_dest_hash_serial
+            try:
+                self._burst_serial_announce(count=1, force=True)
+            except Exception as e:
+                print(f"[identity] Post-rebind serial announce failed: {e}")
+        else:
+            self.identity = identity
+            self.destination = self._setup_inbound_destination(identity, "destination")
+            dest_hex = normalize_hash(RNS.hexrep(self.destination.hash))
+            self.my_dest_hash = dest_hex
+            try:
+                self._silent_announce(also_serial=False)
+            except Exception as e:
+                print(f"[identity] Post-rebind LAN announce failed: {e}")
+        print(f"[identity] Rebound {role} destination to {dest_hex[:16]}...")
+        return self.destination_serial if role == "serial" else self.destination
 
     def _dest_hash_from_identity(self, ident):
         dest = message_dest_hash_for_identity(ident)

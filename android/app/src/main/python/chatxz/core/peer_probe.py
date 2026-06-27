@@ -10,8 +10,9 @@ from chatxz.core.lan_beacon import BEACON_PORT, MAGIC
 from chatxz.core.lan_rns import peer_path_on_family, request_paths_for_hash
 
 PROBE_INTERVAL_S = 30
-PROBE_INTERVAL_MIN_S = 5
-PROBE_INTERVAL_MAX_S = 300
+PROBE_INTERVAL_MIN_S = 0
+PROBE_INTERVAL_MAX_S = 18000
+ANNOUNCE_INTERVAL_MAX_S = 18000
 PROBE_TIMEOUT_S = 3.0
 PROBE_MAX_RTT_MS = 10000
 PROBE_STALE_S = 30
@@ -19,12 +20,21 @@ PROBE_AVG_WINDOW = 6
 
 
 def clamp_probe_interval(seconds):
-    """User-configurable ping interval for LAN and serial liveness checks."""
+    """User-configurable ping interval for LAN and serial liveness checks (0 = off)."""
     try:
         value = int(seconds)
     except (TypeError, ValueError):
         value = PROBE_INTERVAL_S
     return max(PROBE_INTERVAL_MIN_S, min(PROBE_INTERVAL_MAX_S, value))
+
+
+def clamp_announce_interval(seconds):
+    """Per-transport auto-announce interval (0 = off, max 5 hours)."""
+    try:
+        value = int(seconds)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(ANNOUNCE_INTERVAL_MAX_S, value))
 
 
 def link_rtt_ms(messaging, hash_hex):

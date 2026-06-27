@@ -2,6 +2,20 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.5.0] — 2026-06-27
+
+### Changed
+- **Dual LAN + Serial identities** — `identity_lan` and `identity_serial`; separate connect hashes; legacy `identity` auto-migrates to `identity_lan`.
+- **No transport failover** — links stay on the transport you chose (LAN or USB).
+- **Discovery** — LAN and USB appear as separate rows (`name · LAN` / `name · USB`).
+- **Contacts** — one card per person with LAN/USB sub-rows.
+- **Announce** — sidebar **Announce LAN** and **Announce Serial** buttons.
+- **Settings** — mandatory LAN IPv4 (no Auto); per-transport probe and announce intervals (0–18000 s).
+- **Profile** — Regenerate LAN / Regenerate Serial (moved from System).
+
+### Removed
+- Auto interface selection; combined single announce; link failover loop.
+
 ## [0.4.2] — 2026-06-27
 
 ### Fixed

@@ -798,13 +798,24 @@ class PeerDiscovery:
 
     @staticmethod
     def _peer_dedup_key(peer):
+        """One discovery row per connect hash + transport (dual-identity model)."""
+        h = normalize_hash(peer.get("hash"))
+        via = (peer.get("via") or "lan").strip().lower()
+        if via in ("rns", "beacon", ""):
+            via = "lan"
+        if via == "serial":
+            via_label = "usb"
+        else:
+            via_label = via
+        if h:
+            return f"dest:{h}:via:{via_label}"
         ident = normalize_hash(peer.get("identity_hash"))
         if ident:
-            return f"ident:{ident}"
+            return f"ident:{ident}:via:{via_label}"
         pubkey = (peer.get("pubkey") or "").strip()
         if pubkey:
-            return f"pk:{pubkey[:48]}"
-        return f"hash:{normalize_hash(peer.get('hash'))}"
+            return f"pk:{pubkey[:48]}:via:{via_label}"
+        return f"hash:unknown:via:{via_label}"
 
     def get_peers(self, scope_ip=None):
         if not self.accept_peers:
@@ -827,6 +838,11 @@ class PeerDiscovery:
             existing_hash = normalize_hash(existing.get("hash"))
             peer_hash = normalize_hash(peer.get("hash"))
             if existing_hash != peer_hash:
+                ex_via = (existing.get("via") or "").strip()
+                pe_via = (peer.get("via") or "").strip()
+                if ex_via != pe_via:
+                    deduped[f"{key}:{peer_hash}"] = peer
+                    continue
                 if self._same_peer_identity(existing, peer):
                     deduped[key] = self._prefer_peer(existing, peer, scope_ip)
                     continue

@@ -1,8 +1,56 @@
 # chatxz
 
-Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — your identity is a local keypair, and messages travel over encrypted RNS links on your LAN (Wi‑Fi, Ethernet, USB serial, or beyond).
+Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — each transport uses its own RNS identity, and messages travel over encrypted links on your LAN (Wi‑Fi, Ethernet, USB serial).
 
-**Current version:** 0.4.2
+**Current version:** 0.5.0
+
+## How chatxz works (v0.5+)
+
+chatxz treats **LAN** and **USB serial** as **separate endpoints** on the same device:
+
+| Transport | Identity file | Connect hash | Discovered label |
+|-----------|---------------|--------------|------------------|
+| **LAN** (UDP/TCP) | `identities/identity_lan` | LAN hash | `ubuntu · LAN` |
+| **USB serial** | `identities/identity_serial` | Serial hash | `ubuntu · USB` |
+
+- **No auto-failover** — the transport you tap is the transport used for chat.
+- **One contact card** can hold both hashes with **LAN** and **USB** sub-rows.
+- **Separate announce buttons** — **Announce LAN** and **Announce Serial** in the sidebar.
+- Upgrading from older versions **migrates** `identities/identity` → `identity_lan` automatically.
+
+### First-time setup
+
+1. Pick your **display name**.
+2. **Select a LAN IPv4** from the list (required — no “Auto”).
+3. Optionally enable USB serial in Settings → Network later.
+
+### Sidebar quick guide
+
+| Action | What it does |
+|--------|----------------|
+| **Announce LAN** | RNS announce + UDP beacon on your pinned IPv4 |
+| **Announce Serial** | RNS announce on USB (shown when serial is online) |
+| Tap **Discovered** row | Opens chat on that transport |
+| Tap **contact sub-row** | Opens chat on LAN or USB for that saved peer |
+
+### Settings → Network
+
+| Setting | Range | Meaning |
+|---------|-------|---------|
+| **LAN / Serial probe interval** | 0–18000 s | RTT ping frequency (0 = off) |
+| **LAN / Serial announce interval** | 0–18000 s | Auto-announce (0 = off; use sidebar buttons) |
+| **LAN IPv4** | Required | Scope for discovery, beacons, and wake |
+
+Regenerate identities under **Settings → Profile** (**Regenerate LAN** / **Regenerate Serial**).
+
+### Troubleshooting
+
+- **Serial peer missing after Announce** — tap **Announce Serial** (not LAN only); ensure USB serial is online in Settings → Network.
+- **Two rows for one name** — expected when a peer has both LAN and USB identities.
+- **Android sleep** — tap the contact to wake and reconnect (LAN wake is automatic).
+- **Cross-subnet LAN** — pick matching pinned IPv4 on both devices.
+
+**Roadmap:** live voice **calls** (duplex audio over RNS) planned for **v0.6.0**. Voice **notes** (🎤) work today.
 
 ## Download
 
@@ -238,6 +286,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.5.0** — **Dual identity:** separate LAN and USB RNS identities (no failover); split Announce LAN / Announce Serial; mandatory LAN IPv4; per-transport probe/announce intervals; contact cards with LAN/USB sub-rows; identity regen in Profile
 - **v0.4.2** — **LAN wake + Android UX:** tap a contact to wake sleeping peers and reconnect; RTT on saved contacts; saved peers hidden from Discovered; Android APK uses contact list as home with two-step back navigation
 - **v0.4.1** — **LAN RTT + ping interval:** Discovered LAN peers show RTT ms; Settings → Network → Link ping interval (5–300s) for LAN and serial; Android beacons visible on desktop without full identity registration
 - **v0.4.0** — **Serial + discovery overhaul:** USB RNS auto-announce is one packet every 30s (no bursts); discovered peers update live on scope drift and transport changes; manual Announce uses single serial packet in dual-transport mode.

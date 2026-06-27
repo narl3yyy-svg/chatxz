@@ -256,6 +256,28 @@ body::before {
   background: var(--primary); color: #fff; min-width: 20px;
   text-align: center; font-size: 10px; padding: 2px 6px;
 }
+.contact-card { align-items: flex-start; }
+.contact-card .contact-avatar { margin-top: 2px; }
+.contact-transport-rows { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.contact-transport-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border-radius: var(--radius-sm); cursor: pointer; border: 1px solid transparent;
+  transition: background var(--transition), border-color var(--transition);
+}
+.contact-transport-row:hover { background: var(--surface-hover); border-color: var(--border); }
+.contact-transport-row.active { background: var(--primary-soft); border-color: rgba(124,106,239,0.25); }
+.contact-transport-label {
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  min-width: 30px; flex-shrink: 0;
+}
+.contact-transport-label.lan { color: var(--success); }
+.contact-transport-label.usb { color: var(--accent); }
+.contact-transport-hash {
+  flex: 1; min-width: 0; font-size: 11px; color: var(--text3);
+  font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sidebar-actions .sidebar-btn.connect-btn { flex: 1 1 100%; }
+.sidebar-actions .sidebar-btn.announce-btn { flex: 1 1 calc(50% - 4px); font-size: 11px; padding: 9px 8px; }
 .contacts-scroll { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
 
 .empty-state {
@@ -1322,7 +1344,7 @@ body.android-shell.sidebar-open #sidebar-backdrop {
     <div class="setup-step">
       <label for="setup-lan-interface">IPv4 address for LAN chat</label>
       <select id="setup-lan-interface">
-        <option value="">Auto (Ethernet/Wi-Fi before VPN)</option>
+        <option value="" disabled selected>Pick an interface…</option>
       </select>
       <p class="field-hint">Each IPv4 on your PC is listed separately — pick the address peers should reach you on.</p>
     </div>
@@ -1358,7 +1380,7 @@ body.android-shell.sidebar-open #sidebar-backdrop {
     <div class="setup-step">
       <label class="setup-toggle">
         <input type="checkbox" id="setup-auto-announce" checked>
-        <span><strong>Auto-announce</strong>Periodically broadcast your presence on the LAN. Leave off to announce manually with the 📡 button.</span>
+        <span><strong>Auto-announce</strong>Periodically broadcast your presence on the LAN. Leave off to announce manually with Announce LAN.</span>
       </label>
     </div>
     <p class="field-hint" style="margin-bottom:14px">UDP LAN discovery is enabled by default. Adjust RNS interfaces later in Settings → Network.</p>
@@ -1390,11 +1412,14 @@ body.android-shell.sidebar-open #sidebar-backdrop {
         <input type="text" id="contact-search" placeholder="Search contacts..." oninput="filterContacts(this.value)">
       </div>
       <div class="sidebar-actions">
-        <button class="sidebar-btn primary" onclick="toggleConnectPanel()">
+        <button class="sidebar-btn primary connect-btn" onclick="toggleConnectPanel()">
           <span>＋</span> Connect
         </button>
-        <button class="sidebar-btn" onclick="announceSelf()" title="Manual LAN announce (RNS + beacon)">
-          <span>📡</span> Announce
+        <button class="sidebar-btn announce-btn" onclick="announceSelf('lan')" title="Manual LAN announce (RNS + beacon)">
+          <span>📡</span> Announce LAN
+        </button>
+        <button class="sidebar-btn announce-btn" id="announce-serial-btn" onclick="announceSelf('serial')" title="Manual serial/USB announce" style="display:none">
+          <span>🔌</span> Announce Serial
         </button>
       </div>
       <div class="contacts-scroll">
@@ -1441,11 +1466,18 @@ body.android-shell.sidebar-open #sidebar-backdrop {
     <div id="identity-modal-overlay" class="identity-modal-overlay" onclick="closeIdentityModal(event)">
       <div class="identity-modal" onclick="event.stopPropagation()">
         <h3>Your identity</h3>
-        <p class="field-hint" style="margin:0">Share this connect hash so peers can reach you.</p>
-        <div class="id-value" id="identity-modal-hash">—</div>
+        <p class="field-hint" style="margin:0">LAN and USB serial use separate connect hashes in v0.5.</p>
+        <label style="display:block;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);margin-top:12px">LAN connect hash</label>
+        <div class="id-value" id="identity-modal-hash-lan">—</div>
+        <div id="identity-modal-serial-block">
+          <label style="display:block;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);margin-top:12px">Serial connect hash</label>
+          <div class="id-value" id="identity-modal-hash-serial">—</div>
+        </div>
         <div class="identity-modal-actions">
-          <button type="button" class="sidebar-btn primary" onclick="copyIdentityFromModal()">Copy hash</button>
-          <button type="button" class="sidebar-btn danger" onclick="regenerateIdentityFromModal()">Regenerate</button>
+          <button type="button" class="sidebar-btn primary" onclick="copyIdentityFromModal('lan')">Copy LAN</button>
+          <button type="button" class="sidebar-btn primary" id="identity-modal-copy-serial" onclick="copyIdentityFromModal('serial')" style="display:none">Copy Serial</button>
+          <button type="button" class="sidebar-btn danger" onclick="regenerateIdentityFromModal('lan')">Regenerate LAN</button>
+          <button type="button" class="sidebar-btn danger" id="identity-modal-regen-serial" onclick="regenerateIdentityFromModal('serial')" style="display:none">Regenerate Serial</button>
           <button type="button" class="sidebar-btn" onclick="closeIdentityModal()">Close</button>
         </div>
       </div>
@@ -1602,9 +1634,18 @@ body.android-shell.sidebar-open #sidebar-backdrop {
             <input id="settings-name" placeholder="Your name on the network...">
           </div>
           <div class="settings-section">
-            <label>Connect hash</label>
-            <input id="settings-hash" readonly style="font-family:ui-monospace,monospace;font-size:12px;color:var(--text2)">
-            <p class="field-hint">Share this hash so peers can connect to you. This is your message destination — not the internal RNS transport identity.</p>
+            <label>LAN connect hash</label>
+            <input id="settings-hash-lan" readonly style="font-family:ui-monospace,monospace;font-size:12px;color:var(--text2)">
+            <p class="field-hint">Share this hash for Wi-Fi/Ethernet peers. This is your LAN message destination.</p>
+          </div>
+          <div class="settings-section" id="settings-serial-hash-section" style="display:none">
+            <label>Serial connect hash</label>
+            <input id="settings-hash-serial" readonly style="font-family:ui-monospace,monospace;font-size:12px;color:var(--text2)">
+            <p class="field-hint">Share this hash for USB serial peers. Separate from your LAN hash.</p>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:10px;max-width:320px;margin-top:4px">
+            <button type="button" class="btn-block danger" onclick="regenerateIdentity('lan')">Regenerate LAN identity</button>
+            <button type="button" class="btn-block danger" id="settings-regen-serial-btn" onclick="regenerateIdentity('serial')" style="display:none">Regenerate Serial identity</button>
           </div>
         </div>
       </section>
@@ -1644,7 +1685,8 @@ body.android-shell.sidebar-open #sidebar-backdrop {
           <p class="block-lead">Discovery, active links, transports, and interface health. Refreshes automatically while you are on this tab.</p>
           <div class="network-status-actions">
             <button type="button" class="btn-block" onclick="refreshNetworkStatus()">↻ Refresh status</button>
-            <button type="button" class="btn-block" onclick="announceSelf()">📡 Announce</button>
+            <button type="button" class="btn-block" onclick="announceSelf('lan')">📡 Announce LAN</button>
+            <button type="button" class="btn-block" id="status-announce-serial-btn" onclick="announceSelf('serial')" style="display:none">🔌 Announce Serial</button>
           </div>
           <button type="button" class="btn-block danger" style="margin-bottom:12px;max-width:280px" onclick="resetNetwork()">Reset network</button>
           <div id="network-status-panel" class="network-status-block">Loading network status...</div>
@@ -1654,31 +1696,40 @@ body.android-shell.sidebar-open #sidebar-backdrop {
       <section id="settings-section-network" class="settings-pane">
         <div class="settings-block">
           <h3>LAN discovery</h3>
-          <p class="block-lead">Pin the IPv4 subnet peers should use to reach you. Auto picks the default route interface.</p>
+          <p class="block-lead">Pin the IPv4 subnet peers should use to reach you.</p>
           <div class="settings-section">
             <label>IPv4 address</label>
             <div class="field-row">
               <select id="settings-lan-interface" onchange="saveLanInterface()">
-                <option value="">Auto — prefer Wi-Fi / Ethernet</option>
+                <option value="" disabled>Pick an interface…</option>
               </select>
               <button type="button" id="lan-refresh-btn" class="btn-block" onclick="refreshLanInterfaces(true, this, true)" style="width:auto;white-space:nowrap;padding:0 14px;height:42px" title="Rescan IPv4 addresses">↻ Rescan</button>
             </div>
             <div id="lan-interface-summary"></div>
           </div>
-          <label class="settings-toggle-card" style="margin-top:4px">
-            <div class="toggle-text">
-              <strong>Auto-announce</strong>
-              <span>Broadcast on LAN every ~30s. Turn off to announce manually with the sidebar 📡 button.</span>
-            </div>
-            <div class="toggle-switch">
-              <input type="checkbox" id="settings-auto-announce" onchange="saveAutoAnnounce()">
-            </div>
-          </label>
           <div class="settings-section" style="margin-top:14px">
-            <label for="settings-probe-interval">Link ping interval (seconds)</label>
-            <input type="number" id="settings-probe-interval" min="5" max="300" step="1" value="30"
-              onchange="saveProbeInterval()" onblur="saveProbeInterval()">
-            <p class="field-hint">How often to ping discovered peers (LAN UDP and USB serial) and refresh RTT in the sidebar. 5–300s.</p>
+            <label for="settings-lan-probe-interval">LAN link ping interval (seconds)</label>
+            <input type="number" id="settings-lan-probe-interval" min="0" max="18000" step="1" value="30"
+              onchange="saveLanProbeInterval()" onblur="saveLanProbeInterval()">
+            <p class="field-hint">How often to ping LAN discovered peers and refresh RTT. 0 = off, max 18000s.</p>
+          </div>
+          <div class="settings-section">
+            <label for="settings-lan-announce-interval">LAN auto-announce interval (seconds)</label>
+            <input type="number" id="settings-lan-announce-interval" min="0" max="18000" step="1" value="0"
+              onchange="saveLanAnnounceInterval()" onblur="saveLanAnnounceInterval()">
+            <p class="field-hint">Periodic LAN broadcast. 0 = off (use sidebar Announce LAN).</p>
+          </div>
+          <div class="settings-section">
+            <label for="settings-serial-probe-interval">Serial link ping interval (seconds)</label>
+            <input type="number" id="settings-serial-probe-interval" min="0" max="18000" step="1" value="30"
+              onchange="saveSerialProbeInterval()" onblur="saveSerialProbeInterval()">
+            <p class="field-hint">How often to ping USB serial peers and refresh RTT. 0 = off, max 18000s.</p>
+          </div>
+          <div class="settings-section">
+            <label for="settings-serial-announce-interval">Serial auto-announce interval (seconds)</label>
+            <input type="number" id="settings-serial-announce-interval" min="0" max="18000" step="1" value="0"
+              onchange="saveSerialAnnounceInterval()" onblur="saveSerialAnnounceInterval()">
+            <p class="field-hint">Periodic USB serial broadcast. 0 = off (use sidebar Announce Serial).</p>
           </div>
         </div>
 
@@ -1700,15 +1751,6 @@ body.android-shell.sidebar-open #sidebar-backdrop {
             </div>
           </div>
           <p id="settings-lan-transport-hint" class="field-hint" style="margin-top:12px">Restart chatxz after changing transport.</p>
-          <label id="auto-interface-toggle" class="settings-toggle-card" style="display:none;margin-top:14px">
-            <div class="toggle-text">
-              <strong>RNS AutoInterface</strong>
-              <span>IPv6 mesh discovery on Linux/macOS when UDP LAN is active.</span>
-            </div>
-            <div class="toggle-switch">
-              <input type="checkbox" id="settings-auto-interface" onchange="saveAutoInterface()">
-            </div>
-          </label>
         </div>
 
         <div class="settings-block net-serial-block" id="net-serial-panel">
@@ -1761,7 +1803,6 @@ body.android-shell.sidebar-open #sidebar-backdrop {
           <p class="block-lead">Destructive actions — use with care.</p>
           <div id="android-debug-log-hint" style="display:none;margin-bottom:14px;font-size:12px;color:var(--text2);line-height:1.5;word-break:break-all"></div>
           <div style="display:flex;flex-direction:column;gap:10px;max-width:320px">
-            <button type="button" class="btn-block danger" onclick="regenerateIdentity()">Regenerate identity</button>
             <button type="button" class="btn-block danger" onclick="restartServer()">Restart server</button>
           </div>
         </div>
@@ -1819,6 +1860,8 @@ let wsGen = 0;
 let wsReconnectTimer = null;
 let networkRefreshTimer = null;
 let myHash = '';
+let mySerialHash = '';
+window._serialActive = false;
 let viewingPeer = null;
 let linkPeer = null;
 let linkedPeers = new Set();
@@ -2131,12 +2174,28 @@ function applySettingsToForm(s, ifaces) {
   if (hubHost) hubHost.value = s.hub_host || '';
   const hubPort = document.getElementById('settings-hub-port');
   if (hubPort) hubPort.value = s.hub_port || 4242;
-  const autoIface = document.getElementById('settings-auto-interface');
-  if (autoIface) autoIface.checked = s.auto_interface_enabled !== false;
-  const autoAnn = document.getElementById('settings-auto-announce');
-  if (autoAnn) autoAnn.checked = !!s.auto_announce;
-  const probeEl = document.getElementById('settings-probe-interval');
-  if (probeEl) probeEl.value = String(s.probe_interval_s != null ? s.probe_interval_s : 30);
+  const lanProbeEl = document.getElementById('settings-lan-probe-interval');
+  if (lanProbeEl) {
+    const v = s.lan_probe_interval_s != null ? s.lan_probe_interval_s : s.probe_interval_s;
+    lanProbeEl.value = String(v != null ? v : 30);
+  }
+  const serialProbeEl = document.getElementById('settings-serial-probe-interval');
+  if (serialProbeEl) {
+    const v = s.serial_probe_interval_s != null ? s.serial_probe_interval_s : s.probe_interval_s;
+    serialProbeEl.value = String(v != null ? v : 30);
+  }
+  const lanAnnEl = document.getElementById('settings-lan-announce-interval');
+  if (lanAnnEl) {
+    let v = s.lan_announce_interval_s;
+    if (v == null && s.auto_announce) v = 30;
+    lanAnnEl.value = String(v != null ? v : 0);
+  }
+  const serialAnnEl = document.getElementById('settings-serial-announce-interval');
+  if (serialAnnEl) {
+    let v = s.serial_announce_interval_s;
+    if (v == null && s.auto_announce) v = 30;
+    serialAnnEl.value = String(v != null ? v : 0);
+  }
   onHubRoleChange();
   updateHubUi();
 }
@@ -2232,6 +2291,15 @@ function completeSetupWizard() {
     btn.textContent = 'Saving…';
   }
   const lan_interface = document.getElementById('setup-lan-interface')?.value || '';
+  if (!lan_interface) {
+    toast('Pick an IPv4 address for LAN chat');
+    document.getElementById('setup-lan-interface')?.focus();
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Get started';
+    }
+    return;
+  }
   const auto_announce = !!document.getElementById('setup-auto-announce')?.checked;
   const history_retention = document.getElementById('setup-retention')?.value || 'never';
   const received_dir = document.getElementById('setup-received-dir')?.value.trim() || '';
@@ -2260,7 +2328,7 @@ function completeSetupWizard() {
     updateHubUi();
     toast('Setup complete');
     maybeShowReleaseNotes(d.settings || {});
-    if (!auto_announce) toast('Tap 📡 Announce when ready to discover peers');
+    if (!auto_announce) toast('Tap 📡 Announce LAN when ready to discover peers');
   }).catch(() => toast('Setup failed'))
   .finally(() => {
     if (btn) {
@@ -2270,34 +2338,70 @@ function completeSetupWizard() {
   });
 }
 
-function saveAutoAnnounce() {
-  const enabled = !!document.getElementById('settings-auto-announce')?.checked;
+function clampIntervalInput(el, fallback, max) {
+  let sec = parseInt(el?.value, 10);
+  if (!Number.isFinite(sec)) sec = fallback;
+  sec = Math.max(0, Math.min(max || 18000, sec));
+  if (el) el.value = String(sec);
+  return sec;
+}
+
+function saveLanProbeInterval() {
+  const el = document.getElementById('settings-lan-probe-interval');
+  const sec = clampIntervalInput(el, 30);
   fetch('/api/settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({auto_announce: enabled}),
+    body: JSON.stringify({lan_probe_interval_s: sec}),
   }).then(r => r.json()).then(d => {
     if (d.status === 'ok') {
       window._appSettings = d.settings || {};
-      toast('Auto-announce ' + (enabled ? 'enabled' : 'disabled'));
+      toast(sec ? ('LAN link ping: ' + sec + 's') : 'LAN link ping: off');
     } else toast('Save failed: ' + (d.error || ''));
   }).catch(() => toast('Save failed'));
 }
 
-function saveProbeInterval() {
-  const el = document.getElementById('settings-probe-interval');
-  let sec = parseInt(el?.value, 10);
-  if (!Number.isFinite(sec)) sec = 30;
-  sec = Math.max(5, Math.min(300, sec));
-  if (el) el.value = String(sec);
+function saveSerialProbeInterval() {
+  const el = document.getElementById('settings-serial-probe-interval');
+  const sec = clampIntervalInput(el, 30);
   fetch('/api/settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({probe_interval_s: sec}),
+    body: JSON.stringify({serial_probe_interval_s: sec}),
   }).then(r => r.json()).then(d => {
     if (d.status === 'ok') {
       window._appSettings = d.settings || {};
-      toast('Link ping interval: ' + sec + 's');
+      toast(sec ? ('Serial link ping: ' + sec + 's') : 'Serial link ping: off');
+    } else toast('Save failed: ' + (d.error || ''));
+  }).catch(() => toast('Save failed'));
+}
+
+function saveLanAnnounceInterval() {
+  const el = document.getElementById('settings-lan-announce-interval');
+  const sec = clampIntervalInput(el, 0);
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({lan_announce_interval_s: sec}),
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') {
+      window._appSettings = d.settings || {};
+      toast(sec ? ('LAN auto-announce: ' + sec + 's') : 'LAN auto-announce: off');
+    } else toast('Save failed: ' + (d.error || ''));
+  }).catch(() => toast('Save failed'));
+}
+
+function saveSerialAnnounceInterval() {
+  const el = document.getElementById('settings-serial-announce-interval');
+  const sec = clampIntervalInput(el, 0);
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({serial_announce_interval_s: sec}),
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') {
+      window._appSettings = d.settings || {};
+      toast(sec ? ('Serial auto-announce: ' + sec + 's') : 'Serial auto-announce: off');
     } else toast('Save failed: ' + (d.error || ''));
   }).catch(() => toast('Save failed'));
 }
@@ -2424,7 +2528,8 @@ function filterContacts(query) {
   const q = (query || '').toLowerCase().trim();
   const filtered = q ? allContacts.filter(c => {
     const name = (c.name || c.hash || '').toLowerCase();
-    return name.includes(q) || (c.hash || '').toLowerCase().includes(q);
+    const hashes = [c.hash, c.lan_hash, c.serial_hash].filter(Boolean).join(' ').toLowerCase();
+    return name.includes(q) || hashes.includes(q);
   }) : allContacts;
   renderContacts(filtered);
 }
@@ -2552,6 +2657,41 @@ function loadHistoryForPeer(peerHash) {
     .catch(() => {});
 }
 
+function updateSerialAnnounceVisibility(active) {
+  window._serialActive = !!active;
+  ['announce-serial-btn', 'status-announce-serial-btn'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = active ? '' : 'none';
+  });
+  const showSerialIdentity = !!(mySerialHash || active);
+  ['settings-regen-serial-btn', 'identity-modal-regen-serial', 'identity-modal-copy-serial'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = showSerialIdentity ? '' : 'none';
+  });
+  const serialSection = document.getElementById('settings-serial-hash-section');
+  if (serialSection) serialSection.style.display = mySerialHash ? 'block' : 'none';
+  const serialBlock = document.getElementById('identity-modal-serial-block');
+  if (serialBlock) serialBlock.style.display = showSerialIdentity ? 'block' : 'none';
+}
+
+function updateIdentityDisplays() {
+  const lanLabel = formatHashDisplay(myHash);
+  const lanFull = stripHashColons(myHash);
+  const serialFull = stripHashColons(mySerialHash);
+  const box = document.getElementById('identity-box');
+  if (box) {
+    box.textContent = lanLabel;
+    let title = lanFull + ' — click to manage identity';
+    if (serialFull) title = lanFull + ' · serial ' + formatHashDisplay(mySerialHash) + ' — click to manage identity';
+    box.title = title;
+  }
+  const shLan = document.getElementById('settings-hash-lan');
+  if (shLan) shLan.value = lanFull;
+  const shSerial = document.getElementById('settings-hash-serial');
+  if (shSerial) shSerial.value = serialFull || '—';
+  updateSerialAnnounceVisibility(window._serialActive);
+}
+
 function fetchIdentity() {
   loadBrandLogo();
   fetch('/api/identity')
@@ -2562,13 +2702,12 @@ function fetchIdentity() {
         const nameEl = document.getElementById('settings-name');
         if (nameEl && !nameEl.value.trim()) nameEl.value = d.name;
       }
-      myHash = d.connect_hash || d.hash;
-      const label = formatHashDisplay(myHash);
-      document.getElementById('identity-box').textContent = label;
-      document.getElementById('identity-box').title = stripHashColons(myHash) + ' — click to manage identity';
+      window._identityLan = d.lan || {};
+      window._identitySerial = d.serial || null;
+      myHash = d.lan?.connect_hash || d.connect_hash || d.hash;
+      mySerialHash = d.serial?.connect_hash || '';
+      updateIdentityDisplays();
       updateAndroidDebugLogHint(d.debug_log_path);
-      const sh = document.getElementById('settings-hash');
-      if (sh) sh.value = myHash;
       renderContacts(d.contacts);
       renderDiscovered(d.discovered);
       if (d.app_version) {
@@ -2695,8 +2834,8 @@ function handleWSMessage(msg) {
     }
   } else if (msg.type === 'identity_changed') {
     const data = msg.data || {};
-    applyIdentityChange(data.hash, data.identity_hash, data.old_hash || data.old_identity_hash);
-    toast('Identity updated — tap Announce so peers see the new hash');
+    applyIdentityChange(data.hash, data.identity_hash, data.old_hash || data.old_identity_hash, data.role);
+    toast('Identity updated — tap Announce LAN or Serial so peers see the new hash');
   } else if (msg.type === 'peer_superseded') {
     const data = msg.data || {};
     const removed = data.removed || [];
@@ -3032,6 +3171,8 @@ function clearQueue() {
 function seedPeerAliasesFromContacts(contacts) {
   (contacts || []).forEach(c => {
     if (c.identity_hash) registerPeerAliases(c.hash, c.identity_hash);
+    if (c.lan_identity_hash) registerPeerAliases(c.lan_hash || c.hash, c.lan_identity_hash);
+    if (c.serial_identity_hash && c.serial_hash) registerPeerAliases(c.serial_hash, c.serial_identity_hash);
   });
 }
 
@@ -3042,8 +3183,63 @@ function rttForContact(contact) {
   );
 }
 
-function isSavedContact(peer) {
-  return allContacts.some(c => contactMatchesPeer(c, peer));
+function contactLanHash(c) {
+  return (c.lan_hash || c.hash || '').replace(/:/g, '');
+}
+
+function contactSerialHash(c) {
+  return (c.serial_hash || '').replace(/:/g, '');
+}
+
+function contactViewingActive(c) {
+  if (!viewingPeer) return false;
+  return [contactLanHash(c), contactSerialHash(c)].filter(Boolean)
+    .some(h => peersMatch(h, viewingPeer));
+}
+
+function discoveredForContactTransport(contact, via) {
+  const target = via === 'serial' ? contactSerialHash(contact) : contactLanHash(contact);
+  if (!target) return null;
+  return (window._discoveredPeers || []).find(p => {
+    const pVia = (p.via || '') === 'serial' ? 'serial' : 'lan';
+    if (pVia !== via) return false;
+    return peersMatch(p.hash, target) || peerKey(p.hash) === peerKey(target);
+  });
+}
+
+function rttForContactTransport(contact, via) {
+  const p = discoveredForContactTransport(contact, via);
+  const rtt = p?.rtt_avg_ms || p?.rtt_ms;
+  if (via === 'lan' && !rtt) return formatRtt(contact.rtt_avg_ms || contact.rtt_ms);
+  return formatRtt(rtt);
+}
+
+function renderContactTransportRow(contact, via) {
+  const hash = via === 'serial' ? contactSerialHash(contact) : contactLanHash(contact);
+  if (!hash) return '';
+  const label = via === 'serial' ? 'USB' : 'LAN';
+  const labelClass = via === 'serial' ? 'usb' : 'lan';
+  const p = discoveredForContactTransport(contact, via);
+  const linked = isPeerLinked(hash);
+  const rowActive = viewingPeer && peersMatch(viewingPeer, hash);
+  const rttHint = rttForContactTransport(contact, via);
+  const rttBadge = rttHint ? `<span class="peer-rtt">${escapeHtml(rttHint)}</span>` : '';
+  const ipHint = via === 'lan' && (p?.ip || contact.ip) ? ` · ${escapeHtml(p?.ip || contact.ip)}` : '';
+  return `<div class="contact-transport-row${rowActive ? ' active' : ''}" data-via="${via}">
+    <span class="contact-transport-label ${labelClass}">${label}</span>
+    <span class="contact-transport-hash">${truncateHash(hash)}${ipHint}${linked ? ' <span style="color:var(--success);font-size:10px">●</span>' : ''}${rttBadge}</span>
+  </div>`;
+}
+
+function isDiscoveredPeerSaved(peer) {
+  const isSerial = (peer.via || peer.transport || '') === 'serial';
+  const peerH = peerKey(peer.hash);
+  if (!peerH) return false;
+  return allContacts.some(c => {
+    const saved = isSerial ? c.serial_hash : (c.lan_hash || c.hash);
+    const savedH = peerKey(saved);
+    return savedH && (savedH === peerH || peersMatch(saved, peer.hash));
+  });
 }
 
 function renderContacts(contacts) {
@@ -3053,22 +3249,47 @@ function renderContacts(contacts) {
   el.innerHTML = '';
   contacts.forEach(c => {
     const div = document.createElement('div');
-    const name = c.name || c.hash;
-    const active = peersMatch(c.hash, viewingPeer);
-    const linked = isPeerLinked(c.hash);
-    const unread = unreadForPeer(c.hash);
-    const ipHint = c.ip ? ` · ${escapeHtml(c.ip)}` : '';
-    const rttHint = rttForContact(c);
-    const rttBadge = rttHint ? `<span class="peer-rtt">${escapeHtml(rttHint)}</span>` : '';
-    div.className = 'contact-item' + (active ? ' active' : '');
+    const name = c.name || contactLanHash(c) || c.hash;
+    const active = contactViewingActive(c);
+    const lanHash = contactLanHash(c);
+    const serialHash = contactSerialHash(c);
+    const unread = Math.max(
+      unreadForPeer(lanHash),
+      serialHash ? unreadForPeer(serialHash) : 0,
+      unreadForPeer(c.hash),
+    );
+    const lanRow = renderContactTransportRow(c, 'lan');
+    const serialRow = serialHash ? renderContactTransportRow(c, 'serial') : '';
+    const rows = lanRow + serialRow;
+    div.className = 'contact-item contact-card' + (active ? ' active' : '');
     div.innerHTML = `<div class="contact-avatar contact-avatar-saved">${escapeHtml(name).charAt(0).toUpperCase()}</div>
       <div class="contact-info">
-        <div class="contact-name">${escapeHtml(name)}${linked ? ' <span style="color:var(--success);font-size:10px">●</span>' : ''}${rttBadge}</div>
-        <div class="contact-hash">${truncateHash(c.hash)}${ipHint}</div>
+        <div class="contact-name">${escapeHtml(name)}</div>
+        ${rows
+          ? `<div class="contact-transport-rows">${rows}</div>`
+          : `<div class="contact-hash">${truncateHash(c.hash)}</div>`}
       </div>
       ${unread > 0 ? `<span class="contact-badge unread">${unread > 99 ? '99+' : unread}</span>` : ''}`;
-    div.onclick = () => openChat(c.hash, true, { ip: c.ip, port: c.port });
-    div.oncontextmenu = (e) => { e.preventDefault(); showActionPanel(e, c.hash); };
+    div.querySelectorAll('.contact-transport-row').forEach(row => {
+      row.onclick = (e) => {
+        e.stopPropagation();
+        const via = row.dataset.via;
+        const hash = via === 'serial' ? contactSerialHash(c) : contactLanHash(c);
+        const p = discoveredForContactTransport(c, via);
+        openChat(hash, true, {
+          via: via === 'serial' ? 'serial' : undefined,
+          ip: via === 'lan' ? (p?.ip || c.ip) : undefined,
+          port: p?.port || c.port,
+        });
+      };
+    });
+    if (!rows) {
+      div.onclick = () => openChat(c.hash, true, { ip: c.ip, port: c.port });
+    }
+    div.oncontextmenu = (e) => {
+      e.preventDefault();
+      showActionPanel(e, contactLanHash(c) || c.hash);
+    };
     el.appendChild(div);
   });
   const cc = document.getElementById('contacts-count');
@@ -3095,7 +3316,7 @@ function renderDiscovered(peers, opts) {
   el.innerHTML = '';
   let hasLink = linkedPeers.size > 0;
   let discovered = window._discoveredPeers
-    ? window._discoveredPeers.filter(p => !p.connected && !isSavedContact(p))
+    ? window._discoveredPeers.filter(p => !p.connected && !isDiscoveredPeerSaved(p))
     : [];
   let count = discovered.length;
   const linkCount = linkedPeers.size;
@@ -3103,7 +3324,7 @@ function renderDiscovered(peers, opts) {
   const dc = document.getElementById('discovered-count');
   if (dc) dc.textContent = count;
   if (!discovered || discovered.length === 0) {
-    el.innerHTML = '<div class="empty-state small"><span class="empty-icon">📡</span><span>No peers on LAN yet</span><span class="empty-hint">Try Announce to broadcast</span></div>';
+    el.innerHTML = '<div class="empty-state small"><span class="empty-icon">📡</span><span>No peers discovered yet</span><span class="empty-hint">Try Announce LAN or Serial</span></div>';
     if (!hasLink) return;
   }
   discovered.forEach(p => {
@@ -3111,18 +3332,19 @@ function renderDiscovered(peers, opts) {
     const div = document.createElement('div');
     const active = peersMatch(p.hash, viewingPeer);
     div.className = 'contact-item' + (active ? ' active' : '');
-    const name = p.name || truncateHash(p.hash);
+    const baseName = p.name || truncateHash(p.hash);
     const unread = unreadForPeer(p.hash);
     const linked = isPeerLinked(p.hash);
-    const isSerial = (p.via || '') === 'serial';
+    const isSerial = (p.via || p.transport || '') === 'serial';
     const transportLabel = isSerial ? 'USB' : 'LAN';
-    const transportHint = isSerial ? 'serial' : (p.ip ? escapeHtml(p.ip) : 'LAN');
+    const transportTag = isSerial ? ' · USB' : ' · LAN';
+    const transportHint = isSerial ? '' : (p.ip ? ' · ' + escapeHtml(p.ip) : '');
     const rttHint = formatRtt(p.rtt_avg_ms || p.rtt_ms);
     const rttBadge = rttHint ? `<span class="peer-rtt">${escapeHtml(rttHint)}</span>` : '';
-    div.innerHTML = `<div class="contact-avatar contact-avatar-lan">${escapeHtml(name).charAt(0).toUpperCase()}</div>
+    div.innerHTML = `<div class="contact-avatar contact-avatar-lan">${escapeHtml(baseName).charAt(0).toUpperCase()}</div>
       <div class="contact-info">
-        <div class="contact-name">${escapeHtml(name)}${linked ? ' <span style="color:var(--success);font-size:10px">●</span>' : ''}${rttBadge}</div>
-        <div class="contact-hash">${truncateHash(p.hash)}${transportHint ? ' · ' + transportHint : ''}</div>
+        <div class="contact-name">${escapeHtml(baseName)}${transportTag}${linked ? ' <span style="color:var(--success);font-size:10px">●</span>' : ''}${rttBadge}</div>
+        <div class="contact-hash">${truncateHash(p.hash)}${transportHint}</div>
       </div>
       ${unread > 0 ? `<span class="contact-badge unread">${unread > 99 ? '99+' : unread}</span>` : `<span class="contact-badge lan">${transportLabel}</span>`}`;
     div.onclick = () => openChat(p.hash, true, {
@@ -3158,11 +3380,36 @@ function peerMetaForHash(hash) {
   const key = peerKey(hash);
   const contact = allContacts.find(c =>
     peerKey(c.hash) === key
+    || peerKey(c.lan_hash) === key
+    || peerKey(c.serial_hash) === key
     || peerKey(c.identity_hash) === key
+    || peerKey(c.lan_identity_hash) === key
+    || peerKey(c.serial_identity_hash) === key
     || peersMatch(c.hash, hash)
+    || peersMatch(c.lan_hash, hash)
+    || peersMatch(c.serial_hash, hash)
     || peersMatch(c.identity_hash, hash)
   );
-  if (contact?.ip) return { hash: contact.hash, ip: contact.ip, port: contact.port || 8742 };
+  if (contact) {
+    if (peerKey(contact.serial_hash) === key || peersMatch(contact.serial_hash, hash)) {
+      const p = discoveredForContactTransport(contact, 'serial');
+      return {
+        hash: contact.serial_hash,
+        via: 'serial',
+        port: p?.port || contact.port || 8742,
+        identity_hash: contact.serial_identity_hash || contact.identity_hash,
+      };
+    }
+    const lanHash = contact.lan_hash || contact.hash;
+    const p = discoveredForContactTransport(contact, 'lan');
+    return {
+      hash: lanHash,
+      ip: contact.ip || p?.ip,
+      port: p?.port || contact.port || 8742,
+      identity_hash: contact.lan_identity_hash || contact.identity_hash,
+      via: p?.via,
+    };
+  }
   return (window._discoveredPeers || []).find(p =>
     peerKey(p.hash) === key
     || peerKey(p.identity_hash) === key
@@ -3213,6 +3460,7 @@ function doSaveContact() {
     ip: meta.ip || undefined,
     port: meta.port || undefined,
     identity_hash: meta.identity_hash || undefined,
+    via: meta.via || undefined,
   };
   fetch('/api/contacts', {
     method: 'POST',
@@ -3320,18 +3568,24 @@ function connectTo(hash, ip, port, via, opts) {
 
 let announceInFlight = false;
 
-function announceSelf() {
+function announceSelf(transport) {
   if (announceInFlight) return;
   announceInFlight = true;
-  toast('Starting announce...');
-  fetch('/api/announce', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'})
+  const t = (transport || 'lan').toLowerCase();
+  const viaLabel = t === 'serial' ? 'serial/USB' : 'LAN';
+  toast('Starting ' + viaLabel + ' announce...');
+  fetch('/api/announce', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({transport: t}),
+  })
     .then(async r => {
       const d = await r.json();
       if (r.ok && d.status === 'ok') {
         const hint = d.broadcast ? ` via ${d.broadcast}` : '';
         const found = d.discovered_count ? `, ${d.discovered_count} peer(s) seen` : '';
         const debounced = d.debounced ? ' (debounced — wait before tapping again)' : '';
-        toast('Announcing on LAN' + hint + found + debounced);
+        toast('Announcing on ' + viaLabel + hint + found + debounced);
         fetch('/api/discover').then(r => r.json()).then(p => renderDiscovered(p.peers)).catch(() => {});
         refreshNetworkStatus();
         return;
@@ -3560,20 +3814,6 @@ function toggleRnsInterfaceEnabled(id, enabled) {
   });
 }
 
-function saveAutoInterface() {
-  const enabled = !!document.getElementById('settings-auto-interface')?.checked;
-  fetch('/api/settings', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({auto_interface_enabled: enabled}),
-  }).then(r => r.json()).then(d => {
-    if (d.status === 'ok') {
-      toast('AutoInterface ' + (enabled ? 'enabled' : 'disabled') + ' — restart chatxz to apply');
-      refreshNetworkStatus();
-    } else toast('Save failed: ' + (d.error || ''));
-  }).catch(() => toast('Save failed'));
-}
-
 function saveTcpInterface(id) {
   const hostEl = document.querySelector(`input[data-tcp-host="${id}"]`);
   const portEl = document.querySelector(`input[data-tcp-port="${id}"]`);
@@ -3654,13 +3894,9 @@ function loadRnsInterfaces() {
       ? displayItems.map(iface => renderRnsInterfaceRow(iface, window._serialPorts, baudRates)).join('')
       : '';
     updateLanTransportSelect(items);
-    const autoToggle = document.getElementById('auto-interface-toggle');
-    const autoCb = document.getElementById('settings-auto-interface');
-    const hasUdp = items.some(i => (i.preset === 'udp_lan' || i.type === 'UDPInterface') && i.enabled !== false);
-    if (autoToggle && autoCb) {
-      const showAuto = hasUdp && appPlatform !== 'android' && appPlatform !== 'windows';
-      autoToggle.style.display = showAuto ? 'flex' : 'none';
-    }
+    const serialActive = items.some(i =>
+      (i.preset === 'serial' || i.type === 'SerialInterface') && i.serial_active);
+    updateSerialAnnounceVisibility(serialActive);
   }).catch(() => { list.textContent = 'Failed to load interfaces.'; });
 }
 
@@ -3840,8 +4076,7 @@ function openSettings(section) {
   ]).then(([s, ifaces]) => {
     window._appSettings = s;
     applySettingsToForm(s, ifaces);
-    const sh = document.getElementById('settings-hash');
-    if (sh) sh.value = myHash;
+    updateIdentityDisplays();
   });
 }
 
@@ -3910,7 +4145,7 @@ function lanInterfaceMatchesPinned(iface, pinned) {
 }
 
 function formatLanInterfacePinned(pinned) {
-  if (!pinned) return 'auto';
+  if (!pinned) return 'not pinned';
   const sep = pinned.indexOf('|');
   if (sep >= 0) {
     const name = pinned.slice(0, sep);
@@ -3932,7 +4167,7 @@ function selectLanInterfaceValue(sel, interfaces, selected) {
 }
 
 function lanInterfaceSelectHtml(interfaces) {
-  let html = '<option value="">Auto — prefer Wi-Fi / Ethernet over VPN</option>';
+  let html = '<option value="" disabled>Pick an interface…</option>';
   const items = (interfaces || []).filter(i => i?.name);
   if (!items.length) {
     html += '<option value="" disabled>(no IPv4 found — click ↻ to rescan)</option>';
@@ -3960,6 +4195,8 @@ function peerMergeKey(p) {
 function contactMatchesPeer(c, p) {
   if (!c || !p) return false;
   if (peersMatch(c.hash, p.hash)) return true;
+  if (c.lan_hash && peersMatch(c.lan_hash, p.hash)) return true;
+  if (c.serial_hash && peersMatch(c.serial_hash, p.hash)) return true;
   if (p.identity_hash && (peersMatch(c.identity_hash, p.hash) || peersMatch(c.hash, p.identity_hash))) return true;
   if (c.identity_hash && p.identity_hash && peerKey(c.identity_hash) === peerKey(p.identity_hash)) return true;
   const cn = (c.name || '').trim().toLowerCase();
@@ -4104,8 +4341,8 @@ function saveLanInterface() {
       if (d.settings?.lan_interface !== undefined) {
         window._appSettings = { ...(window._appSettings || {}), ...d.settings };
       }
-      const label = lan_interface ? formatLanInterfacePinned(lan_interface) : 'auto';
-      toast(lan_interface ? `LAN pinned to ${label} — links cleared` : 'LAN auto — active links cleared');
+      const label = lan_interface ? formatLanInterfacePinned(lan_interface) : 'not set';
+      toast(lan_interface ? `LAN pinned to ${label} — links cleared` : 'Pick an IPv4 interface in Settings → Network');
       refreshLanInterfaces(true);
       refreshNetworkStatus(true);
       if (activePeer) { activePeer = null; updatePeerUI(); }
@@ -4162,8 +4399,10 @@ function refreshNetworkStatus(silent) {
       if (d.lan_interface) {
         html += row('LAN IPv4', formatLanInterfacePinned(d.lan_interface), !!d.lan_connected);
       } else {
-        html += row('LAN IPv4', 'auto', true);
+        html += row('LAN IPv4', 'not pinned', false);
       }
+      updateSerialAnnounceVisibility(!!d.serial_in_rns || !!(Array.isArray(d.configured_interfaces) && d.configured_interfaces.some(i =>
+        (i.preset === 'serial' || i.type === 'SerialInterface') && i.serial_active)));
       const lanDiscovery = d.lan_discovery_configured !== false;
       const serialOnly = !!d.serial_only_mode;
       const lanConnected = lanDiscovery && d.lan_connected !== false && !!d.lan_ip
@@ -4231,7 +4470,7 @@ function refreshNetworkStatus(silent) {
       const probeHint = 'One Announce sends directed broadcasts plus a small unicast sweep (~45 hosts on Android, ~25 on desktop) — not a full /24 scan.';
       html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);line-height:1.45">' + probeHint + ' Counters start at 0 on launch. <strong>Reset network</strong> zeros session counters. <strong>Received</strong> counts foreign peers only.</div>';
       html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45"><strong>Link active</strong> = encrypted RNS session open. <strong>Inactive</strong> = no session — connect to a peer or wait for incoming. Connect waits for RNS announce, then times out in ~10s if the peer is offline.</div>';
-      html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45">Announce and beacon are <strong>manual only</strong> — use the Announce button. Connect uses reverse-connect for Android when outbound link fails.</div>';
+      html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45">Use <strong>Announce LAN</strong> and <strong>Announce Serial</strong> for manual discovery (or set auto-announce intervals in Network settings). Connect uses reverse-connect for Android when outbound link fails.</div>';
       html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45"><strong>Dual-path failover:</strong> with USB serial + LAN both configured, chat auto-reconnects over the other path when one drops (serial unplugged → LAN/AutoInterface; LAN lost → serial). Both machines need the same version. Serial must show <strong>Serial in RNS: yes</strong> before LAN→serial failover works.</div>';
       html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45"><strong>AutoInterface</strong> is RNS LAN mesh (IPv6 link-local on your NIC) — not a bypass. VPN disconnect does not kill physical LAN; chat may stay up on enp2s0/wlan0.</div>';
       html += '<div style="margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45">Beacon UDP 8743 = LAN discovery helper. RNS UDP 4242 + AutoInterface + Serial = encrypted chat paths. HTTP 8742 = this web UI only.</div>';
@@ -4255,19 +4494,6 @@ function refreshNetworkStatus(silent) {
         } else if (d.serial_group_access === false) {
           html += row('Serial groups', 'dialout not active — use ./run.sh web', false);
         }
-      }
-      const allIfaces = d.available_interfaces || d.interfaces || [];
-      if (Array.isArray(allIfaces) && allIfaces.length) {
-        html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">Interfaces</div>';
-        allIfaces.forEach(iface => {
-          const pinned = d.lan_interface && lanInterfaceMatchesPinned(iface, d.lan_interface);
-          const active = !d.lan_interface || pinned;
-          const kind = iface.kind && iface.kind !== 'other' ? ` · ${iface.kind}` : '';
-          const label = pinned ? ' (pinned for LAN)' : (active ? '' : ' (not used for LAN)');
-          html += `<div class="net-iface"><strong>${escapeHtml(iface.name || 'iface')}</strong>${escapeHtml(kind)}${escapeHtml(label)} — ${escapeHtml(iface.ip || '?')}`;
-          if (iface.broadcast) html += `<div style="font-size:10px;color:var(--text3);margin-top:4px">bcast ${escapeHtml(iface.broadcast)}</div>`;
-          html += '</div>';
-        });
       }
       if (Array.isArray(d.rns_interfaces) && d.rns_interfaces.length) {
         html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">RNS interfaces</div>';
@@ -4383,14 +4609,17 @@ function saveSettings() {
   const hub_role = document.getElementById('settings-hub-role')?.value || 'off';
   const hub_host = document.getElementById('settings-hub-host')?.value.trim() || '';
   const hub_port = parseInt(document.getElementById('settings-hub-port')?.value, 10) || 4242;
-  const auto_announce = !!document.getElementById('settings-auto-announce')?.checked;
-  let probe_interval_s = parseInt(document.getElementById('settings-probe-interval')?.value, 10);
-  if (!Number.isFinite(probe_interval_s)) probe_interval_s = 30;
-  probe_interval_s = Math.max(5, Math.min(300, probe_interval_s));
+  const lan_probe_interval_s = clampIntervalInput(document.getElementById('settings-lan-probe-interval'), 30);
+  const serial_probe_interval_s = clampIntervalInput(document.getElementById('settings-serial-probe-interval'), 30);
+  const lan_announce_interval_s = clampIntervalInput(document.getElementById('settings-lan-announce-interval'), 0);
+  const serial_announce_interval_s = clampIntervalInput(document.getElementById('settings-serial-announce-interval'), 0);
   fetch('/api/settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name, history_retention: retention, received_dir, hub_role, hub_host, hub_port, auto_announce, probe_interval_s})
+    body: JSON.stringify({
+      name, history_retention: retention, received_dir, hub_role, hub_host, hub_port,
+      lan_probe_interval_s, serial_probe_interval_s, lan_announce_interval_s, serial_announce_interval_s,
+    })
   }).then(async r => {
     const d = await r.json();
     if (r.ok && d.status === 'ok') {
@@ -5238,28 +5467,33 @@ function pickReceivedDirFallback(input) {
   }
 }
 
-function regenerateIdentity() {
-  if (!confirm('Generate a new identity? The old one will be deleted. All peers will need to reconnect with the new hash.')) return;
-  fetch('/api/identity/regenerate', {method: 'POST'})
+function regenerateIdentity(role) {
+  role = (role || 'lan').toLowerCase();
+  const label = role === 'serial' ? 'serial/USB' : 'LAN';
+  if (!confirm(`Generate a new ${label} identity? The old ${label} hash will be deleted. Peers on that transport will need to reconnect.`)) return;
+  fetch('/api/identity/regenerate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({role}),
+  })
     .then(r => r.json())
     .then(d => {
       if (d.status === 'ok') {
-        applyIdentityChange(d.new_hash, d.identity_hash || d.new_hash, d.old_hash);
-        toast(d.live ? 'Identity updated live — tap Announce to advertise' : 'New identity saved');
+        const announceHint = role === 'serial' ? 'Announce Serial' : 'Announce LAN';
+        toast(d.live ? `${label} identity updated — tap ${announceHint} to advertise` : `New ${label} identity saved`);
+        fetchIdentity();
       } else {
         toast('Failed: ' + (d.error || ''));
       }
     });
 }
 
-function applyIdentityChange(newHash, identityHash, oldHash) {
+function applyIdentityChange(newHash, identityHash, oldHash, role) {
+  role = (role || 'lan').toLowerCase();
   const clean = stripHashColons(newHash || identityHash || '');
-  myHash = clean;
-  document.getElementById('settings-hash').value = clean;
-  document.getElementById('identity-box').textContent = formatHashDisplay(clean);
-  document.getElementById('identity-box').title = clean + ' (click to copy)';
-  const sh = document.getElementById('settings-hash');
-  if (sh) sh.value = clean;
+  if (role === 'serial') mySerialHash = clean;
+  else myHash = clean;
+  updateIdentityDisplays();
   if (oldHash) {
     const oldKey = peerKey(oldHash);
     linkedPeers.delete(oldKey);
@@ -5507,8 +5741,11 @@ function pickBrandLogo() {
 
 function openIdentityModal() {
   const overlay = document.getElementById('identity-modal-overlay');
-  const hashEl = document.getElementById('identity-modal-hash');
-  if (hashEl) hashEl.textContent = stripHashColons(myHash) || '—';
+  const lanEl = document.getElementById('identity-modal-hash-lan');
+  const serialEl = document.getElementById('identity-modal-hash-serial');
+  if (lanEl) lanEl.textContent = stripHashColons(myHash) || '—';
+  if (serialEl) serialEl.textContent = stripHashColons(mySerialHash) || '—';
+  updateSerialAnnounceVisibility(window._serialActive);
   overlay?.classList.add('open');
 }
 
@@ -5517,14 +5754,21 @@ function closeIdentityModal(event) {
   document.getElementById('identity-modal-overlay')?.classList.remove('open');
 }
 
-function copyIdentityFromModal() {
-  const text = stripHashColons(myHash);
-  navigator.clipboard.writeText(text).then(() => toast('Identity copied!'));
+function copyIdentityFromModal(role) {
+  role = (role || 'lan').toLowerCase();
+  const text = role === 'serial' ? stripHashColons(mySerialHash) : stripHashColons(myHash);
+  if (!text) {
+    toast('No hash to copy');
+    return;
+  }
+  navigator.clipboard.writeText(text).then(() => {
+    toast((role === 'serial' ? 'Serial' : 'LAN') + ' hash copied!');
+  });
 }
 
-function regenerateIdentityFromModal() {
+function regenerateIdentityFromModal(role) {
   closeIdentityModal();
-  regenerateIdentity();
+  regenerateIdentity(role || 'lan');
 }
 
 function copyIdentity() {

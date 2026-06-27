@@ -15,6 +15,32 @@ def _contact_path(config_dir, peer_hash):
     return os.path.join(contacts_dir(config_dir), clean)
 
 
+def normalize_contact(entry):
+    """Ensure dual-hash fields exist (v0.5 migration)."""
+    if not entry:
+        return entry
+    h = (entry.get("hash") or "").replace(":", "")
+    lan = (entry.get("lan_hash") or "").replace(":", "")
+    serial = (entry.get("serial_hash") or "").replace(":", "")
+    if h and not lan and not serial:
+        entry["lan_hash"] = h
+        lan = h
+    if lan and not entry.get("hash"):
+        entry["hash"] = lan
+    if lan and not entry.get("identity_hash") and entry.get("lan_identity_hash"):
+        entry["identity_hash"] = entry["lan_identity_hash"]
+    return entry
+
+
+def contact_primary_hash(contact):
+    c = normalize_contact(contact or {})
+    return (
+        (c.get("lan_hash") or "").replace(":", "")
+        or (c.get("serial_hash") or "").replace(":", "")
+        or (c.get("hash") or "").replace(":", "")
+    )
+
+
 def load_contact(config_dir, filename):
     path = os.path.join(contacts_dir(config_dir), filename)
     if not os.path.isfile(path):
@@ -23,37 +49,84 @@ def load_contact(config_dir, filename):
         with open(path) as fh:
             raw = fh.read().strip()
         if not raw:
-            return {"hash": filename, "name": filename}
+            return normalize_contact({"hash": filename, "name": filename})
         if raw.startswith("{"):
             data = json.loads(raw)
             if isinstance(data, dict):
                 data.setdefault("hash", filename)
                 data.setdefault("name", filename)
-                return data
-        return {"hash": filename, "name": raw}
+                return normalize_contact(data)
+        return normalize_contact({"hash": filename, "name": raw})
     except Exception:
-        return {"hash": filename, "name": filename}
+        return normalize_contact({"hash": filename, "name": filename})
 
 
-def save_contact(config_dir, peer_hash, name=None, ip=None, port=None, identity_hash=None):
+def save_contact(
+    config_dir,
+    peer_hash,
+    name=None,
+    ip=None,
+    port=None,
+    identity_hash=None,
+    via=None,
+    lan_hash=None,
+    serial_hash=None,
+    lan_identity_hash=None,
+    serial_identity_hash=None,
+):
     clean = (peer_hash or "").strip().replace(":", "")
     if not clean:
         raise ValueError("hash required")
-    existing = load_contact(config_dir, clean) or {"hash": clean, "name": clean}
-    if name is not None and str(name).strip():
-        existing["name"] = str(name).strip()
-    if ip is not None and str(ip).strip():
-        existing["ip"] = str(ip).strip()
-    if port is not None:
-        try:
-            existing["port"] = int(port)
-        except (TypeError, ValueError):
-            pass
-    if identity_hash is not None and str(identity_hash).strip():
-        existing["identity_hash"] = str(identity_hash).strip().replace(":", "")
-    path = _contact_path(config_dir, clean)
+    transport = (via or "lan").strip().lower()
+    is_serial = transport == "serial"
+    display = str(name).strip() if name is not None and str(name).strip() else None
+
+    merged = None
+    if display:
+        for c in list_contacts(config_dir):
+            if (c.get("name") or "").strip().lower() == display.lower():
+                merged = dict(normalize_contact(c))
+                break
+
+    existing = merged or load_contact(config_dir, clean) or {"hash": clean, "name": clean or display}
+    existing = normalize_contact(existing)
+    if display:
+        existing["name"] = display
+    if is_serial:
+        existing["serial_hash"] = clean
+        if serial_hash:
+            existing["serial_hash"] = str(serial_hash).strip().replace(":", "")
+        if identity_hash or serial_identity_hash:
+            existing["serial_identity_hash"] = str(
+                serial_identity_hash or identity_hash
+            ).strip().replace(":", "")
+    else:
+        existing["lan_hash"] = lan_hash or clean
+        existing["hash"] = existing["lan_hash"]
+        if identity_hash or lan_identity_hash:
+            ident = str(lan_identity_hash or identity_hash).strip().replace(":", "")
+            existing["lan_identity_hash"] = ident
+            existing["identity_hash"] = ident
+        if ip is not None and str(ip).strip():
+            existing["ip"] = str(ip).strip()
+        if port is not None:
+            try:
+                existing["port"] = int(port)
+            except (TypeError, ValueError):
+                pass
+    if lan_hash:
+        existing["lan_hash"] = str(lan_hash).strip().replace(":", "")
+        existing["hash"] = existing["lan_hash"]
+    if serial_hash:
+        existing["serial_hash"] = str(serial_hash).strip().replace(":", "")
+
+    file_key = contact_primary_hash(existing) or clean
+    old_key = clean if clean != file_key else None
+    path = _contact_path(config_dir, file_key)
     with open(path, "w") as fh:
         json.dump(existing, fh, indent=2)
+    if old_key and old_key != file_key:
+        delete_contact(config_dir, old_key)
     return existing
 
 
