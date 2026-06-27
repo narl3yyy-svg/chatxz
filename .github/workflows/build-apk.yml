@@ -82,14 +82,19 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: chatxz v${{ steps.version.outputs.version }}
           body: |
+            ## chatxz v${{ steps.version.outputs.version }}
+
+            See [CHANGELOG.md](https://github.com/narl3yyy-svg/chatxz/blob/main/CHANGELOG.md) for full release notes.
+
             ## Download
 
             | Platform | Install |
             |----------|---------|
             | **Android** | `${{ steps.version.outputs.apk }}` — sideload (arm64) |
             | **Windows** | `git clone` → `run.bat web --share` |
-            | **macOS / Linux** | `git clone` → `bash scripts/install-macos.sh` or `install-arch.sh` → `./run.sh web --share` |
+            | **macOS** | `git clone` → `bash scripts/install-macos.sh` → `./run.sh web --share` |
+            | **Arch / Ubuntu** | `git clone` → `bash scripts/install-arch.sh` or `install-ubuntu.sh` → `./run.sh web --share` |
 
-            Desktop: clone repo and run — Windows `run.bat web --share` (cmd), macOS/Linux `./run.sh web --share`. Releases ship the Android APK only.
+            Desktop: clone repo and run. CI releases ship the Android APK only.
           files: ${{ steps.version.outputs.apk }}
           make_latest: true
