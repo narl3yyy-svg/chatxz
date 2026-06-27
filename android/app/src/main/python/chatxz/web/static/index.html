@@ -3608,7 +3608,12 @@ function announceSelf(transport) {
     .then(async r => {
       const d = await r.json();
       if (r.ok && d.status === 'ok') {
-        const hint = d.broadcast ? ` via ${d.broadcast}` : '';
+        let hint = '';
+        if (t === 'serial') {
+          hint = d.serial_port ? ` on ${d.serial_port}` : ' on USB serial';
+        } else if (d.broadcast) {
+          hint = ` via ${d.broadcast}`;
+        }
         const found = d.discovered_count ? `, ${d.discovered_count} peer(s) seen` : '';
         const debounced = d.debounced ? ' (debounced — wait before tapping again)' : '';
         toast('Announcing on ' + viaLabel + hint + found + debounced);

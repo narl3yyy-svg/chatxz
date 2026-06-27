@@ -81,12 +81,13 @@ class SerialConnectPreferenceTests(unittest.TestCase):
         backend._connect_in_progress = True
         backend.destination = MagicMock()
         with patch.object(backend, "_serial_transport_ready", return_value=True):
-            with patch.object(backend, "_announce_on_interface", return_value=True) as announce:
-                with patch("chatxz.core.messaging.serial_interface_online", return_value=MagicMock(port="/dev/ttyUSB0")):
-                    with patch("chatxz.core.messaging.suppress_offline_lan_transports"):
-                        with patch("chatxz.core.messaging.dedupe_serial_interfaces"):
-                            with patch("chatxz.core.messaging.prune_dead_serial_interfaces"):
-                                sent = backend._burst_serial_announce(count=1, force=True)
+            with patch.object(backend, "ensure_serial_runtime", return_value=True):
+                with patch.object(backend, "_announce_on_interface", return_value=True) as announce:
+                    with patch("chatxz.core.messaging.serial_interface_online", return_value=MagicMock(port="/dev/ttyUSB0")):
+                        with patch("chatxz.core.messaging.suppress_offline_lan_transports"):
+                            with patch("chatxz.core.messaging.dedupe_serial_interfaces"):
+                                with patch("chatxz.core.messaging.prune_dead_serial_interfaces"):
+                                    sent = backend._burst_serial_announce(count=1, force=True)
         self.assertEqual(sent, 1)
         announce.assert_called()
 
@@ -302,8 +303,9 @@ class FailoverPreferenceTests(unittest.TestCase):
     def test_on_serial_transport_attached_announces(self):
         backend = self._backend()
         backend.destination = MagicMock()
-        with patch.object(backend, "_burst_serial_announce", return_value=3) as burst:
-            backend.on_serial_transport_attached(MagicMock(port="/dev/ttyUSB0"))
+        with patch.object(backend, "ensure_serial_runtime", return_value=True):
+            with patch.object(backend, "_burst_serial_announce", return_value=3) as burst:
+                backend.on_serial_transport_attached(MagicMock(port="/dev/ttyUSB0"))
         burst.assert_called_once()
 
     def test_queue_send_link_honors_serial_hint_over_udp(self):

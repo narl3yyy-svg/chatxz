@@ -1617,6 +1617,7 @@ class ChatWebServer:
             on_peer_evicted=self._on_peer_evicted,
         )
         self.discovery.start()
+        self._sync_discovery_local_hashes()
         if lan_discovery_configured(interfaces) or configured_serial_enabled(interfaces):
             self.discovery.enable_discovery(clear=False)
             if configured_serial_enabled(interfaces) and not lan_discovery_configured(interfaces):
@@ -2046,6 +2047,22 @@ class ChatWebServer:
                 ):
                     return self._peer_dest_hash(peer.get("hash"))
         return clean
+
+    def _sync_discovery_local_hashes(self):
+        """Teach discovery to ignore our own LAN + serial hashes (USB loopback)."""
+        if not self.discovery:
+            return
+        hashes = []
+        if self.messaging:
+            hashes.append(getattr(self.messaging, "my_dest_hash", None))
+            hashes.append(getattr(self.messaging, "my_dest_hash_serial", None))
+        if self.identity_mgr:
+            hashes.append(self.identity_mgr.get_hex_hash("lan"))
+            hashes.append(self.identity_mgr.get_hex_hash("serial"))
+            hashes.append(self.identity_mgr.get_connect_hash("lan"))
+            hashes.append(self.identity_mgr.get_connect_hash("serial"))
+        hashes.append(self._clean_hash(self.destination_hash))
+        self.discovery.set_local_hashes(*hashes)
 
     def _on_peer_evicted(self, removed_hashes, new_peer=None):
         if not removed_hashes:
@@ -3122,6 +3139,13 @@ class ChatWebServer:
                         await self._run_blocking(
                             self.messaging.on_serial_transport_attached, iface,
                         )
+                        self._sync_discovery_local_hashes()
+                    if self._loop and not self._shutting_down:
+                        peers = self._scoped_peers()
+                        asyncio.run_coroutine_threadsafe(
+                            self._broadcast({"type": "peers", "data": peers}),
+                            self._loop,
+                        )
 
     def _peer_in_discovery(self, peer_hash, peer_ip=None):
         from chatxz.core.discovery import normalize_hash
@@ -3532,6 +3556,8 @@ class ChatWebServer:
         now = time.time()
         debounced = False
         beacon_sent = 0
+        serial_sent = 0
+        serial_port = ""
         try:
             with self._announce_lock:
                 if now - self._last_announce_at < self.ANNOUNCE_DEBOUNCE_SEC:
@@ -3544,11 +3570,13 @@ class ChatWebServer:
                     do_lan = transport in ("lan", "all")
                     do_serial = transport in ("serial", "usb", "all")
                     if do_serial and configured_serial_enabled(configured):
-                        sent = await asyncio.to_thread(
+                        serial_sent = await asyncio.to_thread(
                             self.messaging._burst_serial_announce, 1, force=True,
                         )
-                        if sent:
+                        if serial_sent:
+                            self._sync_discovery_local_hashes()
                             print("[network] Serial RNS announce")
+                        serial_port, _ = configured_serial_port(configured)
                     if do_lan and lan_discovery_configured(configured):
                         await asyncio.to_thread(
                             self.messaging._silent_announce, also_serial=False,
@@ -3568,16 +3596,22 @@ class ChatWebServer:
         peers = await self._broadcast_peers(authoritative=True)
         if debounced and self.lan_beacon:
             beacon_sent = self.lan_beacon.last_announce_sent
+        do_lan = transport in ("lan", "all")
+        do_serial = transport in ("serial", "usb", "all")
         return {
             "ok": True,
             "debounced": debounced,
-            "broadcast": lan_broadcast(),
-            "beacon_port": BEACON_PORT,
-            "beacon_sent": beacon_sent,
+            "transport": transport,
+            "broadcast": lan_broadcast() if do_lan else None,
+            "serial_port": serial_port if do_serial else None,
+            "serial_announced": bool(serial_sent),
+            "lan_announced": do_lan,
+            "beacon_port": BEACON_PORT if do_lan else None,
+            "beacon_sent": beacon_sent if do_lan else 0,
             "beacon_session_total": (
                 self.lan_beacon.packets_sent if self.lan_beacon else 0
             ),
-            "lan_ip": detect_lan_ip(),
+            "lan_ip": detect_lan_ip() if do_lan else None,
             "discovered_count": len(peers),
         }
 
@@ -3597,7 +3631,11 @@ class ChatWebServer:
         return web.json_response({
             "status": "ok",
             "debounced": result.get("debounced", False),
+            "transport": result.get("transport"),
             "broadcast": result.get("broadcast"),
+            "serial_port": result.get("serial_port"),
+            "serial_announced": result.get("serial_announced", False),
+            "lan_announced": result.get("lan_announced", False),
             "beacon_port": result.get("beacon_port"),
             "beacon_sent": result.get("beacon_sent", 0),
             "beacon_session_total": result.get("beacon_session_total", 0),
@@ -4028,6 +4066,7 @@ class ChatWebServer:
             peers = self._scoped_peers()
             await self._broadcast({"type": "peers", "data": peers})
 
+        self._sync_discovery_local_hashes()
         print(
             f"[identity] Live identity update: {old_dest[:16] or old_ident[:16]}... "
             f"-> {(my_dest_clean or my_ident_clean)[:16]}..."

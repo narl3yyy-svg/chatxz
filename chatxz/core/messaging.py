@@ -285,9 +285,34 @@ class MessagingBackend:
         return False
 
     def _destination_for_interface(self, iface):
-        if iface and is_serial_interface(iface) and self.destination_serial:
+        if iface and is_serial_interface(iface):
             return self.destination_serial
         return self.destination
+
+    def ensure_serial_runtime(self):
+        """Create serial identity + inbound destination when USB comes online."""
+        if self.destination_serial and self.identity_serial:
+            return True
+        try:
+            from chatxz.core.identity import IdentityManager
+            mgr = IdentityManager(self.config_dir)
+            mgr.load_or_create(serial_enabled=True)
+            if mgr.identity_serial:
+                self.identity_serial = mgr.identity_serial
+        except Exception as e:
+            print(f"[identity] Serial runtime setup failed: {e}")
+            return False
+        if not self.identity_serial:
+            return False
+        if not self.destination_serial:
+            self.destination_serial = self._setup_inbound_destination(
+                self.identity_serial, "destination_serial",
+            )
+            self.my_dest_hash_serial = normalize_hash(
+                RNS.hexrep(self.destination_serial.hash),
+            )
+            print(f"[identity] Serial endpoint {self.my_dest_hash_serial[:16]}...")
+        return bool(self.destination_serial)
 
     def _local_connect_hash_for_interface(self, iface):
         if iface and is_serial_interface(iface) and self.my_dest_hash_serial:
@@ -1258,6 +1283,19 @@ class MessagingBackend:
 
     def _failover_families_to_try(self, peer, peer_ip=None):
         """Ordered transports to attempt when reconnecting (LAN preferred unless serial is faster)."""
+        raw_session = (self._session_transport or "").strip().lower()
+        session_transport = self._normalize_transport(raw_session) if raw_session else None
+        if session_transport == "serial" and self._serial_transport_ready():
+            return ["serial"]
+        if session_transport == "lan":
+            interfaces = load_settings_interfaces(self.config_dir)
+            udp_lan = configured_udp_lan_enabled(interfaces)
+            tcp_lan = configured_tcp_lan_enabled(interfaces)
+            if tcp_lan and not udp_lan:
+                return ["tcp"]
+            if udp_lan:
+                return ["udp", "tcp"] if tcp_lan else ["udp"]
+            return ["udp", "tcp", "lan"]
         if self._hub_transport_active() and self._peer_uses_hub_transport(peer):
             return ["tcp"]
         meta = self._peer_discovery_meta(peer)
@@ -2436,7 +2474,10 @@ class MessagingBackend:
             return
         if self._has_active_transfer():
             return
-        sent = self._burst_serial_announce(count=1)
+        if not self.ensure_serial_runtime():
+            print("[serial] USB attached but serial identity not ready")
+            return
+        sent = self._burst_serial_announce(count=1, force=True)
         if sent:
             port = getattr(iface, "port", "?") if iface else "?"
             print(f"[serial] Auto-announced on serial attach ({port})")
@@ -2513,6 +2554,8 @@ class MessagingBackend:
             return True
 
     def _announce_on_interface(self, iface, app_data=None):
+        if is_serial_interface(iface) and not self.ensure_serial_runtime():
+            return False
         dest = self._destination_for_interface(iface)
         if not dest or not iface:
             return False
@@ -2525,12 +2568,18 @@ class MessagingBackend:
             except Exception:
                 pass
         dest.announce(app_data=data, attached_interface=iface)
-        try:
-            ident = self.identity_serial if is_serial_interface(iface) and self.identity_serial else self.identity
-            if ident:
-                ident.announce(attached_interface=iface)
-        except Exception:
-            pass
+        if is_serial_interface(iface):
+            try:
+                if self.identity_serial:
+                    self.identity_serial.announce(attached_interface=iface)
+            except Exception:
+                pass
+        else:
+            try:
+                if self.identity:
+                    self.identity.announce(attached_interface=iface)
+            except Exception:
+                pass
         return True
 
     def _fallback_announce(self, announce_data):
@@ -2554,7 +2603,7 @@ class MessagingBackend:
             return 0
         if not self._serial_transport_ready():
             return 0
-        if not self.destination_serial and not self.destination:
+        if not self.ensure_serial_runtime():
             return 0
         suppress_offline_lan_transports()
         dedupe_serial_interfaces()
@@ -3042,7 +3091,12 @@ class MessagingBackend:
         except Exception as e:
             print(f"[connect] Link failed: {e}")
         finally:
-            if not self._peer_link_active(dest_hex, clean):
+            active = False
+            try:
+                active = link and link.status == RNS.Link.ACTIVE
+            except Exception:
+                active = False
+            if not active and not self._peer_link_active(dest_hex, clean):
                 self._teardown_outbound_attempt(link)
         if self._adopt_healthy_peer_link(dest_hex):
             return True

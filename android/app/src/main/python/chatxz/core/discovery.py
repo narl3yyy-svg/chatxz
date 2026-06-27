@@ -86,6 +86,28 @@ class PeerDiscovery:
         self.on_peer_evicted = on_peer_evicted
         self._last_log = {}
         self.accept_peers = False
+        self._local_hashes = set()
+
+    def set_local_hashes(self, *hashes):
+        """Ignore our own LAN/serial destination and identity hashes in discovery."""
+        clean = set()
+        for raw in hashes:
+            h = normalize_hash(raw)
+            if h:
+                clean.add(h)
+        self._local_hashes = clean
+        if not clean:
+            return
+        for key in list(self.peers.keys()):
+            row = self.peers.get(key) or {}
+            rh = normalize_hash(row.get("hash"))
+            ih = normalize_hash(row.get("identity_hash"))
+            if rh in clean or ih in clean:
+                self._remove_peer_entry(key)
+
+    def _is_local_hash(self, hash_hex):
+        clean = normalize_hash(hash_hex)
+        return bool(clean and clean in self._local_hashes)
 
     def start(self):
         self.running = True
@@ -539,6 +561,11 @@ class PeerDiscovery:
         hash_hex = normalize_hash(peer.get("hash"))
         if not hash_hex:
             return False
+        if self._is_local_hash(hash_hex):
+            return False
+        ident_hex = normalize_hash(peer.get("identity_hash"))
+        if ident_hex and self._is_local_hash(ident_hex):
+            return False
         peer = dict(peer)
         peer["hash"] = hash_hex
         sanitized = self._sanitize_peer_scope(peer)
@@ -616,6 +643,10 @@ class PeerDiscovery:
                 pass
 
         if app_name != APP_NAME:
+            return
+        if self._is_local_hash(hash_hex):
+            return
+        if identity_hex and self._is_local_hash(identity_hex):
             return
 
         packet_iface = announce_packet_receiving_interface(destination_hash)
@@ -707,6 +738,8 @@ class PeerDiscovery:
         hash_hex = normalize_hash(peer.get("hash"))
         if not hash_hex or hash_hex == my_dest or hash_hex == my_ident:
             return False
+        if self._is_local_hash(hash_hex) or self._is_local_hash(identity_hex):
+            return False
         if identity_hex and identity_hex == my_ident:
             return False
         peer["last_seen"] = time.time()
@@ -732,8 +765,17 @@ class PeerDiscovery:
         if not self._peer_allowed(peer):
             return False
         peer["port"] = data.get("port", peer.get("port", 8742))
-        name = peer.get("name") or hash_hex[:8]
-        peer["name"] = name
+        name = (peer.get("name") or "").strip()
+        if not name or name == hash_hex[:8] or name.lower() == hash_hex[:8].lower():
+            for existing in self.peers.values():
+                eh = normalize_hash(existing.get("hash"))
+                ei = normalize_hash(existing.get("identity_hash"))
+                if identity_hex and (ei == identity_hex or eh == identity_hex):
+                    en = (existing.get("name") or "").strip()
+                    if en and en != eh[:8] and en.lower() != eh[:8].lower():
+                        name = en
+                        break
+        peer["name"] = name or hash_hex[:8]
         serial_key = f"{hash_hex}:serial"
         if serial_key in self.peers and serial_discovery_active():
             self.peers[serial_key]["last_seen"] = time.time()

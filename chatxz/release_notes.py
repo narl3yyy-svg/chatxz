@@ -3,6 +3,12 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.5.4": [
+        "Announce Serial now announces only on the USB serial port — no more LAN broadcast in the toast.",
+        "USB hot-add works without restart: serial identity is created and peers appear in Discovered.",
+        "Your own LAN/serial hashes no longer show up as USB peers in Discovered.",
+        "Reconnect stays on the transport you chose (LAN or USB).",
+    ],
     "0.5.3": [
         "Saved contacts survive server restart and USB unplug — LAN and USB hashes are kept separately.",
         "LAN and USB peers no longer evict each other in Discovered when both are visible.",

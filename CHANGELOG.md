@@ -2,6 +2,17 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.5.4] — 2026-06-27
+
+### Fixed
+- **Serial announce on LAN** — Announce Serial no longer shows LAN broadcast address; RNS announces go only over the configured serial port.
+- **USB hot-add without restart** — Plugging in USB creates serial identity + destination at runtime and pushes discovered peers to the web UI immediately.
+- **Duplicate self USB rows** — Local LAN and serial hashes are filtered from discovery (fixes seeing your own `1ae…` and `d0fdd…` as USB peers).
+- **LAN identity on serial wire** — Serial announces no longer fall back to LAN destination/identity when serial endpoint was missing.
+- **Session reconnect transport** — Failover reconnect respects the transport you connected on (serial session stays serial).
+- **Outbound link race** — Active outbound links are no longer torn down before connect completes.
+- **Beacon name flash** — Peers that briefly show as hash prefix keep a known display name when identity was seen before.
+
 ## [0.5.3] — 2026-06-27
 
 ### Fixed

@@ -29,15 +29,16 @@ class SerialAnnouncePolicyTests(unittest.TestCase):
         backend = self._backend()
         backend.destination = MagicMock()
         with patch.object(backend, "_serial_transport_ready", return_value=True):
-            with patch.object(backend, "_announce_on_interface", return_value=True) as announce:
-                with patch(
-                    "chatxz.core.messaging.serial_interface_online",
-                    return_value=MagicMock(port="/dev/ttyUSB0"),
-                ):
-                    with patch("chatxz.core.messaging.suppress_offline_lan_transports"):
-                        with patch("chatxz.core.messaging.dedupe_serial_interfaces"):
-                            with patch("chatxz.core.messaging.prune_dead_serial_interfaces"):
-                                sent = backend._burst_serial_announce()
+            with patch.object(backend, "ensure_serial_runtime", return_value=True):
+                with patch.object(backend, "_announce_on_interface", return_value=True) as announce:
+                    with patch(
+                        "chatxz.core.messaging.serial_interface_online",
+                        return_value=MagicMock(port="/dev/ttyUSB0"),
+                    ):
+                        with patch("chatxz.core.messaging.suppress_offline_lan_transports"):
+                            with patch("chatxz.core.messaging.dedupe_serial_interfaces"):
+                                with patch("chatxz.core.messaging.prune_dead_serial_interfaces"):
+                                    sent = backend._burst_serial_announce()
         self.assertEqual(sent, 1)
         self.assertEqual(announce.call_count, 1)
 
