@@ -31,6 +31,8 @@ from chatxz.core.lan_rns import (
     online_interfaces,
     peer_path_entry,
     peer_path_on_family,
+    reinforce_serial_peer_path,
+    restore_serial_path_from_announce,
     prune_bridged_lan_paths,
     prune_lan_path_for_peer,
     prune_stale_lan_paths,
@@ -1341,8 +1343,10 @@ class MessagingBackend:
                 return False
             prune_lan_path_for_peer(peer)
             clear_peer_path_unless_family(peer, "serial")
-            request_paths_for_hash(peer, family="serial")
-            path_iface = wait_for_peer_path_families(
+            restored = restore_serial_path_from_announce(peer)
+            if not restored:
+                reinforce_serial_peer_path(peer)
+            path_iface = restored or wait_for_peer_path_families(
                 peer, families=("serial",), timeout_s=18.0, should_stop=stop,
             )
             if not path_iface:
@@ -2668,6 +2672,10 @@ class MessagingBackend:
         clear_peer_path_unless_family(dest_hex, "serial")
         suppress_offline_lan_transports()
         dedupe_serial_interfaces()
+        restored = restore_serial_path_from_announce(dest_hex)
+        if restored:
+            print(f"[connect] Serial path ready via {type(restored).__name__} (announce)")
+            return True
         if self._peer_has_path_on_family(dest_hex, "serial"):
             return True
         if timeout_s is None:
@@ -2681,8 +2689,12 @@ class MessagingBackend:
             now = time.time()
             if now - last_burst >= 2.0:
                 self._burst_serial_announce(count=2, interval=0.3, force=True)
-                request_paths_for_hash(dest_hex, family="serial")
+                reinforce_serial_peer_path(dest_hex)
                 last_burst = now
+            restored = restore_serial_path_from_announce(dest_hex)
+            if restored:
+                print(f"[connect] Serial path ready via {type(restored).__name__} (announce)")
+                return True
             path_iface = wait_for_peer_path_families(
                 dest_hex, families=("serial",), timeout_s=2.0, poll_s=0.2,
                 should_stop=self._interrupted,
@@ -2708,7 +2720,10 @@ class MessagingBackend:
             prune_lan_path_for_peer(dest_hex)
             suppress_offline_lan_transports()
             dedupe_serial_interfaces()
-            if not self._peer_has_path_on_family(dest_hex, "serial"):
+            restored = restore_serial_path_from_announce(dest_hex)
+            if restored:
+                print(f"[connect] Serial path ready via {type(restored).__name__} (announce)")
+            elif not self._peer_has_path_on_family(dest_hex, "serial"):
                 if not self._prime_serial_path(dest_hex, timeout_s=prime_timeout):
                     return False
             else:

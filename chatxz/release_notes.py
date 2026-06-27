@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.164": [
+        "Serial connect restores USB routes from announce receipts when LAN rebroadcast overwrote path_table.",
+        "Peer identity is registered as soon as a serial RNS announce arrives — Connect no longer waits until click.",
+        "Serial path priming reinforces the USB route before opening an outbound link.",
+    ],
     "0.3.163": [
         "Serial discovery uses the path table (not stale LAN rebroadcasts) to classify incoming RNS announces.",
         "Out-of-scope LAN IPs on USB are reclassified as serial peers — Arch and Ubuntu discover each other across different subnets.",

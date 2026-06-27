@@ -113,6 +113,29 @@ def register_beacon_identity(data):
     return canonical
 
 
+def register_identity_from_announce(peer, announced_identity=None):
+    """Register peer identity as soon as an RNS announce is received."""
+    if not peer:
+        return ""
+    identity_hex = normalize_hash(peer.get("identity_hash") or "")
+    if not identity_hex and announced_identity and getattr(announced_identity, "hash", None):
+        identity_hex = normalize_hash(RNS.hexrep(announced_identity.hash))
+    pubkey_b64 = (peer.get("pubkey") or "").strip()
+    if not pubkey_b64 and announced_identity:
+        try:
+            pubkey_b64 = base64.b64encode(
+                announced_identity.get_public_key()
+            ).decode("ascii")
+        except Exception:
+            pubkey_b64 = ""
+    if not identity_hex or not pubkey_b64:
+        return ""
+    payload = dict(peer)
+    payload["identity_hash"] = identity_hex
+    payload["pubkey"] = pubkey_b64
+    return register_beacon_identity(payload) or ""
+
+
 def peer_record_from_beacon(data):
     """Build a normalized discovery peer dict from beacon payload."""
     connect = register_beacon_identity(data)

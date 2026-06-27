@@ -440,7 +440,7 @@ class PeerDiscovery:
         }
         if announce_ip:
             peer["ip"] = announce_ip
-        if identity_hex and identity_hex != hash_hex:
+        if identity_hex:
             peer["identity_hash"] = identity_hex
         if announced_identity:
             try:
@@ -451,6 +451,17 @@ class PeerDiscovery:
                 pass
         if not self._store_peer(peer):
             return
+        try:
+            from chatxz.core.peer_identity import register_identity_from_announce
+            register_identity_from_announce(peer, announced_identity)
+        except Exception:
+            pass
+        if (peer.get("via") or "").strip() == "serial":
+            try:
+                from chatxz.core.lan_rns import reinforce_serial_peer_path
+                reinforce_serial_peer_path(hash_hex)
+            except Exception:
+                pass
         via = peer.get("via", "rns")
         label = name or hash_hex[:12]
         ip_hint = (self.peers.get(hash_hex) or {}).get("ip")

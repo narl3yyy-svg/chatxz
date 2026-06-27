@@ -227,18 +227,11 @@ def _dest_key_bytes(destination_hash):
         return None
 
 
-def announce_receiving_interface(destination_hash):
-    """RNS interface that most recently received an announce for this destination."""
+def _announce_packet_receiving_interface(destination_hash):
+    """Receiving interface from the stored announce packet (not path_table)."""
     dest_bytes = _dest_key_bytes(destination_hash)
     if dest_bytes is None:
         return None
-    try:
-        with RNS.Transport.path_table_lock:
-            entry = RNS.Transport.path_table.get(dest_bytes)
-        if entry and len(entry) > 5 and entry[5] is not None:
-            return entry[5]
-    except Exception:
-        pass
     try:
         with RNS.Transport.announce_table_lock:
             entry = RNS.Transport.announce_table.get(dest_bytes)
@@ -248,6 +241,70 @@ def announce_receiving_interface(destination_hash):
         return getattr(packet, "receiving_interface", None)
     except Exception:
         return None
+
+
+def announce_receiving_interface(destination_hash):
+    """RNS interface that most recently received an announce for this destination."""
+    dest_bytes = _dest_key_bytes(destination_hash)
+    if dest_bytes is None:
+        return None
+    packet_iface = _announce_packet_receiving_interface(destination_hash)
+    if packet_iface is not None and interface_family(packet_iface) == "serial":
+        return packet_iface
+    try:
+        with RNS.Transport.path_table_lock:
+            entry = RNS.Transport.path_table.get(dest_bytes)
+        if entry and len(entry) > 5 and entry[5] is not None:
+            return entry[5]
+    except Exception:
+        pass
+    return packet_iface
+
+
+def restore_serial_path_from_announce(hash_hex):
+    """Repair path_table when a USB announce arrived but LAN rebroadcast stole the route."""
+    clean = _normalize_dest_hex(hash_hex)
+    dest_bytes = _dest_bytes_for_hash(clean)
+    if dest_bytes is None:
+        return None
+    serial_recv = _announce_packet_receiving_interface(dest_bytes)
+    if serial_recv is None or interface_family(serial_recv) != "serial":
+        return peer_path_on_family(clean, "serial")
+    if not interface_is_healthy(serial_recv):
+        return peer_path_on_family(clean, "serial")
+    existing = peer_path_on_family(clean, "serial")
+    if existing is not None:
+        pin_serial_path(clean)
+        return existing
+    prune_lan_path_for_peer(clean)
+    clear_peer_path(clean)
+    try:
+        now = time.time()
+        with RNS.Transport.path_table_lock:
+            RNS.Transport.path_table[dest_bytes] = [
+                now, 0, 1, now + 3600, dest_bytes, serial_recv,
+            ]
+    except Exception:
+        return None
+    pin_serial_path(clean)
+    return serial_recv
+
+
+def reinforce_serial_peer_path(hash_hex):
+    """Keep USB peers on SerialInterface and refresh missing paths."""
+    clean = _normalize_dest_hex(hash_hex)
+    if len(clean) != 32:
+        return None
+    restored = restore_serial_path_from_announce(clean)
+    if restored is not None:
+        return restored
+    pin_serial_path(clean)
+    prune_lan_path_for_peer(clean)
+    iface = peer_path_on_family(clean, "serial")
+    if iface is not None:
+        return iface
+    request_paths_for_hash(clean, family="serial")
+    return peer_path_on_family(clean, "serial")
 
 
 def is_lan_transport_family(family):

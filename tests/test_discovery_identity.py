@@ -11,7 +11,10 @@ import RNS
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from chatxz.core.discovery import PeerDiscovery, discovery_timeout_s
-from chatxz.core.lan_rns import announce_receiving_interface
+from chatxz.core.lan_rns import (
+    announce_receiving_interface,
+    restore_serial_path_from_announce,
+)
 
 
 class DiscoveryIdentityTests(unittest.TestCase):
@@ -173,20 +176,44 @@ class DiscoveryIdentityTests(unittest.TestCase):
 
 
 class AnnounceReceivingInterfaceTests(unittest.TestCase):
-    def test_prefers_path_table_over_announce_table(self):
+    def test_prefers_serial_packet_iface_over_lan_path_table(self):
         dest = bytes.fromhex("aa" * 16)
         serial_iface = MagicMock()
         lan_iface = MagicMock()
-        path_table = {dest: [0, 0, 1, 0, 0, serial_iface]}
-        announce_packet = MagicMock(receiving_interface=lan_iface)
+        path_table = {dest: [0, 0, 1, 0, 0, lan_iface]}
+        announce_packet = MagicMock(receiving_interface=serial_iface)
         announce_table = {dest: [0, 0, 0, 0, 0, announce_packet]}
 
-        with patch.object(RNS.Transport, "path_table", path_table):
-            with patch.object(RNS.Transport, "path_table_lock", MagicMock()):
-                with patch.object(RNS.Transport, "announce_table", announce_table):
-                    with patch.object(RNS.Transport, "announce_table_lock", MagicMock()):
-                        iface = announce_receiving_interface(dest)
+        with patch("chatxz.core.lan_rns.interface_family", side_effect=lambda i: (
+            "serial" if i is serial_iface else "udp"
+        )):
+            with patch.object(RNS.Transport, "path_table", path_table):
+                with patch.object(RNS.Transport, "path_table_lock", MagicMock()):
+                    with patch.object(RNS.Transport, "announce_table", announce_table):
+                        with patch.object(RNS.Transport, "announce_table_lock", MagicMock()):
+                            iface = announce_receiving_interface(dest)
         self.assertIs(iface, serial_iface)
+
+    def test_restore_serial_path_from_usb_announce(self):
+        dest = bytes.fromhex("bb" * 16)
+        dest_hex = dest.hex()
+        serial_iface = MagicMock()
+        lan_iface = MagicMock()
+        path_table = {dest: [0, 0, 1, 0, 0, lan_iface]}
+        announce_packet = MagicMock(receiving_interface=serial_iface)
+        announce_table = {dest: [0, 0, 0, 0, 0, announce_packet]}
+
+        with patch("chatxz.core.lan_rns.interface_family", side_effect=lambda i: (
+            "serial" if i is serial_iface else "udp"
+        )):
+            with patch("chatxz.core.lan_rns.interface_is_healthy", return_value=True):
+                with patch.object(RNS.Transport, "path_table", path_table):
+                    with patch.object(RNS.Transport, "path_table_lock", MagicMock()):
+                        with patch.object(RNS.Transport, "announce_table", announce_table):
+                            with patch.object(RNS.Transport, "announce_table_lock", MagicMock()):
+                                restored = restore_serial_path_from_announce(dest_hex)
+        self.assertIs(restored, serial_iface)
+        self.assertIs(path_table[dest][5], serial_iface)
 
 
 if __name__ == "__main__":
