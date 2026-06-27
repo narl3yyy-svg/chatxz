@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.170": [
+        "Serial badge/link hidden when USB is unplugged — peers upgrade to LAN via beacon instead of showing stale USB.",
+        "Inbound scope accepts LAN links for serial-tagged peers with an in-scope IP when local USB is down.",
+        "USB detach clears serial paths and discovery; transport matrix tests cover sender/receiver, RTT, and 3-device scenarios.",
+    ],
     "0.3.169": [
         "Fix v0.3.168 regressions: peers no longer vanish from aggressive probe eviction.",
         "Announces reset liveness; serial peers are never probe-dropped; transfer cancel fixed.",

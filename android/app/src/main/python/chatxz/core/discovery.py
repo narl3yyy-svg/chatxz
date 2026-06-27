@@ -124,6 +124,8 @@ class PeerDiscovery:
         """Drop cross-subnet LAN IPs when serial bridge is active; return False to reject."""
         candidate = dict(peer or {})
         if (candidate.get("via") or "").strip() == "serial":
+            if not serial_discovery_active():
+                return None
             candidate.pop("ip", None)
             return candidate
         scope = self._scope_ip()
@@ -255,6 +257,21 @@ class PeerDiscovery:
             pkt_fam = interface_family(pkt_iface) if pkt_iface else ""
             if pkt_fam == "serial" or not pkt_iface:
                 continue
+            del self.peers[key]
+            self._last_log.pop(hash_hex, None)
+            removed += 1
+        return removed
+
+    def purge_offline_serial_peers(self):
+        """Remove via=serial discovery entries when local USB serial is unplugged."""
+        if serial_discovery_active():
+            return 0
+        removed = 0
+        for key in list(self.peers.keys()):
+            peer = self.peers.get(key) or {}
+            if (peer.get("via") or "").strip() != "serial":
+                continue
+            hash_hex = normalize_hash(peer.get("hash") or key)
             del self.peers[key]
             self._last_log.pop(hash_hex, None)
             removed += 1
@@ -423,11 +440,21 @@ class PeerDiscovery:
             if peer_path_on_family(hash_hex, "serial"):
                 peer["via"] = "serial"
                 peer.pop("ip", None)
+        elif (peer.get("via") or "").strip() == "serial":
+            peer.pop("ip", None)
         removed, peer = self._evict_superseded_peers(peer)
         if removed:
             self._notify_peer_evicted(removed, peer)
         existing = self.peers.get(hash_hex)
         if existing:
+            existing_via = (existing.get("via") or "").strip()
+            new_via = (peer.get("via") or "").strip()
+            if new_via == "serial" and serial_discovery_active():
+                existing["via"] = "serial"
+                existing.pop("ip", None)
+            elif existing_via == "serial" and new_via in ("rns", "beacon"):
+                if not serial_discovery_active():
+                    existing["via"] = new_via
             new_ip = (peer.get("ip") or "").strip()
             scope = self._scope_ip()
             if scope and existing.get("ip") and not peer_in_scope(existing.get("ip"), scope):
@@ -445,11 +472,12 @@ class PeerDiscovery:
                     self._remove_peer_entry(hash_hex)
                     return False
             elif peer.get("ip") and not existing.get("ip"):
-                if (existing.get("via") or "").strip() != "serial":
+                existing_via = (existing.get("via") or "").strip()
+                if existing_via != "serial" or not serial_discovery_active():
                     if not scope or peer_in_scope(peer["ip"], scope):
                         existing["ip"] = peer["ip"]
                         existing["port"] = peer.get("port", 8742)
-            if (existing.get("via") or "").strip() == "serial":
+            if (existing.get("via") or "").strip() == "serial" and serial_discovery_active():
                 existing.pop("ip", None)
             if peer.get("identity_hash") and not existing.get("identity_hash"):
                 existing["identity_hash"] = peer["identity_hash"]
@@ -459,11 +487,9 @@ class PeerDiscovery:
                 existing["name"] = peer["name"]
             existing_via = (existing.get("via") or "").strip()
             new_via = (peer.get("via") or "").strip()
-            if new_via == "serial":
+            if new_via == "serial" and serial_discovery_active():
                 existing["via"] = "serial"
                 existing.pop("ip", None)
-            elif existing_via == "serial" and new_via in ("rns", "beacon"):
-                pass
             elif peer.get("via") != "beacon" or existing.get("via") == "beacon":
                 existing["via"] = new_via or existing_via
             existing["last_seen"] = peer.get("last_seen", time.time())
@@ -509,7 +535,7 @@ class PeerDiscovery:
         scope = self._scope_ip()
         via = "rns"
         if packet_fam == "serial":
-            if announce_ip:
+            if announce_ip or not serial_discovery_active():
                 return
             via = "serial"
             announce_ip = ""
@@ -769,9 +795,11 @@ class PeerDiscovery:
                 deduped[key] = peer
         collapsed = {}
         no_ip_peers = []
-        serial_peers = serial_discovery_active()
+        usb_up = serial_discovery_active()
         for peer in deduped.values():
             if (peer.get("via") or "").strip() == "serial":
+                if not usb_up:
+                    continue
                 serial_peer = dict(peer)
                 serial_peer.pop("ip", None)
                 no_ip_peers.append(serial_peer)

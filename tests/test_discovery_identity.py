@@ -108,9 +108,10 @@ class DiscoveryIdentityTests(unittest.TestCase):
         peer_hash = bytes.fromhex("436ce5fd79d0932d436ce5fd79d0932d")
         app_data = b'{"app":"chatxz","name":"ARCH"}'
         serial_iface = MagicMock()
-        with patch("chatxz.core.discovery.announce_packet_receiving_interface", return_value=serial_iface):
-            with patch("chatxz.core.discovery.interface_family", return_value="serial"):
-                disc._on_announce(peer_hash, app_data, announced_identity=None)
+        with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
+            with patch("chatxz.core.discovery.announce_packet_receiving_interface", return_value=serial_iface):
+                with patch("chatxz.core.discovery.interface_family", return_value="serial"):
+                    disc._on_announce(peer_hash, app_data, announced_identity=None)
         self.assertIn("436ce5fd79d0932d436ce5fd79d0932d", disc.peers)
         self.assertEqual(disc.peers["436ce5fd79d0932d436ce5fd79d0932d"]["via"], "serial")
 

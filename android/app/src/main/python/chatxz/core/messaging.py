@@ -295,18 +295,24 @@ class MessagingBackend:
         if not peer or peer == "unknown" or is_hub_peer_hash(peer):
             return set()
         meta = self._peer_discovery_meta(peer)
+        serial_ready = self._serial_transport_ready()
         if meta:
             via = (meta.get("via") or "").strip()
             ip = (meta.get("ip") or "").strip()
             if via == "serial":
-                return {"serial"}
+                return {"serial"} if serial_ready else set()
             if ip and self._peer_lan_ip_usable(ip):
                 return {"udp", "lan", "tcp"}
-            if not ip and self._serial_transport_ready():
+            if not ip and serial_ready:
                 return {"serial"}
-            if ip and not self._peer_lan_ip_usable(ip) and self._peer_has_path_on_family(peer, "serial"):
+            if (
+                serial_ready
+                and ip
+                and not self._peer_lan_ip_usable(ip)
+                and self._peer_has_path_on_family(peer, "serial")
+            ):
                 return {"serial"}
-        if self._serial_transport_ready() and self._lan_transport_ready():
+        if serial_ready and self._lan_transport_ready():
             if self._peer_has_path_on_family(peer, "serial"):
                 if not self._peer_has_path_on_family(peer, "udp") and not self._peer_has_path_on_family(peer, "tcp"):
                     return {"serial"}
@@ -315,12 +321,16 @@ class MessagingBackend:
                     return {"serial"}
                 if meta and not (meta.get("ip") or "").strip():
                     return {"serial"}
-        if self._peer_has_path_on_family(peer, "serial") and not self._peer_has_path_on_family(peer, "udp"):
-            if not self._peer_has_path_on_family(peer, "tcp"):
-                return {"serial"}
-        if meta and (meta.get("via") or "").strip() == "serial":
+        if (
+            serial_ready
+            and self._peer_has_path_on_family(peer, "serial")
+            and not self._peer_has_path_on_family(peer, "udp")
+            and not self._peer_has_path_on_family(peer, "tcp")
+        ):
             return {"serial"}
-        if self._peer_has_path_on_family(peer, "serial"):
+        if meta and (meta.get("via") or "").strip() == "serial" and serial_ready:
+            return {"serial"}
+        if serial_ready and self._peer_has_path_on_family(peer, "serial"):
             meta = meta or self._peer_discovery_meta(peer) or {}
             ip = (meta.get("ip") or "").strip()
             via = (meta.get("via") or "").strip()
@@ -2313,6 +2323,18 @@ class MessagingBackend:
             if not self._peer_link_active(peer):
                 self._transport_reconnect_pending = True
                 self._failover_last_attempt = 0
+
+    def on_serial_transport_detached(self):
+        """USB serial unplugged — drop serial paths and stop serial-only routing."""
+        from chatxz.core.lan_rns import clear_paths_on_family, unpin_serial_path
+
+        try:
+            clear_paths_on_family("serial")
+        except Exception:
+            pass
+        for peer_hash in list(self.peer_links.keys()):
+            unpin_serial_path(peer_hash)
+        self._transport_reconnect_pending = False
 
     def _queue_retry_loop(self):
         while self.running:

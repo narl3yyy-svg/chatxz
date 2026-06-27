@@ -675,7 +675,11 @@ class ChatWebServer:
         target = normalize_hash(peer_hash or "")
         if not target:
             return False
-        if self.messaging and peer_path_on_family(target, "serial") is not None:
+        if (
+            serial_discovery_active()
+            and self.messaging
+            and peer_path_on_family(target, "serial") is not None
+        ):
             return True
         peer_ip = ""
         peer_via = ""
@@ -692,17 +696,18 @@ class ChatWebServer:
                     peer_via = (peer.get("via") or "").strip()
                     break
         if peer_via == "serial":
-            return True
-        if self.messaging and target:
+            if serial_discovery_active():
+                return True
+            if peer_ip and peer_in_scope(peer_ip, scope):
+                return True
+            return False
+        if serial_discovery_active() and self.messaging and target:
             link_for_peer = self.messaging._link_for_peer(target)
             if link_for_peer and interface_family(
                 self.messaging._link_attached_interface(link_for_peer)
             ) == "serial":
                 return True
         if not peer_ip:
-            from chatxz.core.rns_interfaces import configured_serial_enabled, load_settings_interfaces
-            if configured_serial_enabled(load_settings_interfaces(self.config_dir)):
-                return True
             return serial_discovery_active()
         return peer_in_scope(peer_ip, scope)
 
@@ -2881,11 +2886,24 @@ class ChatWebServer:
 
     def _disable_rns_serial_interfaces(self):
         try:
+            from chatxz.core.lan_rns import clear_paths_on_family
+
             settings = self.load_settings()
             port, _ = configured_serial_port(settings.get("rns_interfaces"))
             n = remove_serial_interfaces(port or None)
             if n:
                 print(f"[serial] Removed {n} SerialInterface(s) after port unplug")
+            clear_paths_on_family("serial")
+            if self.discovery:
+                purged = self.discovery.purge_offline_serial_peers()
+                mis = self.discovery.purge_misclassified_serial()
+                if purged or mis:
+                    print(
+                        f"[serial] Cleared {purged + mis} USB peer(s) after unplug"
+                    )
+            if self.messaging:
+                self.messaging.on_serial_transport_detached()
+            self._write_rns_config(settings)
         except Exception as e:
             print(f"[serial] Could not remove runtime serial interface: {e}")
 

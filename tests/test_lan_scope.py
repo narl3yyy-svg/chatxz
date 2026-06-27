@@ -162,13 +162,14 @@ class LanScopeTests(unittest.TestCase):
         from unittest.mock import patch
 
         disc = PeerDiscovery()
-        with patch("chatxz.core.discovery.PeerDiscovery._scope_ip", return_value="10.0.30.2"):
-            disc._store_peer({
-                "hash": "t" * 32,
-                "name": "REMOTE",
-                "via": "serial",
-                "last_seen": __import__("time").time(),
-            })
+        with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
+            with patch("chatxz.core.discovery.PeerDiscovery._scope_ip", return_value="10.0.30.2"):
+                disc._store_peer({
+                    "hash": "t" * 32,
+                    "name": "REMOTE",
+                    "via": "serial",
+                    "last_seen": __import__("time").time(),
+                })
         self.assertIn("t" * 32, disc.peers)
 
     def test_scoped_peers_hide_ipless_entries_without_serial(self):
