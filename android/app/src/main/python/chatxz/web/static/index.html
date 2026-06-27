@@ -1863,6 +1863,7 @@ let myHash = '';
 let mySerialHash = '';
 window._serialActive = false;
 let viewingPeer = null;
+let viewingVia = null;
 let linkPeer = null;
 let linkedPeers = new Set();
 let connectInFlight = false;
@@ -2554,10 +2555,12 @@ function updatePeerHeader() {
   if (!viewingPeer) return;
   const name = contactNameFor(viewingPeer) || truncateHash(viewingPeer);
   document.getElementById('peer-name').textContent = name;
-  const linked = isPeerLinked(viewingPeer);
-  linkPeer = linked ? peerKey(viewingPeer) : null;
+  const linked = isPeerLinked(viewingPeer, viewingVia);
+  linkPeer = linked ? linkKey(viewingPeer, viewingVia) : null;
+  const transportLabel = viewingVia === 'serial' ? 'USB' : (viewingVia === 'lan' ? 'LAN' : '');
+  const transportHint = transportLabel ? ` · ${transportLabel}` : '';
   document.getElementById('peer-status').textContent = linked
-    ? 'Encrypted · Connected'
+    ? `Encrypted · Connected${transportHint}`
     : 'Viewing history · not connected';
   document.getElementById('disconnect-btn').style.display = linked ? 'block' : 'none';
   setLinkStatus(linked ? 'connected' : 'disconnected', linked ? 'Active' : 'Inactive');
@@ -3220,8 +3223,8 @@ function renderContactTransportRow(contact, via) {
   const label = via === 'serial' ? 'USB' : 'LAN';
   const labelClass = via === 'serial' ? 'usb' : 'lan';
   const p = discoveredForContactTransport(contact, via);
-  const linked = isPeerLinked(hash);
-  const rowActive = viewingPeer && peersMatch(viewingPeer, hash);
+  const linked = isPeerLinked(hash, via);
+  const rowActive = viewingPeer && peersMatch(viewingPeer, hash) && normalizeVia(viewingVia) === normalizeVia(via);
   const rttHint = rttForContactTransport(contact, via);
   const rttBadge = rttHint ? `<span class="peer-rtt">${escapeHtml(rttHint)}</span>` : '';
   const ipHint = via === 'lan' && (p?.ip || contact.ip) ? ` · ${escapeHtml(p?.ip || contact.ip)}` : '';
@@ -3249,7 +3252,7 @@ function renderContacts(contacts) {
   el.innerHTML = '';
   contacts.forEach(c => {
     const div = document.createElement('div');
-    const name = c.name || contactLanHash(c) || c.hash;
+    const name = contactDisplayName(c);
     const active = contactViewingActive(c);
     const lanHash = contactLanHash(c);
     const serialHash = contactSerialHash(c);
@@ -3334,7 +3337,7 @@ function renderDiscovered(peers, opts) {
     div.className = 'contact-item' + (active ? ' active' : '');
     const baseName = p.name || truncateHash(p.hash);
     const unread = unreadForPeer(p.hash);
-    const linked = isPeerLinked(p.hash);
+    const linked = isPeerLinked(p.hash, isSerial ? 'serial' : 'lan');
     const isSerial = (p.via || p.transport || '') === 'serial';
     const transportLabel = isSerial ? 'USB' : 'LAN';
     const transportTag = isSerial ? ' · USB' : ' · LAN';
@@ -3517,8 +3520,8 @@ function connectTo(hash, ip, port, via, opts) {
     toast('Connection already in progress...');
     return;
   }
-  if (isPeerLinked(hash) && !wake) {
-    openChat(hash, false);
+  if (isPeerLinked(hash, via) && !wake) {
+    openChat(hash, false, {via});
     toast('Already connected');
     return;
   }
@@ -3545,6 +3548,7 @@ function connectTo(hash, ip, port, via, opts) {
   const body = {hash};
   if (ip) body.ip = ip;
   if (port) body.port = port;
+  if (via) body.via = via;
   if (wake) body.wake = true;
   fetch('/api/connect', {
     method: 'POST',
@@ -3554,7 +3558,7 @@ function connectTo(hash, ip, port, via, opts) {
     if (d.status === 'ok') {
       const connected = d.hash || hash;
       if (connected !== hash) registerPeerAliases(connected, hash);
-      setLinkPeer(connected, true);
+      setLinkPeer(connected, true, via);
       if (d.linked_peers) syncLinkedPeers(d.linked_peers);
       if (viewingPeer && peersMatch(viewingPeer, connected)) updatePeerHeader();
       else openChat(connected, false);
@@ -4634,16 +4638,16 @@ function saveSettings() {
   }).catch(() => toast('Failed to save settings'));
 }
 
-function setLinkPeer(hash, linked) {
-  const k = peerKey(hash);
+function setLinkPeer(hash, linked, via) {
+  const k = linkKey(hash, via || viewingVia);
   if (!k) return;
   if (linked === false) {
     linkedPeers.delete(k);
   } else {
     linkedPeers.add(k);
   }
-  if (viewingPeer && isPeerLinked(viewingPeer)) {
-    linkPeer = peerKey(viewingPeer);
+  if (viewingPeer && isPeerLinked(viewingPeer, viewingVia)) {
+    linkPeer = linkKey(viewingPeer, viewingVia);
   } else {
     linkPeer = null;
   }
@@ -4654,6 +4658,7 @@ function setLinkPeer(hash, linked) {
 function closeChatView() {
   if (!viewingPeer) return;
   viewingPeer = null;
+  viewingVia = null;
   try { localStorage.removeItem(LS_VIEWING_PEER); } catch (_) {}
   document.getElementById('messages').innerHTML = '';
   document.getElementById('placeholder').style.display = 'flex';
@@ -4703,6 +4708,7 @@ function androidHandleBack() {
 function openChat(hash, tryConnect, meta) {
   viewingPeer = (hash || '').replace(/:/g, '');
   if (hash === HUB_GROUP_PEER) viewingPeer = HUB_GROUP_PEER;
+  viewingVia = meta?.via ? normalizeVia(meta.via) : null;
   clearUnread(viewingPeer);
   const persistView = viewingPeer === HUB_GROUP_PEER
     || allContacts.some(c => peersMatch(c.hash, viewingPeer));
@@ -4728,10 +4734,10 @@ function openChat(hash, tryConnect, meta) {
   if (tryConnect) {
     const m = meta || peerMetaForHash(hash);
     const wake = m?.via !== 'serial';
-    if (wake || !isPeerLinked(viewingPeer)) {
+    if (wake || !isPeerLinked(viewingPeer, viewingVia)) {
       connectTo(hash, m?.ip, m?.port, m?.via, {wake});
     }
-  } else if (!document.body.classList.contains('modal-open') && isPeerLinked(viewingPeer)) {
+  } else if (!document.body.classList.contains('modal-open') && isPeerLinked(viewingPeer, viewingVia)) {
     document.getElementById('msg-input').focus();
   }
 }
@@ -4846,19 +4852,62 @@ function peerKey(hash) {
   return (hash || '').replace(/:/g, '').toLowerCase();
 }
 
-function isPeerLinked(hash) {
-  const k = peerKey(hash);
-  if (!k) return false;
-  if (linkedPeers.has(k)) return true;
+function normalizeVia(via) {
+  const v = (via || 'lan').toLowerCase();
+  return v === 'serial' ? 'serial' : 'lan';
+}
+
+function linkKey(hash, via) {
+  const h = peerKey(hash);
+  if (!h) return '';
+  return `${h}:${normalizeVia(via)}`;
+}
+
+function contactDisplayName(c) {
+  const raw = (c?.name || '').trim();
+  const hashes = new Set(
+    [c?.hash, c?.lan_hash, c?.serial_hash, contactLanHash(c), contactSerialHash(c)]
+      .map(peerKey).filter(Boolean)
+  );
+  if (raw && !hashes.has(peerKey(raw)) && raw.length <= 24) return raw;
+  const disc = bestPeerForContact(window._discoveredPeers || [], c);
+  if (disc?.name && !hashes.has(peerKey(disc.name))) return disc.name;
+  if (raw && raw.length <= 16) return raw;
+  return truncateHash(c?.lan_hash || c?.serial_hash || c?.hash || raw);
+}
+
+function isPeerLinked(hash, via) {
+  const h = peerKey(hash);
+  if (!h) return false;
+  const explicit = via ? normalizeVia(via) : (viewingVia ? normalizeVia(viewingVia) : null);
+  if (explicit) {
+    if (linkedPeers.has(linkKey(h, explicit))) return true;
+    for (const lp of linkedPeers) {
+      const parts = String(lp).split(':');
+      if (parts.length >= 2 && normalizeVia(parts[1]) === explicit && peersMatch(parts[0], h)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (linkedPeers.has(h)) return true;
   for (const lp of linkedPeers) {
-    if (peersMatch(lp, k)) return true;
+    const base = String(lp).split(':')[0];
+    if (peersMatch(base, h)) return true;
   }
   return false;
 }
 
 function syncLinkedPeers(list) {
   if (!Array.isArray(list)) return;
-  linkedPeers = new Set(list.map(peerKey).filter(Boolean));
+  linkedPeers = new Set(
+    list.map(item => {
+      const text = String(item || '').toLowerCase();
+      if (!text) return '';
+      if (text.includes(':')) return text;
+      return peerKey(text);
+    }).filter(Boolean)
+  );
   updatePeerHeader();
   renderContacts(allContacts);
   renderDiscovered(window._discoveredPeers || []);

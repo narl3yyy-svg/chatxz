@@ -98,7 +98,11 @@ class SerialOfflineDiscoveryTests(unittest.TestCase):
                         beacon, my_dest_hash=ARCH, source_ip="10.0.30.101",
                     )
         self.assertTrue(ok)
-        peer = disc.peers.get(UBUNTU)
+        lan_key = PeerDiscovery._peer_storage_key({
+            "hash": UBUNTU,
+            "via": "rns",
+        })
+        peer = disc.peers.get(lan_key)
         self.assertIsNotNone(peer)
         self.assertIn(peer.get("via"), ("rns", "beacon"))
         self.assertEqual(peer.get("ip"), "10.0.30.101")
@@ -193,19 +197,21 @@ class RttProbeMatrixTests(unittest.TestCase):
             for burst in (1, 3, 5, 10):
                 with self.subTest(start=start_rtt, burst=burst):
                     disc.peers.clear()
-                    disc.peers[UBUNTU] = {
+                    entry = {
                         "hash": UBUNTU,
                         "via": "rns",
                         "ip": "10.10.10.2",
                         "last_seen": time.time(),
                         "rtt_samples": [],
                     }
+                    key = PeerDiscovery._peer_storage_key(entry)
+                    disc.peers[key] = dict(entry)
                     samples = []
                     for i in range(burst):
                         rtt = start_rtt + i * 3
                         samples = rolling_avg_ms(samples, rtt)
                         disc.update_peer_probe(UBUNTU, rtt_ms=rtt, ok=True)
-                    peer = disc.peers[UBUNTU]
+                    peer = disc.peers[key]
                     self.assertEqual(peer["rtt_samples"], samples)
                     self.assertEqual(peer["rtt_avg_ms"], avg_ms(samples))
                     self.assertGreaterEqual(peer["rtt_avg_ms"], start_rtt)
@@ -334,7 +340,7 @@ class IdentityDisplayMatrixTests(unittest.TestCase):
                     entry["ip"] = "10.0.30.101"
                 with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
                     disc._store_peer(dict(entry))
-                stored = disc.peers.get(UBUNTU)
+                stored = disc.peers.get(PeerDiscovery._peer_storage_key(entry))
                 self.assertIsNotNone(stored)
                 self.assertEqual(normalize_hash(stored.get("identity_hash")), ident)
                 self.assertEqual(stored.get("name"), "ubuntu")

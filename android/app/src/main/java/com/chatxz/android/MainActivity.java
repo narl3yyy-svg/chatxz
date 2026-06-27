@@ -780,7 +780,10 @@ public class MainActivity extends AppCompatActivity {
             + "if(typeof closeSidebar==='function'&&document.body.classList.contains('sidebar-open')){closeSidebar();return 'true';}"
             + "return 'false';})()",
             value -> {
-                if (!"true".equals(value)) {
+                boolean handled = value != null && (
+                    "\"true\"".equals(value) || "true".equals(value)
+                );
+                if (!handled) {
                     moveTaskToBack(true);
                 }
             }

@@ -234,36 +234,40 @@ class PeerDiscovery:
     def reset_peer_probe_state(self, hash_hex):
         """Announce/beacon refresh — peer is alive; do not probe-evict."""
         clean = normalize_hash(hash_hex)
-        if not clean or clean not in self.peers:
+        if not clean:
             return
-        peer = self.peers[clean]
-        peer["probe_failures"] = 0
-        peer["last_probe_ok"] = float(peer.get("last_seen") or time.time())
+        for peer in self.peers.values():
+            if normalize_hash(peer.get("hash")) != clean:
+                continue
+            peer["probe_failures"] = 0
+            peer["last_probe_ok"] = float(peer.get("last_seen") or time.time())
 
     def update_peer_probe(self, hash_hex, rtt_ms=None, ok=True):
         """Record optional probe RTT; never overrides fresh announce liveness."""
         clean = normalize_hash(hash_hex)
-        if not clean or clean not in self.peers:
+        if not clean:
             return
-        peer = self.peers[clean]
         now = time.time()
-        last_seen = float(peer.get("last_seen") or 0)
-        if last_seen and (now - last_seen) < 12:
-            peer["probe_failures"] = 0
-            peer["last_probe_ok"] = last_seen
-        if ok and rtt_ms is not None:
-            from chatxz.core.peer_probe import rolling_avg_ms, avg_ms
-            samples = rolling_avg_ms(peer.get("rtt_samples"), rtt_ms)
-            peer["rtt_samples"] = samples
-            peer["rtt_ms"] = int(rtt_ms)
-            peer["rtt_avg_ms"] = avg_ms(samples)
-            peer["last_probe_ok"] = now
-            peer["probe_failures"] = 0
-        elif not ok:
+        for peer in self.peers.values():
+            if normalize_hash(peer.get("hash")) != clean:
+                continue
+            last_seen = float(peer.get("last_seen") or 0)
             if last_seen and (now - last_seen) < 12:
-                return
-            peer["probe_failures"] = int(peer.get("probe_failures") or 0) + 1
-            peer["last_probe_at"] = now
+                peer["probe_failures"] = 0
+                peer["last_probe_ok"] = last_seen
+            if ok and rtt_ms is not None:
+                from chatxz.core.peer_probe import rolling_avg_ms, avg_ms
+                samples = rolling_avg_ms(peer.get("rtt_samples"), rtt_ms)
+                peer["rtt_samples"] = samples
+                peer["rtt_ms"] = int(rtt_ms)
+                peer["rtt_avg_ms"] = avg_ms(samples)
+                peer["last_probe_ok"] = now
+                peer["probe_failures"] = 0
+            elif not ok:
+                if last_seen and (now - last_seen) < 12:
+                    continue
+                peer["probe_failures"] = int(peer.get("probe_failures") or 0) + 1
+                peer["last_probe_at"] = now
 
     def purge_stale_probes(self, max_rtt_ms=10000, stale_s=30, max_failures=5):
         """Drop LAN peers only after stale announces AND repeated probe failures."""
@@ -432,6 +436,8 @@ class PeerDiscovery:
             if same_hash:
                 continue
             if same_ident or same_pubkey:
+                if existing_via and new_via and existing_via != new_via:
+                    continue
                 removed.append(normalize_hash(existing.get("hash")) or key)
                 del self.peers[key]
                 continue
@@ -463,19 +469,60 @@ class PeerDiscovery:
         except Exception as e:
             print(f"[discovery] on_peer_evicted error: {e}")
 
-    def _remove_peer_entry(self, hash_hex):
-        """Drop a peer and notify listeners (e.g. scope change or subnet move)."""
+    def peer_row(self, hash_hex, via=None):
+        """Return a stored discovery row for a destination hash (optional via)."""
         clean = normalize_hash(hash_hex)
-        if not clean or clean not in self.peers:
+        if not clean:
+            return None
+        if via:
+            return self.peers.get(self._peer_storage_key({"hash": clean, "via": via}))
+        for peer in self.peers.values():
+            if normalize_hash(peer.get("hash")) == clean:
+                return peer
+        return self.peers.get(clean)
+
+    def has_peer_hash(self, hash_hex):
+        clean = normalize_hash(hash_hex)
+        if not clean:
+            return False
+        if clean in self.peers:
+            return True
+        return any(normalize_hash(p.get("hash")) == clean for p in self.peers.values())
+
+    @staticmethod
+    def _peer_storage_key(peer):
+        """Storage key: one row per destination hash + transport."""
+        h = normalize_hash(peer.get("hash") if isinstance(peer, dict) else peer)
+        if not h:
+            return ""
+        via = "lan"
+        if isinstance(peer, dict):
+            raw_via = (peer.get("via") or "lan").strip().lower()
+            if raw_via == "serial":
+                via = "serial"
+            elif raw_via not in ("rns", "beacon", "lan", ""):
+                via = raw_via
+        return f"{h}:{via}"
+
+    def _remove_peer_entry(self, storage_key):
+        """Drop a peer row and notify listeners (e.g. scope change or subnet move)."""
+        key = (storage_key or "").strip()
+        if not key:
             return
-        removed_ip = (self.peers.get(clean) or {}).get("ip")
+        if key not in self.peers:
+            clean = normalize_hash(key)
+            if not clean or clean not in self.peers:
+                return
+            key = clean
+        entry = self.peers.pop(key)
+        removed_ip = (entry or {}).get("ip")
         if removed_ip:
             unregister_udp_peer_ip(removed_ip)
-        del self.peers[clean]
-        self._last_log.pop(clean, None)
-        self._last_log.pop(f"beacon:{clean}", None)
-        self._last_log.pop(f"beacon-id:{clean}", None)
-        self._notify_peer_evicted([clean], None)
+        hash_hex = normalize_hash((entry or {}).get("hash") or key)
+        self._last_log.pop(hash_hex, None)
+        self._last_log.pop(f"beacon:{hash_hex}", None)
+        self._last_log.pop(f"beacon-id:{hash_hex}", None)
+        self._notify_peer_evicted([hash_hex], None)
 
     def register_link_peer(self, peer_hash, name="", via="link", ip=None):
         """Register a peer learned from an established RNS link (e.g. TCP hub)."""
@@ -498,73 +545,51 @@ class PeerDiscovery:
         hash_hex = normalize_hash(peer.get("hash"))
         if not hash_hex:
             return False
+        peer = dict(peer)
         peer["hash"] = hash_hex
         sanitized = self._sanitize_peer_scope(peer)
         if not sanitized:
-            self._remove_peer_entry(hash_hex)
+            storage_key = self._peer_storage_key(peer)
+            self._remove_peer_entry(storage_key)
+            for key in list(self.peers.keys()):
+                row = self.peers.get(key) or {}
+                if normalize_hash(row.get("hash")) == hash_hex:
+                    self._remove_peer_entry(key)
             return False
         peer = sanitized
-        if serial_discovery_active():
-            from chatxz.core.lan_rns import peer_path_on_family
-            if peer_path_on_family(hash_hex, "serial"):
-                peer["via"] = "serial"
-                peer.pop("ip", None)
-        elif (peer.get("via") or "").strip() == "serial":
+        if (peer.get("via") or "").strip() == "serial":
             peer.pop("ip", None)
         removed, peer = self._evict_superseded_peers(peer)
         if removed:
             self._notify_peer_evicted(removed, peer)
-        existing = self.peers.get(hash_hex)
+        storage_key = self._peer_storage_key(peer)
+        if not storage_key:
+            return False
+        existing = self.peers.get(storage_key)
         if existing:
-            existing_via = (existing.get("via") or "").strip()
-            new_via = (peer.get("via") or "").strip()
-            if new_via == "serial" and serial_discovery_active():
-                existing["via"] = "serial"
-                existing.pop("ip", None)
-            elif existing_via == "serial" and new_via in ("rns", "beacon"):
-                if not serial_discovery_active():
-                    existing["via"] = new_via
             new_ip = (peer.get("ip") or "").strip()
             scope = self._scope_ip()
-            if scope and existing.get("ip") and not peer_in_scope(existing.get("ip"), scope):
-                if serial_discovery_active():
-                    existing.pop("ip", None)
-                elif not new_ip or peer_in_scope(new_ip, scope):
-                    existing.pop("ip", None)
             if new_ip and new_ip != (existing.get("ip") or "").strip():
                 if not scope or peer_in_scope(new_ip, scope):
                     existing["ip"] = new_ip
                     existing["port"] = peer.get("port", existing.get("port", 8742))
-                elif serial_discovery_active():
-                    existing.pop("ip", None)
                 elif scope:
-                    self._remove_peer_entry(hash_hex)
+                    self._remove_peer_entry(storage_key)
                     return False
             elif peer.get("ip") and not existing.get("ip"):
-                existing_via = (existing.get("via") or "").strip()
-                if existing_via != "serial" or not serial_discovery_active():
-                    if not scope or peer_in_scope(peer["ip"], scope):
-                        existing["ip"] = peer["ip"]
-                        existing["port"] = peer.get("port", 8742)
-            if (existing.get("via") or "").strip() == "serial" and serial_discovery_active():
-                existing.pop("ip", None)
+                if not scope or peer_in_scope(peer["ip"], scope):
+                    existing["ip"] = peer["ip"]
+                    existing["port"] = peer.get("port", 8742)
             if peer.get("identity_hash") and not existing.get("identity_hash"):
                 existing["identity_hash"] = peer["identity_hash"]
             if peer.get("pubkey") and not existing.get("pubkey"):
                 existing["pubkey"] = peer["pubkey"]
             if peer.get("name") and peer["name"] != hash_hex[:8]:
                 existing["name"] = peer["name"]
-            existing_via = (existing.get("via") or "").strip()
-            new_via = (peer.get("via") or "").strip()
-            if new_via == "serial" and serial_discovery_active():
-                existing["via"] = "serial"
-                existing.pop("ip", None)
-            elif peer.get("via") != "beacon" or existing.get("via") == "beacon":
-                existing["via"] = new_via or existing_via
             existing["last_seen"] = peer.get("last_seen", time.time())
             peer = existing
         else:
-            self.peers[hash_hex] = peer
+            self.peers[storage_key] = peer
         if peer.get("ip"):
             register_udp_peer_ip(peer["ip"])
         self.reset_peer_probe_state(hash_hex)
@@ -657,13 +682,14 @@ class PeerDiscovery:
                 pass
         via = peer.get("via", "rns")
         label = name or hash_hex[:12]
-        ip_hint = (self.peers.get(hash_hex) or {}).get("ip")
+        stored = self.peers.get(self._peer_storage_key(peer)) or peer
+        ip_hint = (stored.get("ip") or "").strip()
         if ip_hint:
             label = f"{label} ({ip_hint})"
         elif via == "serial":
             label = f"{label} (serial)"
         self._log_once(
-            hash_hex,
+            f"{hash_hex}:{via}",
             f"[discovery] RNS peer discovered ({via}): {label}...",
         )
 
@@ -714,21 +740,18 @@ class PeerDiscovery:
         peer["port"] = data.get("port", peer.get("port", 8742))
         name = peer.get("name") or hash_hex[:8]
         peer["name"] = name
-        existing = self.peers.get(hash_hex) or {}
-        existing_via = (existing.get("via") or "").strip()
-        if existing_via == "serial" and serial_discovery_active():
-            existing["last_seen"] = time.time()
+        serial_key = f"{hash_hex}:serial"
+        if serial_key in self.peers and serial_discovery_active():
+            self.peers[serial_key]["last_seen"] = time.time()
             if register_identity_from_beacon(data):
                 self._log_once(
-                    f"beacon-id:{hash_hex}",
-                    f"[discovery] Beacon identity refreshed: {name} (serial-only)",
+                    f"beacon-id:{hash_hex}:serial",
+                    f"[discovery] Beacon identity refreshed: {name} (serial row)",
                 )
-            self.peers[hash_hex] = existing
-            return True
         if register_identity_from_beacon(data):
-            peer["via"] = "rns"
+            peer["via"] = peer.get("via") or "rns"
             self._log_once(
-                f"beacon-id:{hash_hex}",
+                f"beacon-id:{hash_hex}:lan",
                 f"[discovery] Beacon identity registered: {name} ({peer.get('ip', '?')})",
             )
         self._store_peer(peer)

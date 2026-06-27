@@ -2,6 +2,14 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.5.1] — 2026-06-27
+
+### Fixed
+- **Separate LAN + USB connections** — discovery stores `hash:lan` and `hash:serial` rows independently; connect API accepts `via` so serial and LAN links to the same peer no longer collide.
+- **Android back navigation** — swipe-back from chat returns to the contact list first; second back minimizes the app (WebView `"true"` callback parsing fixed).
+- **Transport-aware UI** — linked-peer state, connect, and chat header track per-transport links (`hash:lan` / `hash:serial`).
+- **Contact name flash** — saved contacts no longer briefly show the full RNS hash when display name is missing.
+
 ## [0.5.0] — 2026-06-27
 
 ### Changed

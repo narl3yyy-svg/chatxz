@@ -41,7 +41,7 @@ class DiscoveryIdentityTests(unittest.TestCase):
             "via": "beacon",
         })
         self.assertEqual(len(disc.peers), 1)
-        self.assertIn("newhash123456789012345678901234", disc.peers)
+        self.assertTrue(disc.has_peer_hash("newhash123456789012345678901234"))
 
     def test_purge_hashes_removes_matching_entries(self):
         disc = PeerDiscovery()
@@ -99,7 +99,7 @@ class DiscoveryIdentityTests(unittest.TestCase):
                 "via": "rns",
             })
         self.assertEqual(len(disc.peers), 1)
-        self.assertIn("a68cdfa88742c19a1edec7c2ae021f25", disc.peers)
+        self.assertTrue(disc.has_peer_hash("a68cdfa88742c19a1edec7c2ae021f25"))
 
     def test_ipless_announce_discovered_as_serial_without_cached_path(self):
         disc = PeerDiscovery()
@@ -112,8 +112,11 @@ class DiscoveryIdentityTests(unittest.TestCase):
             with patch("chatxz.core.discovery.announce_packet_receiving_interface", return_value=serial_iface):
                 with patch("chatxz.core.discovery.interface_family", return_value="serial"):
                     disc._on_announce(peer_hash, app_data, announced_identity=None)
-        self.assertIn("436ce5fd79d0932d436ce5fd79d0932d", disc.peers)
-        self.assertEqual(disc.peers["436ce5fd79d0932d436ce5fd79d0932d"]["via"], "serial")
+        self.assertTrue(disc.has_peer_hash("436ce5fd79d0932d436ce5fd79d0932d"))
+        self.assertEqual(
+            disc.peer_row("436ce5fd79d0932d436ce5fd79d0932d", via="serial").get("via"),
+            "serial",
+        )
 
     def test_ipless_announce_without_packet_iface_accepted_as_serial(self):
         disc = PeerDiscovery()
@@ -125,8 +128,11 @@ class DiscoveryIdentityTests(unittest.TestCase):
             with patch("chatxz.core.discovery.interface_family", return_value=""):
                 with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
                     disc._on_announce(peer_hash, app_data, announced_identity=None)
-        self.assertIn("986da79e42cd8b10dc6ccb069d978420", disc.peers)
-        self.assertEqual(disc.peers["986da79e42cd8b10dc6ccb069d978420"]["via"], "serial")
+        self.assertTrue(disc.has_peer_hash("986da79e42cd8b10dc6ccb069d978420"))
+        self.assertEqual(
+            disc.peer_row("986da79e42cd8b10dc6ccb069d978420", via="serial").get("via"),
+            "serial",
+        )
 
     def test_stale_peer_pruned_after_ttl(self):
         disc = PeerDiscovery()
@@ -189,7 +195,7 @@ class DiscoveryIdentityTests(unittest.TestCase):
                 with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
                     with patch("chatxz.utils.platform.discovery_scope_ip", return_value="10.10.10.37"):
                         disc._on_announce(peer_hash, app_data)
-        peer = disc.peers.get("87a012c46dc2274afccae6fe597b8675")
+        peer = disc.peer_row("87a012c46dc2274afccae6fe597b8675", via="rns")
         self.assertIsNotNone(peer)
         self.assertEqual(peer.get("via"), "rns")
         self.assertEqual(peer.get("ip"), "10.10.10.2")

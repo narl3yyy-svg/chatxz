@@ -259,6 +259,7 @@ class MessagingBackend:
         self._queue_drain_timers = {}
         self._queue_drain_lock = threading.Lock()
         self.peer_links = {}
+        self._session_transport = None
         self._connect_user_initiated = False
         self._connect_background = False
         self._connect_in_progress = False
@@ -299,6 +300,39 @@ class MessagingBackend:
         canon = self.canonical_connect_hash(peer_hash, link=link)
         if canon and not self._is_self_hash(canon):
             self._link_peer_hashes[link.link_id] = canon
+
+    @staticmethod
+    def _normalize_transport(via):
+        v = (via or "lan").strip().lower()
+        if v in ("serial", "usb"):
+            return "serial"
+        return "lan"
+
+    def _link_map_key(self, peer_hash, transport=None):
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown":
+            return ""
+        if transport:
+            return f"{peer}:{self._normalize_transport(transport)}"
+        return peer
+
+    @staticmethod
+    def _peer_from_link_key(key):
+        text = str(key or "")
+        if ":" in text:
+            return text.rsplit(":", 1)[0]
+        return text
+
+    def _transport_from_link(self, link):
+        fam = interface_family(self._link_attached_interface(link))
+        if fam == "serial":
+            return "serial"
+        return "lan"
+
+    def _link_transport_matches(self, link, transport):
+        if not transport:
+            return True
+        return self._transport_from_link(link) == self._normalize_transport(transport)
 
     def _peer_discovery_meta(self, peer_hash):
         peer = self.dest_hash_for(peer_hash)
@@ -483,17 +517,30 @@ class MessagingBackend:
         except Exception:
             return True
 
-    def _link_for_peer(self, peer_hash):
-        peer = self.dest_hash_for(peer_hash)
+    def _link_for_peer(self, peer_hash, transport=None):
+        raw = str(peer_hash or "")
+        if ":" in raw and not transport:
+            base, suffix = raw.rsplit(":", 1)
+            peer = self.dest_hash_for(base)
+            transport = suffix
+        else:
+            peer = self.dest_hash_for(peer_hash)
         if not peer or peer == "unknown":
+            return None
+        if transport:
+            key = self._link_map_key(peer, transport)
+            link = self.peer_links.get(key)
+            if link and self._link_matches_peer(link, peer):
+                return link
             return None
         link = self.peer_links.get(peer)
         if link and self._link_matches_peer(link, peer):
             return link
-        for cached_peer, cached_link in self.peer_links.items():
-            if self.hashes_equivalent(cached_peer, peer):
-                if self._link_matches_peer(cached_link, peer):
-                    return cached_link
+        for cached_key, cached_link in self.peer_links.items():
+            if not self.hashes_equivalent(self._peer_from_link_key(cached_key), peer):
+                continue
+            if self._link_matches_peer(cached_link, peer):
+                return cached_link
         for link_id, cached in self._link_peer_hashes.items():
             if self.hashes_equivalent(cached, peer):
                 link = self.links.get(link_id)
@@ -501,7 +548,7 @@ class MessagingBackend:
                     return link
         return None
 
-    def _register_peer_link(self, link, peer_hash):
+    def _register_peer_link(self, link, peer_hash, transport=None):
         peer = self.dest_hash_for(peer_hash)
         if not peer or peer == "unknown" or not link:
             return
@@ -512,16 +559,23 @@ class MessagingBackend:
                 f"(remote identity {remote[:16]}...)"
             )
             return
-        self.peer_links[peer] = link
+        t = transport or self._transport_from_link(link)
+        key = self._link_map_key(peer, t)
+        self.peer_links[key] = link
+        if key != peer:
+            self.peer_links.pop(peer, None)
         self._cache_link_peer(link, peer)
 
-    def _unlink_peer(self, peer_hash):
+    def _unlink_peer(self, peer_hash, transport=None):
         peer = self.dest_hash_for(peer_hash)
         if not peer:
             return
+        if transport:
+            self.peer_links.pop(self._link_map_key(peer, transport), None)
+            return
         self.peer_links.pop(peer, None)
         for key in list(self.peer_links.keys()):
-            if self.hashes_equivalent(key, peer):
+            if self.hashes_equivalent(self._peer_from_link_key(key), peer):
                 self.peer_links.pop(key, None)
 
     def _other_active_links_for_peer(self, peer_hash, except_link=None):
@@ -602,15 +656,23 @@ class MessagingBackend:
                     self._link_handoff = False
         return closed
 
-    def _consolidate_peer_links(self, peer_hash, keep_link=None):
-        """Keep one active link per peer — tear down parallel sessions."""
+    def _consolidate_peer_links(self, peer_hash, keep_link=None, transport=None):
+        """Keep one active link per peer per transport — tear down duplicate sessions."""
         peer = self.dest_hash_for(peer_hash)
         if not peer or peer == "unknown":
             return 0
         keep_id = getattr(keep_link, "link_id", None) if keep_link else None
+        keep_fam = interface_family(self._link_attached_interface(keep_link)) if keep_link else None
+        parallel = self._parallel_sessions_allowed()
         closed = 0
         for link in list(self._links_for_peer(peer)):
             if keep_id and link.link_id == keep_id:
+                continue
+            if parallel and keep_fam:
+                fam = interface_family(self._link_attached_interface(link))
+                if fam != keep_fam:
+                    continue
+            if transport and not self._link_transport_matches(link, transport):
                 continue
             try:
                 if getattr(link, "status", None) == RNS.Link.CLOSED:
@@ -626,8 +688,8 @@ class MessagingBackend:
             print(f"[messaging] Closed {closed} duplicate link(s) for {peer[:16]}...")
         return closed
 
-    def _finish_connect(self, peer_hash, link=None, user_initiated=None):
-        """After a successful connect: one link per peer and drain outbound queue."""
+    def _finish_connect(self, peer_hash, link=None, user_initiated=None, transport=None):
+        """After a successful connect: one link per peer per transport and drain queue."""
         peer = self.dest_hash_for(peer_hash)
         if not peer or peer == "unknown":
             return True
@@ -638,9 +700,14 @@ class MessagingBackend:
         )
         use_link = link
         if not use_link:
-            use_link = self._adopt_healthy_peer_link(peer) or self._best_outgoing_link(peer)
+            use_link = (
+                self._adopt_healthy_peer_link(peer)
+                or self._best_outgoing_link(peer)
+            )
         if use_link:
-            self._consolidate_peer_links(peer, keep_link=use_link)
+            self._consolidate_peer_links(
+                peer, keep_link=use_link, transport=transport,
+            )
         if not self.is_user_disconnected(peer):
             self._schedule_queue_drain(peer, link=use_link, include_files=True)
             if initiated:
@@ -696,13 +763,17 @@ class MessagingBackend:
 
     def linked_peers(self):
         out = []
-        for peer, link in list(self.peer_links.items()):
+        for key, link in list(self.peer_links.items()):
             try:
                 if getattr(link, "status", None) == RNS.Link.CLOSED:
                     continue
             except Exception:
                 pass
-            out.append(peer)
+            peer = self._peer_from_link_key(key)
+            if ":" in str(key):
+                out.append(str(key))
+            else:
+                out.append(f"{peer}:{self._transport_from_link(link)}")
         return out
 
     def _hub_tcp_linked_peers(self):
@@ -712,10 +783,11 @@ class MessagingBackend:
             return []
         hub_host, hub_port = self._hub_endpoint_from_settings()
         out = []
-        for peer in self.linked_peers():
-            if not peer or is_hub_peer_hash(peer):
+        seen = set()
+        for key, link in list(self.peer_links.items()):
+            peer = self._peer_from_link_key(key)
+            if not peer or is_hub_peer_hash(peer) or peer in seen:
                 continue
-            link = self._link_for_peer(peer)
             if not link:
                 continue
             if self._link_is_hub_transport(
@@ -724,6 +796,7 @@ class MessagingBackend:
                 hub_host=hub_host,
                 hub_port=hub_port,
             ):
+                seen.add(peer)
                 out.append(peer)
         return out
 
@@ -1648,6 +1721,7 @@ class MessagingBackend:
 
     def clear_session_peer(self):
         self._session_peer_hash = None
+        self._session_transport = None
 
     def _teardown_mismatched_links(self, target_peer):
         """Close links whose resolved peer hash disagrees with the target connect hash."""
@@ -1847,8 +1921,8 @@ class MessagingBackend:
             if lid:
                 seen.add(lid)
             out.append(link)
-        for cached_peer, link in list(self.peer_links.items()):
-            if not self.hashes_equivalent(cached_peer, peer):
+        for cached_key, link in list(self.peer_links.items()):
+            if not self.hashes_equivalent(self._peer_from_link_key(cached_key), peer):
                 continue
             lid = getattr(link, "link_id", None)
             if lid and lid in seen:
@@ -1865,6 +1939,14 @@ class MessagingBackend:
         )
         if not peer or peer == "unknown":
             return None
+        session_transport = None
+        if self._session_peer_hash and self.hashes_equivalent(peer, self._session_peer_hash):
+            session_transport = self._session_transport
+        if session_transport:
+            preferred = self._link_for_peer(peer, transport=session_transport)
+            if preferred and self._link_interface_healthy(preferred):
+                if self._link_matches_peer(preferred, peer) and self._link_acceptable_for_peer(preferred, peer):
+                    return preferred
         expected = self._peer_expected_transport_families(peer)
         if expected == {"serial"}:
             prefer = ("serial",)
@@ -2966,12 +3048,12 @@ class MessagingBackend:
             return True
         return self._peer_link_active(dest_hex, clean)
 
-    def _peer_link_active(self, dest_hex, alt_hex=None):
+    def _peer_link_active(self, dest_hex, alt_hex=None, transport=None):
         for raw in (dest_hex, alt_hex):
             if not raw:
                 continue
             peer = self.dest_hash_for(raw)
-            link = self._link_for_peer(peer)
+            link = self._link_for_peer(peer, transport=transport)
             if not link:
                 continue
             try:
@@ -2982,8 +3064,11 @@ class MessagingBackend:
                 active
                 and self._link_matches_peer(link, peer)
                 and self._link_acceptable_for_peer(link, peer)
+                and self._link_transport_matches(link, transport)
             ):
                 return True
+        if transport:
+            return False
         found = self._find_active_link_for_peer(dest_hex, alt_hex)
         if not found:
             return False
@@ -2993,12 +3078,15 @@ class MessagingBackend:
             and self._link_acceptable_for_peer(found, peer)
         )
 
-    def _peer_link_usable(self, dest_hex, alt_hex=None):
+    def _peer_link_usable(self, dest_hex, alt_hex=None, transport=None):
         """True when an active link also has a healthy interface and RNS path."""
-        if not self._peer_link_active(dest_hex, alt_hex):
+        if not self._peer_link_active(dest_hex, alt_hex, transport=transport):
             return False, None
         peer = self.dest_hash_for(dest_hex)
-        adopt = self._link_for_peer(peer) or self._find_active_link_for_peer(dest_hex, alt_hex)
+        adopt = (
+            self._link_for_peer(peer, transport=transport)
+            or self._find_active_link_for_peer(dest_hex, alt_hex)
+        )
         if not adopt:
             return False, None
         if not self._link_interface_healthy(adopt) or not self._peer_has_path(dest_hex):
@@ -4313,7 +4401,7 @@ class MessagingBackend:
 
     def connect_to(self, destination_hash_hex, peer_ip=None, peer_port=None, peer_lookup=None,
                    caller_ip=None, caller_port=8742, replace=False, failover=False,
-                   respond_to_wake=False, user_initiated=False):
+                   respond_to_wake=False, user_initiated=False, prefer_transport=None):
         with self._connect_lock:
             if self._interrupted():
                 return False
@@ -4335,6 +4423,7 @@ class MessagingBackend:
                     failover=failover,
                     respond_to_wake=respond_to_wake,
                     user_initiated=user_initiated,
+                    prefer_transport=prefer_transport,
                 )
             finally:
                 self._connect_in_progress = False
@@ -4342,8 +4431,13 @@ class MessagingBackend:
     def _connect_to_locked(self, destination_hash_hex, peer_ip=None, peer_port=None,
                            peer_lookup=None, caller_ip=None, caller_port=8742,
                            replace=False, failover=False, respond_to_wake=False,
-                           user_initiated=False):
+                           user_initiated=False, prefer_transport=None):
             clean = normalize_hash(destination_hash_hex)
+            requested_transport = (
+                self._normalize_transport(prefer_transport)
+                if prefer_transport
+                else None
+            )
             if len(clean) != 32:
                 print(f"[connect] Invalid hash length ({len(clean)} chars, expected 32)")
                 return False
@@ -4362,6 +4456,8 @@ class MessagingBackend:
                 session_hash = self.dest_hash_for(clean) or clean
                 self._session_peer_hash = session_hash
                 self.active_peer_hash = session_hash
+                if requested_transport:
+                    self._session_transport = requested_transport
                 self._teardown_other_peer_links(session_hash)
                 if (
                     peer_ip
@@ -4395,27 +4491,50 @@ class MessagingBackend:
             old_link = None
             if self.active_link and self.active_peer_hash and self.hashes_equivalent(clean, self.active_peer_hash):
                 link_ok = self._link_interface_healthy(self.active_link) and self._peer_has_path(clean)
+                active_transport = self._transport_from_link(self.active_link)
+                transport_ok = (
+                    not requested_transport
+                    or active_transport == requested_transport
+                )
                 if not replace:
-                    if link_ok:
-                        print(f"[connect] Already connected to {self.active_peer_hash[:16]}...")
-                        return self._finish_connect(clean, link=self.active_link)
-                    print(f"[connect] Stale link to {self.active_peer_hash[:16]}... — reconnecting")
-                    self._teardown_active_link(preserve_peer=True, handoff=True)
-                elif self._link_path_score(self.active_link) >= 90 and link_ok:
-                    return self._finish_connect(clean, link=self.active_link)
+                    if link_ok and transport_ok:
+                        print(
+                            f"[connect] Already connected to {self.active_peer_hash[:16]}..."
+                            f" ({active_transport})"
+                        )
+                        return self._finish_connect(
+                            clean, link=self.active_link, transport=requested_transport,
+                        )
+                    if link_ok and not transport_ok:
+                        print(
+                            f"[connect] Active {active_transport} link — "
+                            f"opening separate {requested_transport} session..."
+                        )
+                    elif not link_ok:
+                        print(f"[connect] Stale link to {self.active_peer_hash[:16]}... — reconnecting")
+                        self._teardown_active_link(preserve_peer=True, handoff=True)
+                elif self._link_path_score(self.active_link) >= 90 and link_ok and transport_ok:
+                    return self._finish_connect(
+                        clean, link=self.active_link, transport=requested_transport,
+                    )
                 else:
                     old_link = self.active_link
                     self._teardown_active_link(preserve_peer=True, handoff=True)
                     print(f"[connect] Replacing link to {self.active_peer_hash[:16]} for better path...")
-            elif self._peer_link_active(clean):
-                usable, adopt = self._peer_link_usable(clean)
+            elif self._peer_link_active(clean, transport=requested_transport):
+                usable, adopt = self._peer_link_usable(clean, transport=requested_transport)
                 if usable:
-                    print(f"[connect] Already linked to {clean[:16]}... (parallel session)")
+                    print(
+                        f"[connect] Already linked to {clean[:16]}... "
+                        f"({self._transport_from_link(adopt) if adopt else requested_transport or 'active'})"
+                    )
                     if user_initiated and adopt:
                         self._notify_link_established(
                             adopt, clean, promote_active=True, background=False,
                         )
-                    return self._finish_connect(clean, link=adopt)
+                    return self._finish_connect(
+                        clean, link=adopt, transport=requested_transport,
+                    )
                 pruned = self._teardown_stale_peer_links(clean, handoff=True)
                 if pruned:
                     print(f"[connect] Closed {pruned} stale link(s) for {clean[:16]}...")
@@ -4462,17 +4581,23 @@ class MessagingBackend:
 
             my_hash = normalize_hash(self.my_dest_hash or dest_hex)
             inbound = self._find_active_link_for_peer(dest_hex, clean)
-            if inbound:
+            if inbound and self._link_transport_matches(inbound, requested_transport):
                 self._cache_link_peer(inbound, dest_hex)
                 self._notify_link_established(
                     inbound, dest_hex, promote_active=True, background=False,
                 )
                 print(f"[connect] Adopted inbound link to {dest_hex[:16]}...")
-                return self._finish_connect(dest_hex, link=inbound)
-            usable, adopt = self._peer_link_usable(dest_hex, clean)
+                return self._finish_connect(
+                    dest_hex, link=inbound, transport=requested_transport,
+                )
+            usable, adopt = self._peer_link_usable(
+                dest_hex, clean, transport=requested_transport,
+            )
             if usable:
                 print(f"[connect] Already linked to {dest_hex[:16]}... (inbound)")
-                return self._finish_connect(dest_hex, link=adopt)
+                return self._finish_connect(
+                    dest_hex, link=adopt, transport=requested_transport,
+                )
             if adopt:
                 pruned = self._teardown_stale_peer_links(dest_hex, handoff=True)
                 if pruned:
@@ -4489,6 +4614,11 @@ class MessagingBackend:
             prefer_serial = self._should_prefer_serial_connect(
                 dest_hex, peer_ip=peer_ip, peer_lookup=peer_lookup,
             )
+            if requested_transport == "serial":
+                prefer_serial = True
+                peer_ip = None
+            elif requested_transport == "lan":
+                prefer_serial = False
             serial_only = serial_ready and (prefer_serial or not lan_ready or peer_lan_down)
             prune_stale_lan_paths()
             bridged = prune_bridged_lan_paths()
@@ -4509,8 +4639,13 @@ class MessagingBackend:
                     destination, dest_hex, clean, old_link=old_link,
                     prime_timeout=prime_timeout,
                 ):
-                    adopt = self._link_for_peer(dest_hex) or self.active_link
-                    return self._finish_connect(dest_hex, link=adopt)
+                    adopt = (
+                        self._link_for_peer(dest_hex, transport="serial")
+                        or self.active_link
+                    )
+                    return self._finish_connect(
+                        dest_hex, link=adopt, transport="serial",
+                    )
                 print("[connect] Peer not reachable (serial)")
                 return False
 

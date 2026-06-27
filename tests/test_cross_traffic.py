@@ -64,8 +64,8 @@ class CrossTrafficRoutingTests(unittest.TestCase):
         backend.links[windows_udp.link_id] = windows_udp
         backend._link_peer_hashes[ubuntu_serial.link_id] = UBUNTU
         backend._link_peer_hashes[windows_udp.link_id] = WINDOWS
-        backend.peer_links[UBUNTU] = ubuntu_serial
-        backend.peer_links[WINDOWS] = windows_udp
+        backend.peer_links[backend._link_map_key(UBUNTU, "serial")] = ubuntu_serial
+        backend.peer_links[backend._link_map_key(WINDOWS, "lan")] = windows_udp
         backend.active_link = windows_udp
         backend.active_peer_hash = WINDOWS
         backend._session_peer_hash = WINDOWS
@@ -143,7 +143,10 @@ class CrossTrafficRoutingTests(unittest.TestCase):
                 )
         self.assertIs(backend.active_link, windows_udp)
         self.assertEqual(backend.active_peer_hash, WINDOWS)
-        self.assertEqual(backend.peer_links.get(UBUNTU), ubuntu_serial)
+        self.assertEqual(
+            backend.peer_links.get(backend._link_map_key(UBUNTU, "serial")),
+            ubuntu_serial,
+        )
 
     def test_link_needs_failover_blocks_cross_transport_in_parallel_mode(self):
         resolver = lambda h: {
@@ -383,8 +386,8 @@ class DiscoveryDedupTests(unittest.TestCase):
                         "via": "serial",
                         "last_seen": 2,
                     })
-        self.assertNotIn(stale_hash, disc.peers)
-        self.assertIn(ARCH, disc.peers)
+        self.assertFalse(disc.has_peer_hash(stale_hash))
+        self.assertTrue(disc.has_peer_hash(ARCH))
 
 
 if __name__ == "__main__":

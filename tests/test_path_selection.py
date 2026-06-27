@@ -114,6 +114,35 @@ class PathSelectionTests(unittest.TestCase):
         self.assertIn("serial", vias)
         self.assertIn("rns", vias)
 
+    def test_store_peer_keeps_same_hash_lan_and_serial_rows(self):
+        """Same destination hash on USB and LAN must not overwrite each other."""
+        disc = PeerDiscovery()
+        disc.accept_peers = True
+        now = time.time()
+        serial = {
+            "hash": ARCH,
+            "identity_hash": IDENT,
+            "name": "330s",
+            "via": "serial",
+            "last_seen": now,
+        }
+        lan = {
+            "hash": ARCH,
+            "identity_hash": IDENT,
+            "name": "330s",
+            "via": "rns",
+            "ip": "10.0.30.101",
+            "last_seen": now,
+        }
+        with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
+            self.assertTrue(disc._store_peer(serial))
+            self.assertTrue(disc._store_peer(lan))
+            peers = disc.get_peers(scope_ip="10.0.30.101")
+        self.assertEqual(len(peers), 2)
+        vias = {p.get("via") for p in peers}
+        self.assertIn("serial", vias)
+        self.assertIn("rns", vias)
+
 
 class TimingConstantsTests(unittest.TestCase):
     def test_probe_and_beacon_intervals_are_30s(self):

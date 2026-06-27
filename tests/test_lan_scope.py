@@ -123,7 +123,7 @@ class LanScopeTests(unittest.TestCase):
                 "via": "rns",
                 "last_seen": now,
             })
-        self.assertNotIn(peer_hash, disc.peers)
+        self.assertFalse(disc.has_peer_hash(peer_hash))
         self.assertEqual(evicted, [[peer_hash]])
 
     def test_ipless_rns_peer_rejected_when_serial_active(self):
@@ -155,8 +155,10 @@ class LanScopeTests(unittest.TestCase):
                     "last_seen": __import__("time").time(),
                 })
         self.assertTrue(ok)
-        self.assertEqual(disc.peers[peer_hash].get("via"), "serial")
-        self.assertNotIn("ip", disc.peers[peer_hash])
+        row = disc.peer_row(peer_hash, via="serial")
+        self.assertIsNotNone(row)
+        self.assertEqual(row.get("via"), "serial")
+        self.assertNotIn("ip", row)
 
     def test_serial_via_peer_bypasses_scope(self):
         from unittest.mock import patch
@@ -170,7 +172,7 @@ class LanScopeTests(unittest.TestCase):
                     "via": "serial",
                     "last_seen": __import__("time").time(),
                 })
-        self.assertIn("t" * 32, disc.peers)
+        self.assertTrue(disc.has_peer_hash("t" * 32))
 
     def test_scoped_peers_hide_ipless_entries_without_serial(self):
         from unittest.mock import patch

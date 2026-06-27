@@ -3,6 +3,18 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.5.1": [
+        "LAN and USB are separate connections — tap the LAN or USB sub-row to connect on that transport; both can stay linked at once.",
+        "Discovered list keeps serial and LAN rows for the same peer instead of overwriting each other.",
+        "Android: back from chat returns to contacts first; back again minimizes the app.",
+        "Contact names no longer flash the full RNS hash when saving a peer.",
+    ],
+    "0.5.0": [
+        "LAN and USB each have their own RNS identity and connect hash — no more switching transports mid-chat.",
+        "Sidebar: Announce LAN and Announce Serial (separate buttons). Discovered shows name · LAN and name · USB.",
+        "Contacts: one card with LAN/USB sub-rows. Settings → Profile: regenerate each identity separately.",
+        "Setup requires picking a LAN IPv4. Per-transport probe/announce intervals (0 = off, up to 5 hours).",
+    ],
     "0.4.2": [
         "Tap a contact to wake sleeping LAN peers — messages send again without re-announce (especially after Android screen lock).",
         "Saved contacts show live RTT; peers you already saved no longer duplicate in Discovered.",

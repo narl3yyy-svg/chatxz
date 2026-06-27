@@ -2522,11 +2522,12 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
-    def _discovery_peer_for_connect(self, peer_ip, hash_hex):
+    def _discovery_peer_for_connect(self, peer_ip, hash_hex, via=None):
         from chatxz.core.discovery import normalize_hash
         if not self.discovery:
             return None
         clean = normalize_hash(hash_hex)
+        requested = (via or "").strip().lower()
         by_hash = None
         by_serial = None
         by_rns = None
@@ -2537,13 +2538,19 @@ class ChatWebServer:
             if peer_ip and p.get("ip") == peer_ip:
                 by_ip = p
             if clean and (ph == clean or ih == clean):
-                via = (p.get("via") or "").strip()
-                if via == "serial":
+                pvia = (p.get("via") or "").strip()
+                if pvia == "serial":
                     by_serial = p
                 else:
                     by_hash = by_hash or p
-                if via == "rns":
+                if pvia == "rns":
                     by_rns = p
+        if requested == "serial" and by_serial:
+            return by_serial
+        if requested in ("lan", "rns", "beacon") and by_rns:
+            return by_rns
+        if requested in ("lan", "rns", "beacon") and by_hash:
+            return by_hash
         if by_serial and by_rns:
             from chatxz.core.discovery import serial_discovery_active
             from chatxz.utils.lan_scope import peer_in_scope
@@ -2606,6 +2613,7 @@ class ChatWebServer:
                 return web.json_response({"error": "hash required"}, status=400)
             peer_ip = (data.get("ip") or "").strip() or None
             peer_port = data.get("port") or 8742
+            prefer_via = (data.get("via") or "").strip() or None
             self._enable_discovery(clear=False)
             settings = self.load_settings()
             configured = settings.get("rns_interfaces")
@@ -2638,7 +2646,9 @@ class ChatWebServer:
                 return web.json_response({
                     "error": "Stale peer hash — use the peer in Discovered or wait for Announce",
                 }, status=400)
-            peer_info = self._discovery_peer_for_connect(peer_ip, resolved_hash)
+            peer_info = self._discovery_peer_for_connect(
+                peer_ip, resolved_hash, via=prefer_via,
+            )
             if not peer_info:
                 peer_info = self._peer_in_discovery(resolved_hash, peer_ip)
             if peer_info:
@@ -2660,13 +2670,14 @@ class ChatWebServer:
                 resolved_hash,
                 peer_ip,
                 peer_port,
-                self._discovery_peer_for_connect,
+                lambda ip, h: self._discovery_peer_for_connect(ip, h, via=prefer_via),
                 caller_ip,
                 self.port,
                 False,
                 False,
                 False,
                 True,
+                prefer_via,
             )
             if self._shutting_down or ok is None:
                 return web.json_response({"error": "server shutting down"}, status=503)

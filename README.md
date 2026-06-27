@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — each transport uses its own RNS identity, and messages travel over encrypted links on your LAN (Wi‑Fi, Ethernet, USB serial).
 
-**Current version:** 0.5.0
+**Current version:** 0.5.1
 
 ## How chatxz works (v0.5+)
 
@@ -14,6 +14,7 @@ chatxz treats **LAN** and **USB serial** as **separate endpoints** on the same d
 | **USB serial** | `identities/identity_serial` | Serial hash | `ubuntu · USB` |
 
 - **No auto-failover** — the transport you tap is the transport used for chat.
+- **Independent links (v0.5.1+)** — LAN and USB can both stay connected to the same peer; pick the sub-row to chat on that path.
 - **One contact card** can hold both hashes with **LAN** and **USB** sub-rows.
 - **Separate announce buttons** — **Announce LAN** and **Announce Serial** in the sidebar.
 - Upgrading from older versions **migrates** `identities/identity` → `identity_lan` automatically.
@@ -46,7 +47,7 @@ Regenerate identities under **Settings → Profile** (**Regenerate LAN** / **Reg
 ### Troubleshooting
 
 - **Serial peer missing after Announce** — tap **Announce Serial** (not LAN only); ensure USB serial is online in Settings → Network.
-- **Two rows for one name** — expected when a peer has both LAN and USB identities.
+- **Two rows for one name** — expected when a peer has both LAN and USB; both stay visible in Discovered (v0.5.1+).
 - **Android sleep** — tap the contact to wake and reconnect (LAN wake is automatic).
 - **Cross-subnet LAN** — pick matching pinned IPv4 on both devices.
 
@@ -286,6 +287,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.5.1** — **Separate LAN + USB connections:** discovery keeps both rows; connect respects transport (`via`); parallel links per peer; Android back navigation fixed; contact name flash fixed
 - **v0.5.0** — **Dual identity:** separate LAN and USB RNS identities (no failover); split Announce LAN / Announce Serial; mandatory LAN IPv4; per-transport probe/announce intervals; contact cards with LAN/USB sub-rows; identity regen in Profile
 - **v0.4.2** — **LAN wake + Android UX:** tap a contact to wake sleeping peers and reconnect; RTT on saved contacts; saved peers hidden from Discovered; Android APK uses contact list as home with two-step back navigation
 - **v0.4.1** — **LAN RTT + ping interval:** Discovered LAN peers show RTT ms; Settings → Network → Link ping interval (5–300s) for LAN and serial; Android beacons visible on desktop without full identity registration
