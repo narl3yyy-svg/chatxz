@@ -3337,8 +3337,8 @@ function renderDiscovered(peers, opts) {
     div.className = 'contact-item' + (active ? ' active' : '');
     const baseName = p.name || truncateHash(p.hash);
     const unread = unreadForPeer(p.hash);
-    const linked = isPeerLinked(p.hash, isSerial ? 'serial' : 'lan');
     const isSerial = (p.via || p.transport || '') === 'serial';
+    const linked = isPeerLinked(p.hash, isSerial ? 'serial' : 'lan');
     const transportLabel = isSerial ? 'USB' : 'LAN';
     const transportTag = isSerial ? ' · USB' : ' · LAN';
     const transportHint = isSerial ? '' : (p.ip ? ' · ' + escapeHtml(p.ip) : '');
@@ -4193,7 +4193,9 @@ function lanInterfaceSelectHtml(interfaces) {
 
 function peerMergeKey(p) {
   if (!p) return '';
-  return peerKey(p.identity_hash) || peerKey(p.hash) || (p.pubkey ? String(p.pubkey).slice(0, 48) : '');
+  const via = (p.via || p.transport || '') === 'serial' ? 'serial' : 'lan';
+  const base = peerKey(p.identity_hash) || peerKey(p.hash) || (p.pubkey ? String(p.pubkey).slice(0, 48) : '');
+  return base ? `${base}:${via}` : '';
 }
 
 function contactMatchesPeer(c, p) {

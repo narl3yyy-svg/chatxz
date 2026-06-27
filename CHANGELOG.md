@@ -2,6 +2,12 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.5.2] — 2026-06-27
+
+### Fixed
+- **Discovered list empty in web UI** — `renderDiscovered` referenced `isSerial` before it was defined (ReferenceError), so peers visible in the server log never rendered in the sidebar.
+- **LAN + USB rows merging in UI** — `peerMergeKey` now includes transport so both discovered rows stay visible.
+
 ## [0.5.1] — 2026-06-27
 
 ### Fixed

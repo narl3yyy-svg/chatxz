@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.5.2": [
+        "Fixed Discovered list not showing peers in the web UI (server log was fine).",
+        "LAN and USB rows in Discovered stay separate instead of merging into one.",
+    ],
     "0.5.1": [
         "LAN and USB are separate connections — tap the LAN or USB sub-row to connect on that transport; both can stay linked at once.",
         "Discovered list keeps serial and LAN rows for the same peer instead of overwriting each other.",
