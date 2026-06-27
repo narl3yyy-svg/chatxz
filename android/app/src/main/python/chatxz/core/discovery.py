@@ -435,17 +435,11 @@ class PeerDiscovery:
             )
             if same_hash:
                 continue
-            if same_ident or same_pubkey:
-                if existing_via and new_via and existing_via != new_via:
-                    continue
-                removed.append(normalize_hash(existing.get("hash")) or key)
-                del self.peers[key]
+            ex_family = "serial" if existing_via == "serial" else "lan"
+            new_family = "serial" if new_via == "serial" else "lan"
+            if ex_family != new_family:
                 continue
-            if (
-                same_name
-                and new_via == "serial"
-                and existing_via in ("rns", "beacon")
-            ):
+            if same_ident or same_pubkey:
                 removed.append(normalize_hash(existing.get("hash")) or key)
                 del self.peers[key]
                 continue

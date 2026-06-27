@@ -2709,6 +2709,7 @@ function fetchIdentity() {
       window._identitySerial = d.serial || null;
       myHash = d.lan?.connect_hash || d.connect_hash || d.hash;
       mySerialHash = d.serial?.connect_hash || '';
+      updateSerialAnnounceVisibility(!!d.serial_active || !!d.serial_configured || !!d.serial_in_rns);
       updateIdentityDisplays();
       updateAndroidDebugLogHint(d.debug_log_path);
       renderContacts(d.contacts);
@@ -2842,36 +2843,46 @@ function handleWSMessage(msg) {
   } else if (msg.type === 'peer_superseded') {
     const data = msg.data || {};
     const removed = data.removed || [];
+    const contactHasHash = (c, h) => {
+      const key = peerKey(h);
+      if (!key) return false;
+      return [c.hash, c.lan_hash, c.serial_hash, c.identity_hash]
+        .map(peerKey).filter(Boolean).some(k => k === key || peersMatch(k, h));
+    };
     removed.forEach(old => {
       const key = peerKey(old);
+      ['lan', 'serial'].forEach(via => linkedPeers.delete(linkKey(old, via)));
       linkedPeers.delete(key);
-      if (peerKey(viewingPeer) === key) {
-        viewingPeer = data.replacement || null;
-        if (!viewingPeer) closeChat();
+      const repl = data.replacement || (data.replacement_peer && data.replacement_peer.hash);
+      if (repl && viewingPeer && peerKey(viewingPeer) === key) {
+        viewingPeer = repl;
+      } else if (peerKey(viewingPeer) === key && !repl) {
+        viewingPeer = null;
+        closeChat();
       }
-      if (peerKey(linkPeer) === key) linkPeer = null;
+      if (linkPeer && peerKey(linkPeer.split(':')[0]) === key) linkPeer = null;
       window._discoveredPeers = (window._discoveredPeers || []).filter(p =>
         peerKey(p.hash) !== key && peerKey(p.identity_hash) !== key
       );
-      allContacts = allContacts.filter(c =>
-        peerKey(c.hash) !== key && peerKey(c.identity_hash) !== key
-      );
+      allContacts = allContacts.filter(c => !contactHasHash(c, old));
     });
     if (data.replacement_peer) {
       registerPeerAliases(data.replacement_peer.hash, data.replacement_peer.identity_hash);
     }
-    renderContacts(allContacts);
+    fetchIdentity();
     renderDiscovered(window._discoveredPeers || []);
     updatePeerHeader();
     if (removed.length) {
       const repl = data.replacement || (data.replacement_peer && data.replacement_peer.hash);
-      toast(repl
-        ? 'Peer list updated — your contact was refreshed automatically'
-        : 'Peer list updated — pick the peer from Discovered');
-      if (repl && viewingPeer && removed.some(h => peerKey(h) === peerKey(viewingPeer))) {
-        openChat(repl, false, data.replacement_peer);
-      } else if (!repl) {
-        setLinkStatus('disconnected', 'Inactive');
+      const replVia = data.replacement_peer?.via;
+      if (repl) {
+        toast('Peer list updated — your contact was refreshed automatically');
+        if (viewingPeer && removed.some(h => peerKey(h) === peerKey(viewingPeer))) {
+          openChat(repl, false, { ...data.replacement_peer, via: replVia });
+        }
+      } else {
+        toast('Peer list updated — pick the peer from Discovered');
+        if (!viewingPeer) setLinkStatus('disconnected', 'Inactive');
       }
     }
   } else if (msg.type === 'progress') {
@@ -2919,8 +2930,11 @@ function handleWSMessage(msg) {
       toast('Connected!');
     }
   } else if (msg.type === 'connect_fail') {
+    const alreadyLinked = viewingPeer && isPeerLinked(viewingPeer, viewingVia);
     connectInFlight = false;
-    toast('Connection failed: ' + (msg.error || 'peer not reachable'));
+    if (!alreadyLinked && !linkedPeers.size) {
+      toast('Connection failed: ' + (msg.error || 'peer not reachable'));
+    }
   } else if (msg.type === 'peer_history_cleared') {
     if (viewingPeer && peersMatch(msg.data?.peer, viewingPeer)) {
       document.getElementById('messages').innerHTML = '';
@@ -3196,8 +3210,13 @@ function contactSerialHash(c) {
 
 function contactViewingActive(c) {
   if (!viewingPeer) return false;
-  return [contactLanHash(c), contactSerialHash(c)].filter(Boolean)
-    .some(h => peersMatch(h, viewingPeer));
+  const via = normalizeVia(viewingVia);
+  const targets = via === 'serial'
+    ? [contactSerialHash(c)]
+    : via === 'lan'
+      ? [contactLanHash(c)]
+      : [contactLanHash(c), contactSerialHash(c)];
+  return targets.filter(Boolean).some(h => peersMatch(h, viewingPeer));
 }
 
 function discoveredForContactTransport(contact, via) {
@@ -3333,11 +3352,12 @@ function renderDiscovered(peers, opts) {
   discovered.forEach(p => {
     if (p.identity_hash) registerPeerAliases(p.hash, p.identity_hash);
     const div = document.createElement('div');
-    const active = peersMatch(p.hash, viewingPeer);
+    const isSerial = (p.via || p.transport || '') === 'serial';
+    const pVia = isSerial ? 'serial' : 'lan';
+    const active = peersMatch(p.hash, viewingPeer) && normalizeVia(viewingVia) === pVia;
     div.className = 'contact-item' + (active ? ' active' : '');
     const baseName = p.name || truncateHash(p.hash);
     const unread = unreadForPeer(p.hash);
-    const isSerial = (p.via || p.transport || '') === 'serial';
     const linked = isPeerLinked(p.hash, isSerial ? 'serial' : 'lan');
     const transportLabel = isSerial ? 'USB' : 'LAN';
     const transportTag = isSerial ? ' · USB' : ' · LAN';
@@ -3561,12 +3581,14 @@ function connectTo(hash, ip, port, via, opts) {
       setLinkPeer(connected, true, via);
       if (d.linked_peers) syncLinkedPeers(d.linked_peers);
       if (viewingPeer && peersMatch(viewingPeer, connected)) updatePeerHeader();
-      else openChat(connected, false);
+      else openChat(connected, false, {via});
       toast('Connected!');
-    } else {
+    } else if (!(viewingPeer && isPeerLinked(viewingPeer, via))) {
       toast('Connection failed: ' + (d.error || 'unknown'));
     }
-  }).catch(() => toast('Connection failed'))
+  }).catch(() => {
+    if (!(viewingPeer && isPeerLinked(viewingPeer, via))) toast('Connection failed');
+  })
     .finally(() => { connectInFlight = false; });
 }
 

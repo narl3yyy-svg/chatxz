@@ -41,6 +41,83 @@ def contact_primary_hash(contact):
     )
 
 
+def _contact_hashes(contact):
+    c = normalize_contact(contact or {})
+    out = set()
+    for key in ("hash", "lan_hash", "serial_hash", "identity_hash", "lan_identity_hash", "serial_identity_hash"):
+        h = (c.get(key) or "").replace(":", "")
+        if h:
+            out.add(h)
+    return out
+
+
+def find_contact_by_hash(config_dir, peer_hash):
+    """Return a saved contact matching any stored hash field."""
+    clean = (peer_hash or "").strip().replace(":", "")
+    if not clean:
+        return None
+    for contact in list_contacts(config_dir):
+        if clean in _contact_hashes(contact):
+            return normalize_contact(contact)
+    return None
+
+
+def contact_has_hash(config_dir, peer_hash):
+    return find_contact_by_hash(config_dir, peer_hash) is not None
+
+
+def update_contact_transport_hash(
+    config_dir,
+    old_hash,
+    new_hash,
+    via=None,
+    name=None,
+    ip=None,
+    port=None,
+    identity_hash=None,
+):
+    """Refresh lan_hash or serial_hash when discovery supersedes one transport row."""
+    old_clean = (old_hash or "").strip().replace(":", "")
+    new_clean = (new_hash or "").strip().replace(":", "")
+    if not old_clean or not new_clean or old_clean == new_clean:
+        return None
+    contact = find_contact_by_hash(config_dir, old_clean)
+    if not contact:
+        return None
+    entry = dict(contact)
+    transport = (via or "").strip().lower()
+    is_serial = transport == "serial" or (
+        not transport and old_clean == (entry.get("serial_hash") or "").replace(":", "")
+    )
+    if is_serial:
+        entry["serial_hash"] = new_clean
+        if identity_hash:
+            entry["serial_identity_hash"] = str(identity_hash).strip().replace(":", "")
+    else:
+        entry["lan_hash"] = new_clean
+        entry["hash"] = new_clean
+        if identity_hash:
+            ident = str(identity_hash).strip().replace(":", "")
+            entry["lan_identity_hash"] = ident
+            entry["identity_hash"] = ident
+        if ip is not None and str(ip).strip():
+            entry["ip"] = str(ip).strip()
+        if port is not None:
+            try:
+                entry["port"] = int(port)
+            except (TypeError, ValueError):
+                pass
+    if name is not None and str(name).strip():
+        entry["name"] = str(name).strip()
+    file_key = contact_primary_hash(entry) or new_clean
+    path = _contact_path(config_dir, file_key)
+    with open(path, "w") as fh:
+        json.dump(normalize_contact(entry), fh, indent=2)
+    if old_clean != file_key:
+        delete_contact(config_dir, old_clean)
+    return normalize_contact(entry)
+
+
 def load_contact(config_dir, filename):
     path = os.path.join(contacts_dir(config_dir), filename)
     if not os.path.isfile(path):
@@ -150,36 +227,57 @@ def list_contacts(config_dir):
     return out
 
 
-def migrate_contact_hash(config_dir, old_hash, new_hash, name=None, ip=None, port=None, identity_hash=None):
-    """Rename a saved contact when discovery supersedes an alias hash."""
+def migrate_contact_hash(
+    config_dir,
+    old_hash,
+    new_hash,
+    name=None,
+    ip=None,
+    port=None,
+    identity_hash=None,
+    via=None,
+):
+    """Update a saved contact when discovery supersedes an alias hash."""
     old_clean = (old_hash or "").strip().replace(":", "")
     new_clean = (new_hash or "").strip().replace(":", "")
     if not old_clean or not new_clean or old_clean == new_clean:
         return False
-    entry = load_contact(config_dir, old_clean)
+    entry = find_contact_by_hash(config_dir, old_clean) or load_contact(config_dir, old_clean)
     if not entry:
         return False
+    entry = normalize_contact(dict(entry))
+    transport = (via or "").strip().lower()
+    is_serial = transport == "serial" or (
+        not transport
+        and old_clean == (entry.get("serial_hash") or "").replace(":", "")
+        and old_clean != (entry.get("lan_hash") or entry.get("hash") or "").replace(":", "")
+    )
+    if is_serial:
+        entry["serial_hash"] = new_clean
+        if identity_hash:
+            entry["serial_identity_hash"] = str(identity_hash).strip().replace(":", "")
+    else:
+        entry["lan_hash"] = new_clean
+        entry["hash"] = new_clean
+        if identity_hash:
+            ident = str(identity_hash).strip().replace(":", "")
+            entry["lan_identity_hash"] = ident
+            entry["identity_hash"] = ident
+        if ip is not None and str(ip).strip():
+            entry["ip"] = str(ip).strip()
+        if port is not None:
+            try:
+                entry["port"] = int(port)
+            except (TypeError, ValueError):
+                pass
     if name is not None and str(name).strip():
         entry["name"] = str(name).strip()
-    if ip is not None and str(ip).strip():
-        entry["ip"] = str(ip).strip()
-    if port is not None:
-        try:
-            entry["port"] = int(port)
-        except (TypeError, ValueError):
-            pass
-    if identity_hash is not None and str(identity_hash).strip():
-        entry["identity_hash"] = str(identity_hash).strip().replace(":", "")
-    entry["hash"] = new_clean
-    delete_contact(config_dir, old_clean)
-    save_contact(
-        config_dir,
-        new_clean,
-        name=entry.get("name"),
-        ip=entry.get("ip"),
-        port=entry.get("port"),
-        identity_hash=entry.get("identity_hash"),
-    )
+    file_key = contact_primary_hash(entry) or new_clean
+    path = _contact_path(config_dir, file_key)
+    with open(path, "w") as fh:
+        json.dump(entry, fh, indent=2)
+    if old_clean != file_key:
+        delete_contact(config_dir, old_clean)
     return True
 
 

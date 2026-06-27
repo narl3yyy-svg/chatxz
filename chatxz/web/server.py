@@ -16,12 +16,15 @@ from chatxz.core.discovery import PeerDiscovery
 from chatxz.core.lan_beacon import LanBeacon, BEACON_PORT
 from chatxz.core.contacts import (
     contact_connect_meta,
+    contact_has_hash,
     delete_contact as delete_saved_contact,
+    find_contact_by_hash,
     migrate_contact_by_ip,
     migrate_contact_hash,
     list_contacts,
     save_contact,
     update_contact_endpoint,
+    update_contact_transport_hash,
 )
 from chatxz.utils.file_serve import stream_file_response
 from chatxz.core.lan_rns import (
@@ -1992,6 +1995,8 @@ class ChatWebServer:
         clean = self._peer_dest_hash(peer_hash)
         if not clean:
             return False
+        if contact_has_hash(self.config_dir, clean):
+            return True
         scope_ip = self._discovery_scope_ip()
         if (
             scope_ip
@@ -2013,16 +2018,27 @@ class ChatWebServer:
             return self.discovery.peer_is_current(clean, scope_ip=scope_ip)
         return False
 
-    def _resolve_current_peer_hash(self, peer_hash, peer_ip=None):
+    def _peer_matches_transport(self, peer, prefer_via):
+        if not prefer_via:
+            return True
+        requested = (prefer_via or "").strip().lower()
+        pvia = (peer.get("via") or "").strip().lower()
+        if requested == "serial":
+            return pvia == "serial"
+        return pvia in ("rns", "beacon", "lan", "")
+
+    def _resolve_current_peer_hash(self, peer_hash, peer_ip=None, prefer_via=None):
         clean = self._peer_dest_hash(peer_hash)
         if self._peer_is_current(clean):
             return clean
         if peer_ip:
             current = self._current_peer_for_ip(peer_ip)
-            if current:
+            if current and self._peer_matches_transport(current, prefer_via):
                 return self._peer_dest_hash(current.get("hash"))
         if self.discovery:
             for peer in self._scoped_peers():
+                if not self._peer_matches_transport(peer, prefer_via):
+                    continue
                 if self._peers_equivalent(peer.get("hash"), clean):
                     return self._peer_dest_hash(peer.get("hash"))
                 if peer.get("identity_hash") and self._peers_equivalent(
@@ -2134,6 +2150,8 @@ class ChatWebServer:
                 elif not same_peer:
                     self.messaging.disconnect_peer(old)
                     self.messaging.clear_queue(old)
+            new_via = ((new_peer or {}).get("via") or "").strip().lower()
+            contact = find_contact_by_hash(self.config_dir, old)
             if same_peer and replacement:
                 migrate_contact_hash(
                     self.config_dir,
@@ -2143,7 +2161,20 @@ class ChatWebServer:
                     ip=(new_peer or {}).get("ip"),
                     port=(new_peer or {}).get("port"),
                     identity_hash=(new_peer or {}).get("identity_hash"),
+                    via=new_via or None,
                 )
+            elif contact and replacement:
+                update_contact_transport_hash(
+                    self.config_dir,
+                    old,
+                    replacement,
+                    via=new_via or None,
+                    name=(new_peer or {}).get("name"),
+                    ip=(new_peer or {}).get("ip"),
+                    port=(new_peer or {}).get("port"),
+                    identity_hash=(new_peer or {}).get("identity_hash"),
+                )
+                self._schedule_contacts_broadcast()
             else:
                 delete_saved_contact(self.config_dir, old)
                 self._clear_history_for_peer(old)
@@ -2469,6 +2500,12 @@ class ChatWebServer:
             serial_connect = normalize_hash(self.messaging.my_dest_hash_serial)
         elif id_payload.get("serial"):
             serial_connect = normalize_hash(id_payload["serial"].get("connect_hash") or "")
+        configured = settings.get("rns_interfaces")
+        serial_port, _ = configured_serial_port(configured) if configured else ("", 0)
+        serial_active = bool(serial_port and serial_interface_online(serial_port))
+        serial_configured = bool(
+            configured and configured_serial_enabled(configured)
+        )
         return web.json_response({
             "hash": connect,
             "connect_hash": connect,
@@ -2488,6 +2525,9 @@ class ChatWebServer:
             "rns_ready": bool(self.messaging and self.messaging.destination),
             "rns_error": self.rns_init_error,
             "debug_log_path": debug_log_path() if is_android() else None,
+            "serial_active": serial_active,
+            "serial_configured": serial_configured,
+            "serial_in_rns": serial_active,
         })
 
     async def handle_add_contact(self, request):
@@ -2545,12 +2585,10 @@ class ChatWebServer:
                     by_hash = by_hash or p
                 if pvia == "rns":
                     by_rns = p
-        if requested == "serial" and by_serial:
+        if requested == "serial":
             return by_serial
-        if requested in ("lan", "rns", "beacon") and by_rns:
-            return by_rns
-        if requested in ("lan", "rns", "beacon") and by_hash:
-            return by_hash
+        if requested in ("lan", "rns", "beacon"):
+            return by_rns or by_hash
         if by_serial and by_rns:
             from chatxz.core.discovery import serial_discovery_active
             from chatxz.utils.lan_scope import peer_in_scope
@@ -2624,10 +2662,16 @@ class ChatWebServer:
             ):
                 await self._run_blocking(self.messaging._burst_serial_announce, 1)
             resolved_hash = self._resolve_connect_target(peer_hash, peer_ip)
-            resolved_hash = self._resolve_current_peer_hash(resolved_hash, peer_ip)
+            resolved_hash = self._resolve_current_peer_hash(
+                resolved_hash, peer_ip, prefer_via=prefer_via,
+            )
             hub_role = settings.get("hub_role", "off")
             scope_ip = self._discovery_scope_ip()
-            if scope_ip and not self._peer_in_discovery_scope(resolved_hash):
+            if (
+                scope_ip
+                and not contact_has_hash(self.config_dir, resolved_hash)
+                and not self._peer_in_discovery_scope(resolved_hash)
+            ):
                 return web.json_response({
                     "error": (
                         f"Peer is outside pinned LAN scope ({scope_ip}) — "
@@ -2637,6 +2681,7 @@ class ChatWebServer:
             if (
                 self.discovery
                 and hub_role == "off"
+                and not contact_has_hash(self.config_dir, resolved_hash)
                 and not self._peer_is_current(resolved_hash)
                 and not (
                     self.messaging

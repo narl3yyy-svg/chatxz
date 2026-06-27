@@ -362,13 +362,13 @@ class DiscoveryResolverTests(unittest.TestCase):
 
 
 class DiscoveryDedupTests(unittest.TestCase):
-    def test_serial_evicts_stale_rns_duplicate(self):
+    def test_serial_keeps_lan_row_for_same_name_dual_transport(self):
         from chatxz.core.discovery import PeerDiscovery
 
         disc = PeerDiscovery()
-        stale_hash = "aabbccddaabbccddaabbccddaabbccdd"
-        disc.peers[stale_hash] = {
-            "hash": stale_hash,
+        lan_hash = "aabbccddaabbccddaabbccddaabbccdd"
+        disc.peers[lan_hash] = {
+            "hash": lan_hash,
             "name": "ARCH",
             "via": "rns",
             "ip": "10.10.10.37",
@@ -386,7 +386,7 @@ class DiscoveryDedupTests(unittest.TestCase):
                         "via": "serial",
                         "last_seen": 2,
                     })
-        self.assertFalse(disc.has_peer_hash(stale_hash))
+        self.assertTrue(disc.has_peer_hash(lan_hash))
         self.assertTrue(disc.has_peer_hash(ARCH))
 
 

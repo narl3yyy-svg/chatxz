@@ -2,6 +2,16 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.5.3] — 2026-06-27
+
+### Fixed
+- **Contacts deleted on restart** — discovery supersession no longer removes saved contacts when LAN and USB rows share a name; dual-hash contacts update `lan_hash` / `serial_hash` instead of deleting the file.
+- **LAN + USB discovery eviction** — serial announces no longer remove the LAN peer row (and vice versa); both transports stay in Discovered.
+- **Contact USB connect** — connect API honors `via: serial` and saved `serial_hash` instead of falling back to the LAN discovered peer.
+- **USB unplug breaks peers** — contacts and links survive serial interface loss; transport-specific highlighting no longer crosses LAN/USB rows.
+- **Announce Serial on refresh** — `/api/identity` includes `serial_active` so the Serial announce button shows without clicking Announce LAN first.
+- **False connection failed** — UI suppresses failure toasts when a link is already established on the requested transport.
+
 ## [0.5.2] — 2026-06-27
 
 ### Fixed

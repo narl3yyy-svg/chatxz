@@ -3,6 +3,13 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.5.3": [
+        "Saved contacts survive server restart and USB unplug — LAN and USB hashes are kept separately.",
+        "LAN and USB peers no longer evict each other in Discovered when both are visible.",
+        "Connect on a saved contact's USB or LAN row uses that transport, not the other discovered row.",
+        "Announce Serial button shows on page load when USB is configured.",
+        "No more false 'connection failed' toast when you are already connected on LAN.",
+    ],
     "0.5.2": [
         "Fixed Discovered list not showing peers in the web UI (server log was fine).",
         "LAN and USB rows in Discovered stay separate instead of merging into one.",
