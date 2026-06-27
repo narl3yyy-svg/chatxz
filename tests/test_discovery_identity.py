@@ -107,8 +107,9 @@ class DiscoveryIdentityTests(unittest.TestCase):
         disc.accept_peers = True
         peer_hash = bytes.fromhex("436ce5fd79d0932d436ce5fd79d0932d")
         app_data = b'{"app":"chatxz","name":"ARCH"}'
-        with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
-            with patch("chatxz.core.lan_rns.peer_path_on_family", return_value=None):
+        serial_iface = MagicMock()
+        with patch("chatxz.core.discovery.announce_packet_receiving_interface", return_value=serial_iface):
+            with patch("chatxz.core.discovery.interface_family", return_value="serial"):
                 disc._on_announce(peer_hash, app_data, announced_identity=None)
         self.assertIn("436ce5fd79d0932d436ce5fd79d0932d", disc.peers)
         self.assertEqual(disc.peers["436ce5fd79d0932d436ce5fd79d0932d"]["via"], "serial")
@@ -125,24 +126,38 @@ class DiscoveryIdentityTests(unittest.TestCase):
         peers = disc.get_peers()
         self.assertEqual(peers, [])
 
-    def test_out_of_scope_lan_ip_reclassified_as_serial(self):
+    def test_out_of_scope_lan_ip_rejected_even_when_usb_up(self):
         disc = PeerDiscovery()
         disc.running = True
         disc.accept_peers = True
         peer_hash = bytes.fromhex("f1c2ac9061239f7c096701f02969729c")
         app_data = b'{"app":"chatxz","name":"ubuntu","ip":"10.0.5.10"}'
         lan_iface = MagicMock()
-        with patch("chatxz.core.discovery.announce_receiving_interface", return_value=lan_iface):
+        with patch("chatxz.core.discovery.announce_packet_receiving_interface", return_value=lan_iface):
             with patch("chatxz.core.discovery.interface_family", return_value="udp"):
                 with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
                     with patch("chatxz.utils.platform.discovery_scope_ip", return_value="10.10.10.37"):
                         disc._on_announce(peer_hash, app_data)
-        peer = disc.peers.get("f1c2ac9061239f7c096701f02969729c")
-        self.assertIsNotNone(peer)
-        self.assertEqual(peer["via"], "serial")
-        self.assertNotIn("ip", peer)
+        self.assertNotIn("f1c2ac9061239f7c096701f02969729c", disc.peers)
 
-    def test_sanitize_reclassifies_out_of_scope_as_serial(self):
+    def test_in_scope_lan_ip_stays_rns(self):
+        disc = PeerDiscovery()
+        disc.running = True
+        disc.accept_peers = True
+        peer_hash = bytes.fromhex("87a012c46dc2274afccae6fe597b8675")
+        app_data = b'{"app":"chatxz","name":"13600k","ip":"10.10.10.2"}'
+        lan_iface = MagicMock()
+        with patch("chatxz.core.discovery.announce_packet_receiving_interface", return_value=lan_iface):
+            with patch("chatxz.core.discovery.interface_family", return_value="udp"):
+                with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
+                    with patch("chatxz.utils.platform.discovery_scope_ip", return_value="10.10.10.37"):
+                        disc._on_announce(peer_hash, app_data)
+        peer = disc.peers.get("87a012c46dc2274afccae6fe597b8675")
+        self.assertIsNotNone(peer)
+        self.assertEqual(peer.get("via"), "rns")
+        self.assertEqual(peer.get("ip"), "10.10.10.2")
+
+    def test_sanitize_rejects_out_of_scope_lan(self):
         disc = PeerDiscovery()
         with patch.object(disc, "_scope_ip", return_value="10.10.10.37"):
             with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
@@ -151,8 +166,7 @@ class DiscoveryIdentityTests(unittest.TestCase):
                     "ip": "10.0.5.10",
                     "hash": "aa" * 16,
                 })
-        self.assertEqual(result["via"], "serial")
-        self.assertNotIn("ip", result)
+        self.assertIsNone(result)
 
     def test_purge_out_of_scope_keeps_serial_peers(self):
         disc = PeerDiscovery()

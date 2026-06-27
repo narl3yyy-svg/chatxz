@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.165": [
+        "Discovery tags USB only when the announce packet arrived on SerialInterface — LAN peers no longer show as USB.",
+        "Cross-subnet LAN peers are rejected (Ubuntu no longer sees Windows on 10.0.5.x; Arch shows Windows as LAN on 10.10.10.x).",
+        "File cancel on the sender notifies the receiver to abort; progress shows USB/LAN transport and receive status on both sides.",
+    ],
     "0.3.164": [
         "Serial connect restores USB routes from announce receipts when LAN rebroadcast overwrote path_table.",
         "Peer identity is registered as soon as a serial RNS announce arrives — Connect no longer waits until click.",

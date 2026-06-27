@@ -4,7 +4,7 @@ import time
 import RNS
 
 from chatxz.core.lan_rns import (
-    announce_receiving_interface,
+    announce_packet_receiving_interface,
     interface_family,
     register_udp_peer_ip,
     serial_interface_online,
@@ -137,10 +137,6 @@ class PeerDiscovery:
             return candidate if serial_discovery_active() else None
         if peer_in_scope(ip, scope):
             return candidate
-        if serial_discovery_active():
-            candidate["via"] = "serial"
-            candidate.pop("ip", None)
-            return candidate
         return None
 
     def _peer_allowed(self, peer):
@@ -162,6 +158,27 @@ class PeerDiscovery:
                 unregister_udp_peer_ip(ip)
                 del self.peers[key]
                 removed += 1
+        return removed
+
+    def purge_misclassified_serial(self):
+        """Drop serial-tagged peers whose latest announce did not arrive on USB."""
+        removed = 0
+        for key in list(self.peers.keys()):
+            peer = self.peers.get(key) or {}
+            if (peer.get("via") or "").strip() != "serial":
+                continue
+            hash_hex = normalize_hash(peer.get("hash") or key)
+            try:
+                dest = bytes.fromhex(hash_hex)
+            except ValueError:
+                dest = None
+            pkt_iface = announce_packet_receiving_interface(dest) if dest else None
+            pkt_fam = interface_family(pkt_iface) if pkt_iface else ""
+            if pkt_fam == "serial" or not pkt_iface:
+                continue
+            del self.peers[key]
+            self._last_log.pop(hash_hex, None)
+            removed += 1
         return removed
 
     def purge_hashes(self, hashes):
@@ -405,30 +422,23 @@ class PeerDiscovery:
         if app_name != APP_NAME:
             return
 
+        packet_iface = announce_packet_receiving_interface(destination_hash)
+        packet_fam = interface_family(packet_iface) if packet_iface else ""
+        scope = self._scope_ip()
         via = "rns"
-        recv_iface = announce_receiving_interface(destination_hash)
-        recv_fam = interface_family(recv_iface) if recv_iface else ""
-        if recv_fam == "serial":
+        if packet_fam == "serial":
             via = "serial"
             announce_ip = ""
-        elif not announce_ip and serial_discovery_active():
-            # LAN announces always carry a scoped IPv4; IP-less means USB serial.
-            via = "serial"
-        elif (
-            recv_fam in ("udp", "lan", "tcp")
-            and announce_ip
-            and serial_discovery_active()
-        ):
-            try:
-                from chatxz.utils.platform import discovery_scope_ip
-                from chatxz.utils.lan_scope import peer_in_scope
-
-                scope = (discovery_scope_ip() or "").strip()
-                if scope and not peer_in_scope(announce_ip, scope):
-                    via = "serial"
-                    announce_ip = ""
-            except Exception:
-                pass
+        elif packet_fam in ("udp", "lan", "tcp"):
+            if announce_ip and scope and not peer_in_scope(announce_ip, scope):
+                return
+            via = "rns"
+        elif announce_ip:
+            if scope and not peer_in_scope(announce_ip, scope):
+                return
+            via = "rns"
+        else:
+            return
         if via == "serial":
             announce_ip = ""
         peer = {

@@ -83,7 +83,7 @@ class LanScopeTests(unittest.TestCase):
                 })
         self.assertEqual(len(disc.peers), 0)
 
-    def test_store_peer_reclassifies_cross_subnet_as_serial_when_usb_up(self):
+    def test_store_peer_rejects_cross_subnet_lan_when_usb_up(self):
         disc = PeerDiscovery()
         from unittest.mock import patch
 
@@ -97,10 +97,8 @@ class LanScopeTests(unittest.TestCase):
                     "via": "rns",
                     "last_seen": __import__("time").time(),
                 })
-        self.assertTrue(ok)
-        peer = disc.peers.get(peer_hash) or {}
-        self.assertEqual(peer.get("via"), "serial")
-        self.assertNotIn("ip", peer)
+        self.assertFalse(ok)
+        self.assertNotIn(peer_hash, disc.peers)
 
     def test_store_peer_drops_existing_peer_on_subnet_move(self):
         disc = PeerDiscovery()

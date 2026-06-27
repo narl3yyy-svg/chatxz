@@ -2682,8 +2682,9 @@ function renderIncomingTransfers() {
   el.innerHTML = items.map(t => {
     const pct = t.progress || 0;
     let status = t.status || 'active';
+    const via = t.transport === 'serial' ? 'USB' : (t.transport ? String(t.transport).toUpperCase() : 'LAN');
     if (status === 'active') status = pct > 0 ? pct + '%' : 'waiting…';
-    return `<div class="incoming-item"><span>↓ ${escapeHtml(t.file_name || 'file')}</span><span>${escapeHtml(String(status))}</span></div>`;
+    return `<div class="incoming-item"><span>↓ ${escapeHtml(t.file_name || 'file')} <span style="opacity:0.65;font-size:10px">${escapeHtml(via)}</span></span><span>${escapeHtml(String(status))}</span></div>`;
   }).join('');
 }
 
@@ -2708,10 +2709,6 @@ function showProgress(data) {
   var speedEl = document.getElementById('transfer-speed');
   var cancelBtn = document.getElementById('transfer-cancel-btn');
   if (!bar) return;
-
-  if (data.direction === 'receive' && data.status === 'active' && !(data.progress > 0)) {
-    return;
-  }
 
   if (data.status === 'cancelled' || data.status === 'failed') {
     progressLastUpdate = 0;
@@ -2741,7 +2738,10 @@ function showProgress(data) {
   bar.querySelector('.progress-fill').style.width = Math.max(pct, 1) + '%';
   var dir = data.direction === 'receive' ? '↓' : '↑';
   var stage = data.stage === 'zipping' ? 'Zipping' : (data.direction === 'receive' ? 'Receiving' : 'Sending');
-  var text = stage + ' ' + (data.file_name || 'file') + ' — ' + pct + '%';
+  var via = data.transport === 'serial' ? 'USB' : (data.transport ? String(data.transport).toUpperCase() : '');
+  var text = dir + ' ' + stage + ' ' + (data.file_name || 'file');
+  if (via) text += ' [' + via + ']';
+  text += pct > 0 ? (' — ' + pct + '%') : (data.direction === 'receive' ? ' — waiting…' : ' — starting…');
   if (data.stage === 'zipping' && data.total) text += ' (' + (data.current || 0) + '/' + data.total + ' files)';
   if (data.size) text += ' (' + formatSize(data.size) + ')';
   label.textContent = text;

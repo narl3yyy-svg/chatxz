@@ -121,6 +121,7 @@ MESSAGE_TYPE_VIDEO = "video"
 MESSAGE_TYPE_EMOJI = "emoji"
 MESSAGE_TYPE_LONGTEXT = "longtext"
 MESSAGE_TYPE_LAN_HTTP = "__lan_http_offer"
+MESSAGE_TYPE_TRANSFER_CANCEL = "__transfer_cancel"
 LAN_HTTP_MIN_BYTES = 2 * 1024 * 1024
 LAN_HTTP_CHUNK = 256 * 1024
 HUB_GROUP_PEER = "__hub_group__"
@@ -3590,6 +3591,18 @@ class MessagingBackend:
                     self._handle_lan_http_offer(chat_msg, remote_hash)
                     return
 
+                if chat_msg.msg_type == MESSAGE_TYPE_TRANSFER_CANCEL:
+                    try:
+                        payload = json.loads(chat_msg.content or "{}")
+                    except Exception:
+                        payload = {}
+                    tid = payload.get("transfer_id") or payload.get("msg_id") or chat_msg.msg_id
+                    fname = payload.get("file_name") or ""
+                    if tid:
+                        self._cancelled_transfers.add(tid)
+                    self._cancel_incoming_resources(link, transfer_id=tid, file_name=fname)
+                    return
+
                 if not self._hub_message_acceptable(chat_msg, link):
                     print("[hub] Ignored group message (hub transport only)")
                     return
@@ -3656,8 +3669,16 @@ class MessagingBackend:
         def callback(resource):
             try:
                 print(f"[messaging] Resource concluded, status={resource.status}")
+                chat_msg = self._dequeue_pending_file(link.link_id, resource)
+                tid = getattr(chat_msg, "msg_id", None) if chat_msg else None
+                if tid and tid in self._cancelled_transfers:
+                    fname = (chat_msg.file_name if chat_msg else None) or "file"
+                    self._emit_progress(
+                        fname, 0, direction="receive", transfer_id=tid,
+                        status="cancelled",
+                    )
+                    return
                 if resource.status == RNS.Resource.COMPLETE:
-                    chat_msg = self._dequeue_pending_file(link.link_id, resource)
 
                     from chatxz.utils.helpers import safe_basename, safe_path_under
                     os.makedirs(self.receive_dir, exist_ok=True)
@@ -3709,16 +3730,19 @@ class MessagingBackend:
                     self._send_receipt(link, chat_msg.msg_id, "received")
                 else:
                     print(f"[messaging] Resource transfer failed (status={resource.status})")
-                    with self._pending_lock:
-                        queue = self._pending_files.get(link.link_id, [])
-                        chat_msg = queue.pop(0) if queue else None
+                    if not chat_msg:
+                        with self._pending_lock:
+                            queue = self._pending_files.get(link.link_id, [])
+                            chat_msg = queue.pop(0) if queue else None
                     if chat_msg:
+                        tid = chat_msg.msg_id
+                        status = "cancelled" if tid in self._cancelled_transfers else "failed"
                         self._emit_progress(
                             chat_msg.file_name or "file",
                             0,
                             direction="receive",
-                            transfer_id=chat_msg.msg_id,
-                            status="failed",
+                            transfer_id=tid,
+                            status=status,
                         )
                     if chat_msg and self.on_message:
                         self.on_message(
@@ -3771,7 +3795,8 @@ class MessagingBackend:
 
         threading.Thread(target=watch, name=f"recv-progress-{chat_msg.msg_id[:8]}", daemon=True).start()
 
-    def _emit_progress(self, file_name, progress, total_size=0, speed="", direction="receive", transfer_id=None, status="active"):
+    def _emit_progress(self, file_name, progress, total_size=0, speed="", direction="receive",
+                       transfer_id=None, status="active", transport=None):
         if transfer_id and transfer_id in self._cancelled_transfers and status == "active":
             return
         if status in ("complete", "cancelled", "failed"):
@@ -3785,6 +3810,8 @@ class MessagingBackend:
                 if abs(progress - last.get("pct", -1)) < 1:
                     return
             self._progress_last[key] = {"ts": now, "pct": progress}
+        if transport is None and self.active_link:
+            transport = self._transfer_transport_label(self.active_link)
         if self.on_progress:
             try:
                 self.on_progress({
@@ -3795,6 +3822,7 @@ class MessagingBackend:
                     "direction": direction,
                     "transfer_id": transfer_id,
                     "status": status,
+                    "transport": transport or "",
                 })
             except Exception as e:
                 print(f"[progress] callback error: {e}")
@@ -3822,7 +3850,89 @@ class MessagingBackend:
             except Exception:
                 pass
 
-    def cancel_transfer(self, transfer_id=None, file_name=None):
+    def _transfer_transport_label(self, link=None):
+        link = link or self.active_link
+        iface = self._link_attached_interface(link) if link else None
+        if is_serial_interface(iface):
+            return "serial"
+        fam = interface_family(iface) if iface else ""
+        if fam in ("udp", "lan", "tcp"):
+            return fam or "lan"
+        return ""
+
+    def _notify_peer_transfer_cancel(self, transfer_id, file_name=None, link=None):
+        """Tell the remote peer to stop receiving an in-flight file."""
+        link = link or self.active_link
+        if not link or not transfer_id:
+            return False
+        try:
+            if getattr(link, "status", None) != RNS.Link.ACTIVE:
+                return False
+        except Exception:
+            return False
+        payload = {"transfer_id": transfer_id, "msg_id": transfer_id}
+        if file_name:
+            payload["file_name"] = file_name
+        meta = ChatMessage(MESSAGE_TYPE_TRANSFER_CANCEL, json.dumps(payload), msg_id=transfer_id)
+        try:
+            packet = RNS.Packet(link, meta.to_json().encode("utf-8"))
+            packet.send()
+            print(f"[transfer] Cancel notice sent for {transfer_id[:8]}...")
+            return True
+        except Exception as exc:
+            print(f"[transfer] Cancel notice failed: {exc}")
+            return False
+
+    def _cancel_incoming_resources(self, link, transfer_id=None, file_name=None):
+        """Abort active incoming RNS resources and drop queued file metadata."""
+        if not link:
+            return False
+        cancelled = False
+        fname = file_name or ""
+        try:
+            for res in list(getattr(link, "incoming_resources", None) or []):
+                try:
+                    if hasattr(res, "cancel"):
+                        res.cancel()
+                    elif hasattr(res, "close"):
+                        res.close()
+                    cancelled = True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        with self._pending_lock:
+            queue = self._pending_files.get(link.link_id, [])
+            kept = []
+            for msg in queue:
+                match = (
+                    (transfer_id and msg.msg_id == transfer_id)
+                    or (file_name and msg.file_name == file_name)
+                )
+                if match:
+                    cancelled = True
+                    fname = msg.file_name or fname
+                    tid = msg.msg_id or transfer_id
+                    if tid:
+                        self._cancelled_transfers.add(tid)
+                    continue
+                kept.append(msg)
+            self._pending_files[link.link_id] = kept
+        if cancelled:
+            tid = transfer_id or fname
+            transport = self._transfer_transport_label(link)
+            self._emit_progress(
+                fname or "file",
+                0,
+                direction="receive",
+                transfer_id=transfer_id,
+                status="cancelled",
+                transport=transport,
+            )
+            print(f"[transfer] Incoming transfer cancelled: {fname or transfer_id or '?'}")
+        return cancelled
+
+    def cancel_transfer(self, transfer_id=None, file_name=None, notify_peer=True):
         cancelled = False
         tid = self._resolve_transfer_id(transfer_id, file_name)
         if not tid:
@@ -3854,20 +3964,26 @@ class MessagingBackend:
             except Exception as e:
                 print(f"[transfer] cancel resource {rid}: {e}")
             self._cleanup_transfer(rid)
+        fname = file_name or ""
+        msg = self._sent_messages.get(tid)
+        if msg and getattr(msg, "file_name", None):
+            fname = msg.file_name
+        if not fname:
+            for entry in reversed(self.message_queue):
+                if entry.get("msg_id") == tid:
+                    fname = entry.get("file_name", "")
+                    break
+        if notify_peer:
+            self._notify_peer_transfer_cancel(tid, file_name=fname)
         if cancelled or tid in self._cancelled_transfers:
-            fname = file_name or ""
-            msg = self._sent_messages.get(tid)
-            if msg and getattr(msg, "file_name", None):
-                fname = msg.file_name
-            if not fname:
-                for entry in reversed(self.message_queue):
-                    if entry.get("msg_id") == tid:
-                        fname = entry.get("file_name", "")
-                        break
-            self._emit_progress(fname, 0, status="cancelled", direction="send", transfer_id=tid)
+            transport = self._transfer_transport_label()
+            self._emit_progress(
+                fname, 0, status="cancelled", direction="send",
+                transfer_id=tid, transport=transport,
+            )
         if self._current_transfer_id == tid:
             self._current_transfer_id = None
-        return cancelled
+        return cancelled or tid in self._cancelled_transfers
 
     def _session_occupied(self, peer_hash):
         if not self.active_link or not self.active_peer_hash:
@@ -4793,11 +4909,17 @@ class MessagingBackend:
 
     def _resource_send_callback(self, fname, transfer_id=None, fsize=0):
         def callback(resource):
+            was_cancelled = (
+                self.shutdown_requested or transfer_id in self._cancelled_transfers
+            )
             self._cleanup_transfer(transfer_id)
-            if self.shutdown_requested or transfer_id in self._cancelled_transfers:
+            if was_cancelled:
                 self._cancelled_transfers.discard(transfer_id)
                 print(f"[messaging] File transfer cancelled: {fname}")
-                self._emit_progress(fname, 0, fsize, status="cancelled", direction="send", transfer_id=transfer_id)
+                self._emit_progress(
+                    fname, 0, fsize, status="cancelled", direction="send",
+                    transfer_id=transfer_id,
+                )
                 if self._current_transfer_id == transfer_id:
                     self._current_transfer_id = None
                 return

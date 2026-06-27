@@ -227,7 +227,7 @@ def _dest_key_bytes(destination_hash):
         return None
 
 
-def _announce_packet_receiving_interface(destination_hash):
+def announce_packet_receiving_interface(destination_hash):
     """Receiving interface from the stored announce packet (not path_table)."""
     dest_bytes = _dest_key_bytes(destination_hash)
     if dest_bytes is None:
@@ -248,7 +248,7 @@ def announce_receiving_interface(destination_hash):
     dest_bytes = _dest_key_bytes(destination_hash)
     if dest_bytes is None:
         return None
-    packet_iface = _announce_packet_receiving_interface(destination_hash)
+    packet_iface = announce_packet_receiving_interface(destination_hash)
     if packet_iface is not None and interface_family(packet_iface) == "serial":
         return packet_iface
     try:
@@ -267,7 +267,7 @@ def restore_serial_path_from_announce(hash_hex):
     dest_bytes = _dest_bytes_for_hash(clean)
     if dest_bytes is None:
         return None
-    serial_recv = _announce_packet_receiving_interface(dest_bytes)
+    serial_recv = announce_packet_receiving_interface(dest_bytes)
     if serial_recv is None or interface_family(serial_recv) != "serial":
         return peer_path_on_family(clean, "serial")
     if not interface_is_healthy(serial_recv):

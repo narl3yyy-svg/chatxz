@@ -67,5 +67,35 @@ class SerialTransferTests(unittest.TestCase):
         self.assertEqual(link.last_resource_window, 2)
 
 
+class TransferCancelTests(unittest.TestCase):
+    def test_cancel_incoming_marks_transfer_cancelled(self):
+        from chatxz.core.messaging import MessagingBackend, MESSAGE_TYPE_TRANSFER_CANCEL
+
+        ident = MagicMock()
+        ident.hash = bytes.fromhex("a" * 32)
+        backend = MessagingBackend(identity=ident, config_dir="/tmp/chatxz-cancel-test")
+        backend.running = True
+        link = MagicMock()
+        link.link_id = b"\x01" * 16
+        link.incoming_resources = [MagicMock()]
+        backend._pending_files[link.link_id] = [
+            {"msg_id": "abc123", "file_name": "big.bin"},
+        ]
+        from chatxz.core.messaging import ChatMessage
+        backend._pending_files[link.link_id] = [
+            ChatMessage("file", "", file_name="big.bin", msg_id="abc123"),
+        ]
+        with unittest.mock.patch.object(backend, "_emit_progress") as emit:
+            ok = backend._cancel_incoming_resources(link, transfer_id="abc123")
+        self.assertTrue(ok)
+        self.assertIn("abc123", backend._cancelled_transfers)
+        emit.assert_called()
+        self.assertEqual(backend._pending_files.get(link.link_id), [])
+
+    def test_transfer_cancel_message_type_constant(self):
+        from chatxz.core.messaging import MESSAGE_TYPE_TRANSFER_CANCEL
+        self.assertEqual(MESSAGE_TYPE_TRANSFER_CANCEL, "__transfer_cancel")
+
+
 if __name__ == "__main__":
     unittest.main()

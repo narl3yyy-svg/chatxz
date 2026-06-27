@@ -722,6 +722,9 @@ class ChatWebServer:
                 removed = self.discovery.purge_out_of_scope(scope)
                 if removed:
                     print(f"[network] Purged {removed} out-of-scope peer(s)")
+            misclassified = self.discovery.purge_misclassified_serial()
+            if misclassified:
+                print(f"[network] Purged {misclassified} misclassified USB peer(s)")
             else:
                 self.discovery.clear_peers()
         if self.lan_beacon:
@@ -775,6 +778,7 @@ class ChatWebServer:
     def _scoped_peers(self):
         if not self.discovery:
             return []
+        self.discovery.purge_misclassified_serial()
         return self.discovery.get_peers(scope_ip=self._discovery_scope_ip())
 
     def _peer_endpoint_for_transfer(self, peer_hash):
@@ -4186,14 +4190,22 @@ class ChatWebServer:
             data = {}
         transfer_id = data.get("transfer_id")
         file_name = data.get("file_name", "")
-        cancelled = self.messaging.cancel_transfer(transfer_id, file_name=file_name)
-        await self._broadcast({"type": "progress", "data": {
-            "status": "cancelled",
-            "progress": 0,
-            "file_name": file_name,
-            "transfer_id": transfer_id,
-            "direction": "send",
-        }})
+        cancelled = self.messaging.cancel_transfer(
+            transfer_id, file_name=file_name, notify_peer=True,
+        )
+        if not cancelled and self.messaging.active_link:
+            cancelled = self.messaging._cancel_incoming_resources(
+                self.messaging.active_link,
+                transfer_id=transfer_id,
+                file_name=file_name,
+            )
+        if cancelled:
+            await self._broadcast({"type": "progress", "data": {
+                "status": "cancelled",
+                "progress": 0,
+                "file_name": file_name,
+                "transfer_id": transfer_id,
+            }})
         return web.json_response({"status": "ok" if cancelled else "noop"})
 
     async def handle_voice_upload(self, request):
