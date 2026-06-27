@@ -780,7 +780,6 @@ class ChatWebServer:
             return []
         self.discovery.purge_misclassified_serial()
         self.discovery.purge_ipless_non_serial()
-        self.discovery.purge_stale_probes()
         return self.discovery.get_peers(scope_ip=self._discovery_scope_ip())
 
     def _brand_logo_path(self):
@@ -789,16 +788,24 @@ class ChatWebServer:
     def _probe_discovered_peers(self):
         if not self.discovery or not self.discovery.accept_peers:
             return 0
-        from chatxz.core.peer_probe import probe_serial_path, probe_udp_peer
+        if self.messaging and self.messaging._has_active_transfer():
+            return 0
+        from chatxz.core.peer_probe import PROBE_STALE_S, probe_serial_path, probe_udp_peer
 
+        now = time.time()
         for peer in list(self.discovery.peers.values()):
             hash_hex = peer.get("hash") or ""
             via = (peer.get("via") or "").strip()
             ip = (peer.get("ip") or "").strip()
+            last_seen = float(peer.get("last_seen") or 0)
+            if last_seen and (now - last_seen) < PROBE_STALE_S:
+                continue
             if via == "serial" or not ip:
-                rtt = probe_serial_path(hash_hex)
-            else:
-                rtt = probe_udp_peer(ip)
+                rtt = probe_serial_path(hash_hex, timeout_s=1.5)
+                if rtt is not None:
+                    self.discovery.update_peer_probe(hash_hex, rtt_ms=rtt, ok=True)
+                continue
+            rtt = probe_udp_peer(ip, timeout_s=1.5)
             if rtt is not None:
                 self.discovery.update_peer_probe(hash_hex, rtt_ms=rtt, ok=True)
             else:
@@ -3869,13 +3876,9 @@ class ChatWebServer:
                 "rns_reloaded": True,
             })
         if not getattr(sys, "frozen", False):
-            if sys.platform != "win32":
-                print("[restart] Spawning new server process (launch-server.sh)")
-                asyncio.get_event_loop().call_later(0.8, self._spawn_unix_server_restart)
-                return web.json_response({"status": "restarting"})
             try:
                 await self._reload_server_runtime()
-                print("[restart] Reloaded network stack in-process (run.bat stays open)")
+                print("[restart] Reloaded network stack in-process")
                 return web.json_response({
                     "status": "ok",
                     "restarting": True,
@@ -3883,6 +3886,10 @@ class ChatWebServer:
                     "message": "Network stack reloaded — refresh the page",
                 })
             except Exception as e:
+                if sys.platform != "win32":
+                    print(f"[restart] In-process reload failed ({e}) — spawning new process")
+                    asyncio.get_event_loop().call_later(0.8, self._spawn_unix_server_restart)
+                    return web.json_response({"status": "restarting"})
                 return web.json_response({"error": str(e)}, status=400)
         if getattr(sys, "frozen", False) and sys.platform == "win32":
             exe = sys.executable

@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.3.169": [
+        "Fix v0.3.168 regressions: peers no longer vanish from aggressive probe eviction.",
+        "Announces reset liveness; serial peers are never probe-dropped; transfer cancel fixed.",
+        "Restart uses in-process reload again (spawn only on failure); serial window restored to 2.",
+    ],
     "0.3.168": [
         "Peer probe: UDP/serial liveness checks with avg RTT in sidebar; peers drop after 10s without reply.",
         "Custom sidebar logo (click cx), identity modal (click your hash), canceled file transfers removed from chat.",

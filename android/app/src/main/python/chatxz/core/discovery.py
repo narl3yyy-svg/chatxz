@@ -160,13 +160,26 @@ class PeerDiscovery:
                 removed += 1
         return removed
 
+    def reset_peer_probe_state(self, hash_hex):
+        """Announce/beacon refresh — peer is alive; do not probe-evict."""
+        clean = normalize_hash(hash_hex)
+        if not clean or clean not in self.peers:
+            return
+        peer = self.peers[clean]
+        peer["probe_failures"] = 0
+        peer["last_probe_ok"] = float(peer.get("last_seen") or time.time())
+
     def update_peer_probe(self, hash_hex, rtt_ms=None, ok=True):
-        """Record probe RTT and liveness for a discovery entry."""
+        """Record optional probe RTT; never overrides fresh announce liveness."""
         clean = normalize_hash(hash_hex)
         if not clean or clean not in self.peers:
             return
         peer = self.peers[clean]
         now = time.time()
+        last_seen = float(peer.get("last_seen") or 0)
+        if last_seen and (now - last_seen) < 12:
+            peer["probe_failures"] = 0
+            peer["last_probe_ok"] = last_seen
         if ok and rtt_ms is not None:
             from chatxz.core.peer_probe import rolling_avg_ms, avg_ms
             samples = rolling_avg_ms(peer.get("rtt_samples"), rtt_ms)
@@ -176,33 +189,39 @@ class PeerDiscovery:
             peer["last_probe_ok"] = now
             peer["probe_failures"] = 0
         elif not ok:
+            if last_seen and (now - last_seen) < 12:
+                return
             peer["probe_failures"] = int(peer.get("probe_failures") or 0) + 1
             peer["last_probe_at"] = now
 
-    def purge_stale_probes(self, max_rtt_ms=10000, stale_s=10, max_failures=2):
-        """Drop peers that stopped responding or exceed RTT threshold."""
+    def purge_stale_probes(self, max_rtt_ms=10000, stale_s=30, max_failures=5):
+        """Drop LAN peers only after stale announces AND repeated probe failures."""
         now = time.time()
         removed = []
         for key in list(self.peers.keys()):
             peer = self.peers.get(key) or {}
             via = (peer.get("via") or "").strip()
-            last_ok = float(
-                peer.get("last_probe_ok")
-                or peer.get("last_seen")
-                or 0
-            )
-            age = now - last_ok
+            if via == "serial":
+                continue
+            last_seen = float(peer.get("last_seen") or 0)
+            announce_age = now - last_seen
+            if announce_age <= stale_s:
+                continue
+            last_probe_ok = float(peer.get("last_probe_ok") or 0)
+            probe_age = now - last_probe_ok if last_probe_ok else announce_age
             rtt_avg = peer.get("rtt_avg_ms")
+            samples = peer.get("rtt_samples") or []
             failures = int(peer.get("probe_failures") or 0)
-            if rtt_avg is not None and int(rtt_avg) > max_rtt_ms:
+            if (
+                rtt_avg is not None
+                and len(samples) >= 3
+                and int(rtt_avg) > max_rtt_ms
+                and probe_age > stale_s
+            ):
                 removed.append(key)
                 continue
-            if age > stale_s and failures >= max_failures:
+            if announce_age > stale_s and probe_age > stale_s and failures >= max_failures:
                 removed.append(key)
-                continue
-            if via != "serial" and age > stale_s and peer.get("ip") and failures >= 1:
-                removed.append(key)
-                continue
         for key in removed:
             self._remove_peer_entry(key)
         return len(removed)
@@ -453,6 +472,7 @@ class PeerDiscovery:
             self.peers[hash_hex] = peer
         if peer.get("ip"):
             register_udp_peer_ip(peer["ip"])
+        self.reset_peer_probe_state(hash_hex)
         if self.on_peer_seen:
             try:
                 self.on_peer_seen(peer)

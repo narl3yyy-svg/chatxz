@@ -3629,13 +3629,21 @@ class MessagingBackend:
                     fname = payload.get("file_name") or ""
                     if tid:
                         self._cancelled_transfers.add(tid)
-                    self.cancel_transfer(transfer_id=tid, file_name=fname, notify_peer=False)
                     self._cancel_incoming_resources(link, transfer_id=tid, file_name=fname)
-                    if self.on_transfer_revoked and tid:
-                        try:
-                            self.on_transfer_revoked(tid, fname)
-                        except Exception:
-                            pass
+                    is_sender = (
+                        tid in self._active_resources
+                        or tid == self._current_transfer_id
+                        or tid in self._sent_messages
+                    )
+                    if is_sender:
+                        self.cancel_transfer(
+                            transfer_id=tid, file_name=fname, notify_peer=False,
+                        )
+                        if self.on_transfer_revoked and tid:
+                            try:
+                                self.on_transfer_revoked(tid, fname)
+                            except Exception:
+                                pass
                     return
 
                 if not self._hub_message_acceptable(chat_msg, link):

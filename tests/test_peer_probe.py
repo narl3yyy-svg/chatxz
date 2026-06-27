@@ -26,25 +26,51 @@ class PeerProbeTests(unittest.TestCase):
         ok = register_probe_ack("abc", 42)
         self.assertTrue(ok)
 
-    def test_purge_stale_probes_on_high_rtt(self):
+    def test_purge_stale_probes_on_high_rtt_requires_samples(self):
         disc = PeerDiscovery()
         disc.peers["a" * 32] = {
             "hash": "a" * 32,
             "via": "rns",
             "ip": "10.10.10.2",
-            "last_seen": time.time(),
+            "last_seen": time.time() - 60,
             "rtt_avg_ms": 12000,
-            "last_probe_ok": time.time(),
+            "rtt_samples": [12000, 11000, 13000],
+            "last_probe_ok": time.time() - 60,
+            "probe_failures": 0,
         }
         removed = disc.purge_stale_probes()
         self.assertEqual(removed, 1)
+
+    def test_serial_peers_never_probe_evicted(self):
+        disc = PeerDiscovery()
+        disc.peers["b" * 32] = {
+            "hash": "b" * 32,
+            "via": "serial",
+            "last_seen": time.time() - 120,
+            "probe_failures": 99,
+        }
+        removed = disc.purge_stale_probes()
+        self.assertEqual(removed, 0)
+
+    def test_announce_refresh_resets_probe_failures(self):
+        disc = PeerDiscovery()
+        disc.accept_peers = True
+        disc.peers["c" * 32] = {
+            "hash": "c" * 32,
+            "via": "rns",
+            "ip": "10.10.10.3",
+            "last_seen": time.time(),
+            "probe_failures": 4,
+        }
+        disc.reset_peer_probe_state("c" * 32)
+        self.assertEqual(disc.peers["c" * 32]["probe_failures"], 0)
 
     def test_update_peer_probe_records_rtt(self):
         disc = PeerDiscovery()
         disc.peers["b" * 32] = {
             "hash": "b" * 32,
             "via": "serial",
-            "last_seen": time.time(),
+            "last_seen": time.time() - 30,
         }
         disc.update_peer_probe("b" * 32, rtt_ms=85, ok=True)
         peer = disc.peers["b" * 32]

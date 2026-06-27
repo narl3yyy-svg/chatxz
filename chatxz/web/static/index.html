@@ -5134,9 +5134,7 @@ function applyIdentityChange(newHash, identityHash, oldHash) {
 function restartServer() {
   const msg = appPlatform === 'android'
     ? 'Restart the app to apply network/serial settings?'
-    : (appPlatform === 'linux' || appPlatform === 'darwin')
-      ? 'Restart the server? A new process will start in the background (terminal may return to prompt).'
-      : 'Reload network stack? The cmd window stays open.';
+    : 'Reload network stack? The terminal stays open.';
   if (!confirm(msg)) return;
   fetch('/api/restart', {method: 'POST'})
     .then(async r => {
