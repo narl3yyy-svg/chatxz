@@ -5882,6 +5882,7 @@ let callOpusDecoder = null;
 let callOpusDecodeTs = 0;
 let callOpusEncodeTs = 0;
 let callOpusPending = null;
+let callBrowserOpusOk = null;
 let ringtoneTimer = null;
 let sharedMicStream = null;
 let sharedMicRefs = 0;
@@ -5913,6 +5914,7 @@ function resetCallUi() {
   callDashMinimized = false;
   callLocalFramesIn = 0;
   callLocalFramesOut = 0;
+  callBrowserOpusOk = null;
   callServerStats = {};
   document.getElementById('call-incoming-overlay')?.classList.remove('open');
   document.getElementById('call-active-overlay')?.classList.remove('open');
@@ -6051,6 +6053,10 @@ function updateCallDashboard() {
 }
 
 function useNativeCallAudio() {
+  return !!(callServerStats && callServerStats.running && callServerStats.engine === 'native-opus');
+}
+
+function nativeCallAudioCapable() {
   return nativeCallAudioEnabled && !isAndroidShell();
 }
 
@@ -6151,7 +6157,7 @@ function callAudioConfig() {
   if (via === 'serial') {
     return { rate: 8000, frameSamples: 160, jitterTarget: 320, jitterMax: 640, useOpus: false, useMulaw: true };
   }
-  const opus = browserOpusSupported();
+  const opus = browserOpusSupported() && callBrowserOpusOk !== false;
   return {
     rate: opus ? 48000 : 16000,
     frameSamples: opus ? 960 : 480,
@@ -6160,6 +6166,18 @@ function callAudioConfig() {
     useOpus: opus,
     useMulaw: !opus,
   };
+}
+
+async function probeBrowserOpus(rate) {
+  if (!browserOpusSupported()) return false;
+  try {
+    const cfg = {codec: 'opus', sampleRate: rate || 48000, numberOfChannels: 1, bitrate: 32000};
+    const enc = await AudioEncoder.isConfigSupported(cfg);
+    const dec = await AudioDecoder.isConfigSupported({codec: 'opus', sampleRate: rate || 48000, numberOfChannels: 1});
+    return !!(enc && enc.supported && dec && dec.supported);
+  } catch (_) {
+    return false;
+  }
 }
 
 async function ensureCallOpusDecoder(cfg) {
@@ -6191,23 +6209,29 @@ async function ensureCallOpusDecoder(cfg) {
 async function ensureCallOpusEncoder(cfg) {
   if (!cfg.useOpus || !browserOpusSupported()) return false;
   if (callOpusEncoder && callOpusEncoder.state === 'configured') return true;
-  callOpusEncoder = new AudioEncoder({
-    output: (chunk) => {
-      if (callState !== 'active' || !chunk.data) return;
-      let bin = '';
-      const bytes = new Uint8Array(chunk.data);
-      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-      sendCallAudioFrame(btoa(bin), `audio/opus;rate=${cfg.rate};frame=20`);
-    },
-    error: () => {},
-  });
-  callOpusEncoder.configure({
-    codec: 'opus',
-    sampleRate: cfg.rate,
-    numberOfChannels: 1,
-    bitrate: 32000,
-  });
-  return true;
+  try {
+    callOpusEncoder = new AudioEncoder({
+      output: (chunk) => {
+        if (callState !== 'active' || !chunk.data) return;
+        let bin = '';
+        const bytes = new Uint8Array(chunk.data);
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        sendCallAudioFrame(btoa(bin), `audio/opus;rate=${cfg.rate};frame=20`);
+      },
+      error: () => { callBrowserOpusOk = false; },
+    });
+    callOpusEncoder.configure({
+      codec: 'opus',
+      sampleRate: cfg.rate,
+      numberOfChannels: 1,
+      bitrate: 32000,
+    });
+    return callOpusEncoder.state === 'configured';
+  } catch (_) {
+    callBrowserOpusOk = false;
+    callOpusEncoder = null;
+    return false;
+  }
 }
 
 function decodeOpusB64(b64, cfg) {
@@ -6547,22 +6571,37 @@ function primeCallPlayback() {
 }
 
 async function startCallCapture() {
-  if (useNativeCallAudio()) {
-    primeCallPlayback();
-    return true;
-  }
   if (callCaptureNode) return true;
   stopCallRingtone();
   try {
+    await new Promise(r => setTimeout(r, 350));
+    try {
+      const st = await callApi({action: 'status'});
+      if (st && !st.error) callServerStats = st;
+    } catch (_) {}
+    if (useNativeCallAudio()) {
+      primeCallPlayback();
+      updateCallDashboard();
+      return true;
+    }
     const stream = await acquireSharedMic({forCall: true});
     const ctx = ensureCallAudioCtx();
     await ctx.resume();
     primeCallPlayback();
     stopCallCapturePipeline();
     callCaptureSource = ctx.createMediaStreamSource(stream);
-    const cfg = callAudioConfig();
-    if (cfg.useOpus) await ensureCallOpusEncoder(cfg);
-    if (cfg.useOpus) await ensureCallOpusDecoder(cfg);
+    if (callBrowserOpusOk === null) {
+      callBrowserOpusOk = await probeBrowserOpus(48000);
+    }
+    let cfg = callAudioConfig();
+    if (cfg.useOpus) {
+      const encOk = await ensureCallOpusEncoder(cfg);
+      const decOk = await ensureCallOpusDecoder(cfg);
+      if (!encOk || !decOk) {
+        callBrowserOpusOk = false;
+        cfg = callAudioConfig();
+      }
+    }
     const processor = ctx.createScriptProcessor(2048, 1, 1);
     const silent = ctx.createGain();
     silent.gain.value = 0;
@@ -6579,19 +6618,16 @@ async function startCallCapture() {
       if (accum.length >= frameInputSamples) {
         const chunk = accum.subarray(0, frameInputSamples);
         accum = accum.subarray(frameInputSamples);
-        if (cfg.useOpus && callOpusEncoder) {
+        const pcm = resampleLinearToPcm(chunk, inputRate, cfg.rate);
+        if (pcm.length < cfg.frameSamples) return;
+        const slice = pcm.subarray(0, cfg.frameSamples);
+        if (cfg.useOpus && callOpusEncoder && callOpusEncoder.state === 'configured') {
           const floats = new Float32Array(cfg.frameSamples);
-          for (let i = 0; i < cfg.frameSamples; i++) {
-            const src = Math.min(i * inputRate / cfg.rate, chunk.length - 1);
-            floats[i] = chunk[Math.floor(src)] || 0;
-          }
+          for (let i = 0; i < cfg.frameSamples; i++) floats[i] = slice[i] / 32768;
           encodeCallFrameOpus(floats, cfg);
         } else {
-          const pcm = resampleLinearToPcm(chunk, inputRate, cfg.rate);
-          if (pcm.length >= cfg.frameSamples) {
-            const frame = encodeCallFrame(pcm.subarray(0, cfg.frameSamples), cfg);
-            sendCallAudioFrame(frame.b64, frame.codec);
-          }
+          const frame = encodeCallFrame(slice, {useMulaw: cfg.useMulaw !== false, rate: cfg.rate});
+          sendCallAudioFrame(frame.b64, frame.codec);
         }
       }
     };

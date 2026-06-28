@@ -19,7 +19,14 @@ pip_cmd() {
 }
 
 install_deps() {
-    if "$PYTHON" -c "import rns, aiohttp" 2>/dev/null; then
+    local need=0
+    if ! "$PYTHON" -c "import rns, aiohttp" 2>/dev/null; then
+        need=1
+    fi
+    if ! "$PYTHON" -c "from chatxz.core.call_audio_engine import call_audio_available; import sys; sys.exit(0 if call_audio_available() else 1)" 2>/dev/null; then
+        need=1
+    fi
+    if [ "$need" -eq 0 ]; then
         return 0
     fi
     echo "Installing dependencies (first run only)..."
@@ -29,9 +36,9 @@ install_deps() {
         echo "Or run: bash scripts/install-macos.sh"
         exit 1
     fi
-    pip_cmd install -q --user --break-system-packages rns aiohttp 2>/dev/null || \
-    pip_cmd install -q --user rns aiohttp 2>/dev/null || \
-    pip_cmd install -q rns aiohttp
+    pip_cmd install -q --user --break-system-packages rns aiohttp pyaudio aiortc 2>/dev/null || \
+    pip_cmd install -q --user rns aiohttp pyaudio aiortc 2>/dev/null || \
+    pip_cmd install -q rns aiohttp pyaudio aiortc
 }
 
 case "${1:-}" in

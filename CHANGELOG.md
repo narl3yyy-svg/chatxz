@@ -2,6 +2,12 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.7.1] — 2026-06-28
+
+### Fixed
+- **Zero call audio packets** — browser no longer skips the microphone when native Opus is advertised but not actually running (missing PyAudio device, failed engine start, or deps not installed). Falls back to WebCodecs Opus or μ-law with live packet counters.
+- **`run.sh`** — first-run install now includes `pyaudio` and `aiortc` for native call audio.
+
 ## [0.7.0] — 2026-06-28
 
 ### Added

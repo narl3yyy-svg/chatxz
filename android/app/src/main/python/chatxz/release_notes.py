@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.7.1": [
+        "Fixed silent calls showing 0 sent/received packets — browser mic now activates when native Opus isn't running; Opus encoder failures fall back to μ-law.",
+        "./run.sh web auto-installs PyAudio and aiortc for desktop native call audio.",
+    ],
     "0.7.0": [
         "Voice calls use Opus (48 kHz, 20 ms frames) with aiortc on desktop — PyAudio handles mic/speaker with jitter buffer and packet-loss concealment.",
         "Android shows an incoming-call notification (not just vibration). Browser uses WebCodecs Opus when native audio is unavailable.",

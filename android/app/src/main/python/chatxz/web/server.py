@@ -2491,9 +2491,12 @@ class ChatWebServer:
             )
 
     def _start_call_audio_engine(self):
-        if self.call_audio_engine or not call_audio_available():
+        if self.call_audio_engine:
             return
         if not self.messaging:
+            return
+        if not call_audio_available():
+            print("[call-audio] Native unavailable — pip install pyaudio aiortc (or ./run.sh install)")
             return
 
         def send_audio(b64, codec):
@@ -2505,6 +2508,8 @@ class ChatWebServer:
         engine = CallAudioEngine(send_audio)
         if engine.start():
             self.call_audio_engine = engine
+        else:
+            print("[call-audio] Native engine failed to start — browser will use mic fallback")
 
     def _stop_call_audio_engine(self):
         if self.call_audio_engine:
