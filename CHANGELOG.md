@@ -2,6 +2,11 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.7.2] — 2026-06-28
+
+### Fixed
+- **`run.sh` on Ubuntu/Debian** — uses a project-local `.venv` instead of `pip install --user` into the PEP 668 externally-managed system Python (fixes “externally-managed-environment” on `./run.sh web`).
+
 ## [0.7.1] — 2026-06-28
 
 ### Fixed

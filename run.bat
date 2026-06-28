@@ -68,7 +68,7 @@ exit /b %EXIT_CODE%
 :resolve_python
 set "CHATXZ_PYTHON="
 if exist "%VENV_PY%" if exist ".venv\.ready" (
-  "%VENV_PY%" -c "import rns, aiohttp" >nul 2>&1
+  "%VENV_PY%" -c "import RNS, aiohttp" >nul 2>&1
   if not errorlevel 1 (
     set "CHATXZ_PYTHON=%VENV_PY%"
     exit /b 0
@@ -96,7 +96,7 @@ exit /b 0
 if exist "%VENV_PY%" (
   "%VENV_PY%" -m pip --version >nul 2>&1
   if not errorlevel 1 (
-    "%VENV_PY%" -c "import rns, aiohttp" >nul 2>&1
+    "%VENV_PY%" -c "import RNS, aiohttp" >nul 2>&1
     if not errorlevel 1 (
       echo. > ".venv\.ready"
       set "CHATXZ_PYTHON=%VENV_PY%"

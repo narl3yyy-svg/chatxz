@@ -3,6 +3,9 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.7.2": [
+        "Ubuntu/Debian: ./run.sh now installs into a local .venv — fixes externally-managed-environment errors on modern Python.",
+    ],
     "0.7.1": [
         "Fixed silent calls showing 0 sent/received packets — browser mic now activates when native Opus isn't running; Opus encoder failures fall back to μ-law.",
         "./run.sh web auto-installs PyAudio and aiortc for desktop native call audio.",
