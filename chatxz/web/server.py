@@ -670,7 +670,7 @@ class ChatWebServer:
             iface = self.messaging._link_attached_interface(link)
             if interface_family(iface) == "serial":
                 return True
-            if not self.messaging._link_acceptable_for_peer(link, peer_hash):
+            if iface and not self.messaging._link_acceptable_for_peer(link, peer_hash):
                 return False
         if is_hub_peer_hash(peer_hash):
             return True
@@ -692,14 +692,23 @@ class ChatWebServer:
         if meta:
             peer_ip = (meta.get("ip") or "").strip()
             peer_via = (meta.get("via") or "").strip()
-        if not peer_ip and getattr(self, "discovery", None):
+        if getattr(self, "discovery", None):
+            serial_match = None
+            other_match = None
             for peer in self.discovery.peers.values():
                 ph = normalize_hash(peer.get("hash"))
                 ih = normalize_hash(peer.get("identity_hash"))
-                if target in (ph, ih):
-                    peer_ip = (peer.get("ip") or "").strip()
-                    peer_via = (peer.get("via") or "").strip()
-                    break
+                if target not in (ph, ih):
+                    continue
+                via = (peer.get("via") or "").strip()
+                if via == "serial":
+                    serial_match = peer
+                else:
+                    other_match = other_match or peer
+            chosen = serial_match or other_match
+            if chosen:
+                peer_ip = (chosen.get("ip") or "").strip()
+                peer_via = (chosen.get("via") or "").strip()
         if peer_via == "serial":
             if serial_discovery_active():
                 return True
@@ -2586,10 +2595,11 @@ class ChatWebServer:
             serial_connect = normalize_hash(id_payload["serial"].get("connect_hash") or "")
         configured = settings.get("rns_interfaces")
         serial_port, _ = configured_serial_port(configured) if configured else ("", 0)
-        serial_active = bool(serial_port and serial_interface_online(serial_port))
         serial_configured = bool(
             configured and configured_serial_enabled(configured)
         )
+        serial_in_rns = bool(serial_port and serial_interface_online(serial_port))
+        serial_active = serial_configured or serial_in_rns
         return web.json_response({
             "hash": connect,
             "connect_hash": connect,
@@ -2611,7 +2621,7 @@ class ChatWebServer:
             "debug_log_path": debug_log_path() if is_android() else None,
             "serial_active": serial_active,
             "serial_configured": serial_configured,
-            "serial_in_rns": serial_active,
+            "serial_in_rns": serial_in_rns,
         })
 
     async def handle_add_contact(self, request):

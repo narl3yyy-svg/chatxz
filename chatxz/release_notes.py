@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.5.11": [
+        "Serial inbound links no longer rejected as outside LAN scope when RNS has not set attached_interface yet.",
+        "Announce Serial button stays visible when USB serial is configured, even before RNS hot-add completes.",
+        "Serial peer scope lookup prefers via=serial over stale LAN entries for the same identity.",
+    ],
     "0.5.10": [
         "Disconnect no longer removes saved contacts when peer hashes are superseded.",
         "Connected state shows correctly for background LAN links; LAN contact rows pass via=lan.",

@@ -432,5 +432,73 @@ class BruteForceEdgeMatrixTests(unittest.TestCase):
         self.assertGreaterEqual(n, 64)
 
 
+ARCH_SERIAL = "a4a8d632910692c1b11282bf24e7caf6"
+ARCH_LAN = "57e15f1b62b896efb361d6cdd675b4ae"
+
+
+class SerialInboundScopeTests(unittest.TestCase):
+    def test_peer_scope_prefers_serial_discovery_entry(self):
+        from chatxz.web.server import ChatWebServer
+
+        server = ChatWebServer.__new__(ChatWebServer)
+        server.config_dir = "/tmp/chatxz-matrix"
+        server.discovery = PeerDiscovery()
+        server.discovery.accept_peers = True
+        now = time.time()
+        server.discovery.peers[ARCH_LAN] = {
+            "hash": ARCH_LAN,
+            "identity_hash": "c" * 32,
+            "ip": "10.10.10.2",
+            "via": "rns",
+            "last_seen": now,
+        }
+        server.discovery.peers[f"{ARCH_SERIAL}:serial"] = {
+            "hash": ARCH_SERIAL,
+            "identity_hash": "c" * 32,
+            "via": "serial",
+            "last_seen": now,
+        }
+        server.messaging = _messaging()
+        with patch.object(server, "_discovery_scope_ip", return_value="10.0.30.101"):
+            with patch(
+                "chatxz.core.discovery.serial_discovery_active",
+                return_value=True,
+            ):
+                allowed = server._peer_in_discovery_scope(ARCH_SERIAL)
+        self.assertTrue(allowed)
+
+    def test_inbound_serial_link_allowed_before_attached_interface(self):
+        import RNS
+
+        backend = _messaging()
+        serial_iface = MagicMock()
+        serial_iface.__class__.__name__ = "SerialInterface"
+        link = MagicMock()
+        link.attached_interface = None
+        link.interface = serial_iface
+        backend.peer_scope_checker = lambda peer_hash, link=None: False
+        with patch("chatxz.core.messaging.is_serial_interface", return_value=True):
+            with patch(
+                "chatxz.core.messaging.interface_family",
+                return_value="serial",
+            ):
+                allowed = backend._peer_allowed_by_scope(ARCH_SERIAL, link=link)
+        self.assertTrue(allowed)
+
+    def test_link_attached_interface_falls_back_to_parent(self):
+        backend = _messaging()
+        serial_iface = MagicMock()
+        serial_iface.__class__.__name__ = "SerialInterface"
+        link = MagicMock()
+        link.attached_interface = None
+        link.interface = None
+        link.parent_interface = serial_iface
+        with patch(
+            "chatxz.core.messaging.interface_family",
+            return_value="serial",
+        ):
+            self.assertIs(backend._link_attached_interface(link), serial_iface)
+
+
 if __name__ == "__main__":
     unittest.main()

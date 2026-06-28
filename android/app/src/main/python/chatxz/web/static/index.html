@@ -4256,8 +4256,9 @@ function loadRnsInterfaces() {
       : '';
     updateLanTransportSelect(items);
     const serialActive = items.some(i =>
-      (i.preset === 'serial' || i.type === 'SerialInterface') && i.serial_active);
-    updateSerialAnnounceVisibility(serialActive);
+      (i.preset === 'serial' || i.type === 'SerialInterface') &&
+      (i.serial_active || (i.enabled !== false && !i.user_disabled && (i.port || '').trim())));
+    updateSerialAnnounceVisibility(serialActive || !!window._serialActive);
   }).catch(() => { list.textContent = 'Failed to load interfaces.'; });
 }
 

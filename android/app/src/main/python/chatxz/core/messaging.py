@@ -525,8 +525,11 @@ class MessagingBackend:
             if link and is_serial_interface(self._link_attached_interface(link)):
                 return True
             return not self.peer_scope_checker
-        if link and not is_serial_interface(self._link_attached_interface(link)):
-            if not self._link_acceptable_for_peer(link, peer_hash):
+        if link:
+            iface = self._link_attached_interface(link)
+            if is_serial_interface(iface):
+                return True
+            if iface and not self._link_acceptable_for_peer(link, peer_hash):
                 return False
         if not self.peer_scope_checker:
             return True
@@ -1042,7 +1045,14 @@ class MessagingBackend:
     def _link_attached_interface(self, link):
         if not link:
             return None
-        return getattr(link, "attached_interface", None)
+        iface = getattr(link, "attached_interface", None)
+        if iface:
+            return iface
+        for attr in ("interface", "parent_interface"):
+            iface = getattr(link, attr, None)
+            if iface:
+                return iface
+        return None
 
     def _has_active_transfer(self):
         """True while a file send or receive is in progress on any link."""
