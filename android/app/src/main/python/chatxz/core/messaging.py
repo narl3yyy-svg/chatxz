@@ -5459,6 +5459,11 @@ class MessagingBackend:
                 return
             if call_id and call_id != self.voice_call.call_id:
                 return
+            recv = int(getattr(self, "_call_audio_recv", 0) or 0) + 1
+            self._call_audio_recv = recv
+            if recv <= 2 or recv % 40 == 0:
+                b64_len = len(payload.get("data") or "")
+                print(f"[call] Audio in #{recv} ({b64_len} b64) ← {peer[:16]}...")
             self._emit_call_event("audio", peer, payload)
             return
 
@@ -5526,15 +5531,24 @@ class MessagingBackend:
     def call_send_audio(self, audio_b64, codec="audio/webm", call_id=None):
         if self.voice_call.state != STATE_ACTIVE:
             return False
+        if not audio_b64:
+            return False
         peer = self.voice_call.peer_hash
         cid = call_id or self.voice_call.call_id
         seq = self.voice_call.next_audio_seq()
-        return self._send_call_packet(peer, CALL_AUDIO, {
+        ok = self._send_call_packet(peer, CALL_AUDIO, {
             "call_id": cid,
             "seq": seq,
             "codec": codec,
             "data": audio_b64,
         }, self.voice_call.transport)
+        sent = int(getattr(self, "_call_audio_sent", 0) or 0)
+        if ok:
+            sent += 1
+            self._call_audio_sent = sent
+            if sent <= 2 or sent % 40 == 0:
+                print(f"[call] Audio out #{sent} ({len(audio_b64)} b64) → {peer[:16]}...")
+        return ok
 
     def call_status(self):
         vc = self.voice_call

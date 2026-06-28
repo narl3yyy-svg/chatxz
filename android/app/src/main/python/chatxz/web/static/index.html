@@ -5877,9 +5877,23 @@ function ensureCallAudioCtx() {
 function callAudioConfig() {
   const via = normalizeVia(callVia || viewingVia);
   if (via === 'serial') {
-    return { rate: 8000, frameSamples: 120, maxQueue: 3, primeSec: 0.05, batchPlayback: 2 };
+    return { rate: 8000, frameSamples: 100, maxQueue: 4, primeSec: 0.05, batchPlayback: 2 };
   }
-  return { rate: 16000, frameSamples: 320, maxQueue: 4, primeSec: 0.04, batchPlayback: 2 };
+  return { rate: 16000, frameSamples: 240, maxQueue: 5, primeSec: 0.04, batchPlayback: 2 };
+}
+
+function callMaxPcmChunkSamples(cfg) {
+  return cfg.rate >= 16000 ? 240 : 100;
+}
+
+function sendPcmFrames(pcm, codec) {
+  const cfg = callAudioConfig();
+  const chunkSamples = callMaxPcmChunkSamples(cfg);
+  for (let i = 0; i < pcm.length; i += chunkSamples) {
+    const slice = pcm.subarray(i, Math.min(i + chunkSamples, pcm.length));
+    if (!slice.length) continue;
+    sendCallAudioFrame(pcmToB64(slice), codec);
+  }
 }
 
 function floatToPcm(samples) {
@@ -6049,14 +6063,13 @@ async function startCallCapture() {
       merged.set(accum, 0);
       merged.set(input, accum.length);
       accum = merged;
-      if (accum.length < frameInputSamples) return;
-      const chunk = accum.subarray(0, frameInputSamples);
-      accum = accum.subarray(frameInputSamples);
-      const pcm = resampleLinearToPcm(chunk, inputRate, cfg.rate);
-      const b64 = pcmToB64(pcm);
-      const maxB64 = cfg.rate >= 16000 ? 720 : 360;
-      if (b64.length > maxB64) return;
-      sendCallAudioFrame(b64, callPcmCodec(cfg.rate));
+      const codec = callPcmCodec(cfg.rate);
+      while (accum.length >= frameInputSamples) {
+        const chunk = accum.subarray(0, frameInputSamples);
+        accum = accum.subarray(frameInputSamples);
+        const pcm = resampleLinearToPcm(chunk, inputRate, cfg.rate);
+        if (pcm.length) sendPcmFrames(pcm, codec);
+      }
     };
     callCaptureSource.connect(processor);
     processor.connect(silent);

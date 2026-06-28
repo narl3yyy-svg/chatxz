@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.6.4": [
+        "Call audio was silently dropped — frame size limit was too low; LAN calls now send 240-sample PCM frames.",
+        "Capture drains the full mic buffer each tick; server logs Audio in/out when frames flow.",
+    ],
     "0.6.3": [
         "Call audio uses proper linear resampling (16 kHz on LAN, 8 kHz on USB) — fixes garbled “fan blade” sound.",
         "Playback batches frames and caps queue depth so voice stays in sync instead of lagging behind.",

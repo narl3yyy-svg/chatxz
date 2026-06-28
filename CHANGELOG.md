@@ -2,6 +2,12 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.6.4] — 2026-06-28
+
+### Fixed
+- **Silent calls (no audio)** — LAN PCM frames (854 b64 chars) were dropped by a 720-char client cap; frames resized to 240 samples and the cap removed.
+- **Capture throughput** — mic buffer is fully drained each processing tick instead of one frame per callback.
+
 ## [0.6.3] — 2026-06-27
 
 ### Fixed
