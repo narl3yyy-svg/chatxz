@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — each transport uses its own RNS identity, and messages travel over encrypted links on your LAN (Wi‑Fi, Ethernet, USB serial).
 
-**Current version:** 0.5.8
+**Current version:** 0.6.0
 
 ## How chatxz works (v0.5+)
 
@@ -51,7 +51,7 @@ Regenerate identities under **Settings → Profile** (**Regenerate LAN** / **Reg
 - **Android sleep** — tap the contact to wake and reconnect (LAN wake is automatic).
 - **Cross-subnet LAN** — pick matching pinned IPv4 on both devices.
 
-**Roadmap:** live voice **calls** (duplex audio over RNS) planned for **v0.6.0**. Voice **notes** (🎤) work today.
+**Voice calls (v0.6.0):** when connected to a peer, tap **📞** in the chat header for a live duplex call over RNS (LAN or USB). Voice **notes** (🎤) remain separate one-shot recordings.
 
 ## Download
 
@@ -287,6 +287,11 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.6.0** — **Live voice calls:** duplex audio over RNS on active links; 📞 in chat header, incoming-call UI, `/api/call` + WebSocket events
+- **v0.5.13** — **Dual-hash contact save:** LAN hash no longer copies into USB slot; phantom serial rows filtered
+- **v0.5.12** — **Contact save fix:** serial hash no longer lands in LAN row; wider voice message bubbles
+- **v0.5.11** — **Serial connect scope:** inbound serial links accepted when interface not yet attached; Announce Serial visible when USB configured
+- **v0.5.10** — **Disconnect + contacts:** superseded hashes no longer drop saved contacts; clear history matches all aliases
 - **v0.5.6** — **Contact hash sync:** saved contacts auto-update from Discovered (stale `b903…` → live `342835…` LAN hash); LAN row connect uses discovered hash
 - **v0.5.5** — **Contacts + discovery:** custom contact names persist; LAN/USB save to one contact with distinct hashes; false serial rows for LAN-only peers removed; own hash blocked from contacts
 - **v0.5.4** — **Serial announce fix:** USB hot-add creates serial identity/destination; serial announces stay on `/dev/ttyUSB0` (no LAN broadcast toast); self-hashes filtered from discovery; session reconnect stays on chosen transport

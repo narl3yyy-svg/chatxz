@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.6.0": [
+        "Live voice calls over RNS — duplex audio on an active LAN or USB serial link (no WebRTC).",
+        "Tap 📞 in the chat header when connected; accept or decline incoming calls; hang up anytime.",
+        "Voice notes (🎤) are unchanged — calls stream small audio frames separately from file transfers.",
+    ],
     "0.5.13": [
         "Dual-hash contact save no longer copies the LAN hash into the USB row when both transports are discovered.",
         "Phantom serial discovery rows (same hash as LAN) are filtered client-side; duplicate serial_hash is dropped when it matches lan_hash.",

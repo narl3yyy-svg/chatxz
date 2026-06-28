@@ -23,8 +23,15 @@ def normalize_contact(entry):
     lan = (entry.get("lan_hash") or "").replace(":", "")
     serial = (entry.get("serial_hash") or "").replace(":", "")
     if serial and lan and lan == serial:
-        entry.pop("serial_hash", None)
-        serial = ""
+        if (entry.get("ip") or "").strip():
+            entry.pop("serial_hash", None)
+            serial = ""
+        else:
+            entry.pop("lan_hash", None)
+            lan = ""
+            if h == serial:
+                entry.pop("hash", None)
+                h = ""
     if serial and h == serial and not lan:
         entry.pop("hash", None)
         h = ""

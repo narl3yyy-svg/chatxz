@@ -49,6 +49,20 @@ from chatxz.core.lan_rns import (
 )
 from chatxz.utils.platform import is_android, lan_ip, physical_lan_reachable
 from chatxz.core.lan_transfer import register_offer, remove_offer
+from chatxz.core.voice_call import (
+    CALL_ACCEPT,
+    CALL_AUDIO,
+    CALL_END,
+    CALL_INVITE,
+    CALL_REJECT,
+    CALL_TYPES,
+    STATE_ACTIVE,
+    STATE_IDLE,
+    STATE_INCOMING,
+    STATE_OUTGOING,
+    VoiceCallSession,
+    parse_call_payload,
+)
 from chatxz.core.serial_transfer import (
     boost_serial_establishment_timeout,
     is_serial_interface,
@@ -187,7 +201,7 @@ class MessagingBackend:
                  on_progress=None, on_link_established=None, on_link_closed=None,
                  display_name="", auto_announce=False,
                  receive_dir=None, peer_resolver=None, on_queue_sent=None,
-                 on_transfer_revoked=None,
+                 on_transfer_revoked=None, on_call_event=None,
                  http_port=8742, lan_transfer_enabled=False,
                  peer_endpoint_resolver=None, peer_scope_checker=None,
                  peer_transport_resolver=None, identity_serial=None,
@@ -204,6 +218,8 @@ class MessagingBackend:
         self.on_link_closed = on_link_closed
         self.on_queue_sent = on_queue_sent
         self.on_transfer_revoked = on_transfer_revoked
+        self.on_call_event = on_call_event
+        self.voice_call = VoiceCallSession()
         self.display_name = display_name
         self.auto_announce = auto_announce
         self.announce_interval = 30
@@ -3869,7 +3885,7 @@ class MessagingBackend:
                 chat_msg = ChatMessage.from_json(message.decode("utf-8"))
                 remote_hash = self.dest_hash_for(self._peer_for_link(link))
                 if remote_hash and not self._peer_allowed_by_scope(remote_hash, link=link):
-                    if chat_msg.msg_type not in ("__receipt", "__read_receipt"):
+                    if chat_msg.msg_type not in ("__receipt", "__read_receipt") and chat_msg.msg_type not in CALL_TYPES:
                         print(
                             f"[messaging] Dropped {chat_msg.msg_type} from "
                             f"{remote_hash[:16]}... (outside LAN scope)"
@@ -3901,6 +3917,10 @@ class MessagingBackend:
                         print(f"[receipt] Read receipt for msg {msg_id[:8]} from {remote_hash[:16]}")
                     except Exception as e:
                         print(f"[receipt] Read receipt error: {e}")
+                    return
+
+                if chat_msg.msg_type in CALL_TYPES:
+                    self._handle_call_packet(chat_msg, remote_hash, link)
                     return
 
                 if chat_msg.msg_type == MESSAGE_TYPE_LAN_HTTP:
@@ -5339,3 +5359,186 @@ class MessagingBackend:
             if self._current_transfer_id == transfer_id:
                 self._current_transfer_id = None
         return callback
+
+    def _call_link_for_peer(self, peer_hash, transport=None):
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown":
+            return None
+        link = self._link_for_peer(peer, transport=transport)
+        if link and self._link_interface_healthy(link):
+            return link
+        if self._peer_link_active(peer):
+            active = self._link_for_peer(peer) or self.active_link
+            if active and self._link_interface_healthy(active):
+                return active
+        return None
+
+    def _emit_call_event(self, event, peer_hash, payload=None):
+        if not self.on_call_event:
+            return
+        try:
+            self.on_call_event(event, peer_hash, payload or {})
+        except Exception as e:
+            print(f"[call] on_call_event error: {e}")
+
+    def _send_call_packet(self, peer_hash, msg_type, payload, transport=None):
+        peer = self.dest_hash_for(peer_hash)
+        link = self._call_link_for_peer(peer, transport)
+        if not link:
+            print(f"[call] No link to {peer[:16] if peer else '?'}...")
+            return False
+        msg = ChatMessage(msg_type, json.dumps(payload))
+        data = msg.to_json().encode("utf-8")
+        mtu = max(400, int(getattr(link, "mtu", 500) or 500) - 48)
+        if len(data) > mtu:
+            if msg_type != CALL_AUDIO:
+                print(f"[call] Packet too large ({len(data)} > {mtu})")
+            return False
+        try:
+            RNS.Packet(link, data).send()
+            return True
+        except Exception as e:
+            print(f"[call] Send failed: {e}")
+            return False
+
+    def _handle_call_packet(self, chat_msg, remote_hash, link):
+        payload = parse_call_payload(chat_msg.content)
+        peer = self.dest_hash_for(remote_hash) or remote_hash
+        msg_type = chat_msg.msg_type
+        call_id = (payload.get("call_id") or "").strip()
+
+        if msg_type == CALL_INVITE:
+            if self.voice_call.is_busy():
+                self._send_call_packet(
+                    peer,
+                    CALL_REJECT,
+                    {"call_id": call_id, "reason": "busy"},
+                    payload.get("transport"),
+                )
+                return
+            transport = (payload.get("transport") or "lan").strip().lower()
+            self.voice_call.begin_incoming(call_id, peer, transport)
+            self._emit_call_event("incoming", peer, {
+                "call_id": call_id,
+                "transport": transport,
+                "caller_name": payload.get("caller_name") or "",
+            })
+            print(f"[call] Incoming from {peer[:16]}... ({call_id})")
+            return
+
+        if msg_type == CALL_ACCEPT:
+            if self.voice_call.state == STATE_OUTGOING and (
+                not call_id or call_id == self.voice_call.call_id
+            ):
+                self.voice_call.activate(call_id)
+                self._emit_call_event("accepted", peer, {"call_id": self.voice_call.call_id})
+                print(f"[call] Accepted by {peer[:16]}...")
+            return
+
+        if msg_type == CALL_REJECT:
+            if not call_id or call_id == self.voice_call.call_id:
+                self.voice_call.reset()
+                self._emit_call_event("rejected", peer, {
+                    "call_id": call_id,
+                    "reason": payload.get("reason") or "",
+                })
+                print(f"[call] Rejected by {peer[:16]}...")
+            return
+
+        if msg_type == CALL_END:
+            if not call_id or call_id == self.voice_call.call_id:
+                self.voice_call.reset()
+                self._emit_call_event("ended", peer, {"call_id": call_id})
+                print(f"[call] Ended with {peer[:16]}...")
+            return
+
+        if msg_type == CALL_AUDIO:
+            if self.voice_call.state != STATE_ACTIVE:
+                return
+            if call_id and call_id != self.voice_call.call_id:
+                return
+            self._emit_call_event("audio", peer, payload)
+            return
+
+    def call_invite(self, peer_hash, transport="lan"):
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown":
+            return None
+        if self.voice_call.is_busy():
+            return None
+        if not self._call_link_for_peer(peer, transport):
+            return None
+        call_id = self.voice_call.begin_outgoing(peer, transport)
+        ok = self._send_call_packet(peer, CALL_INVITE, {
+            "call_id": call_id,
+            "transport": self.voice_call.transport,
+            "caller_name": self.display_name or "",
+        }, transport)
+        if not ok:
+            self.voice_call.reset()
+            return None
+        self._emit_call_event("outgoing", peer, {
+            "call_id": call_id,
+            "transport": self.voice_call.transport,
+        })
+        print(f"[call] Outgoing to {peer[:16]}... ({call_id})")
+        return call_id
+
+    def call_accept(self, call_id=None):
+        if self.voice_call.state != STATE_INCOMING:
+            return False
+        peer = self.voice_call.peer_hash
+        cid = call_id or self.voice_call.call_id
+        if not self._send_call_packet(peer, CALL_ACCEPT, {"call_id": cid}, self.voice_call.transport):
+            return False
+        self.voice_call.activate(cid)
+        self._emit_call_event("accepted", peer, {"call_id": cid})
+        print(f"[call] Accepted {peer[:16]}...")
+        return True
+
+    def call_reject(self, call_id=None, reason=""):
+        if self.voice_call.state not in (STATE_INCOMING, STATE_OUTGOING):
+            return False
+        peer = self.voice_call.peer_hash
+        cid = call_id or self.voice_call.call_id
+        self._send_call_packet(peer, CALL_REJECT, {
+            "call_id": cid,
+            "reason": reason or "",
+        }, self.voice_call.transport)
+        self.voice_call.reset()
+        self._emit_call_event("rejected", peer, {"call_id": cid, "reason": reason})
+        return True
+
+    def call_end(self, call_id=None):
+        if self.voice_call.state == STATE_IDLE:
+            return False
+        peer = self.voice_call.peer_hash
+        cid = call_id or self.voice_call.call_id
+        if peer:
+            self._send_call_packet(peer, CALL_END, {"call_id": cid}, self.voice_call.transport)
+        self.voice_call.reset()
+        self._emit_call_event("ended", peer, {"call_id": cid})
+        print(f"[call] Ended ({cid})")
+        return True
+
+    def call_send_audio(self, audio_b64, codec="audio/webm", call_id=None):
+        if self.voice_call.state != STATE_ACTIVE:
+            return False
+        peer = self.voice_call.peer_hash
+        cid = call_id or self.voice_call.call_id
+        seq = self.voice_call.next_audio_seq()
+        return self._send_call_packet(peer, CALL_AUDIO, {
+            "call_id": cid,
+            "seq": seq,
+            "codec": codec,
+            "data": audio_b64,
+        }, self.voice_call.transport)
+
+    def call_status(self):
+        vc = self.voice_call
+        return {
+            "state": vc.state,
+            "call_id": vc.call_id,
+            "peer": vc.peer_hash,
+            "transport": vc.transport,
+        }

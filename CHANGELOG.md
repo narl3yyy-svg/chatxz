@@ -2,6 +2,13 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.6.0] — 2026-06-27
+
+### Added
+- **Live voice calls over RNS** — duplex audio on an active encrypted link (LAN or USB serial); signaling via `__call_*` packets, audio streamed in MTU-sized frames.
+- **Web UI** — 📞 button in the chat header when linked; incoming-call modal; in-call timer and hang-up bar.
+- **`POST /api/call`** — invite, accept, reject, end, audio, and status actions; WebSocket events `call_incoming`, `call_accepted`, `call_audio`, etc.
+
 ## [0.5.8] — 2026-06-27
 
 ### Fixed

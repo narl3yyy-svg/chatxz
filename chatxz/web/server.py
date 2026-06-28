@@ -1612,6 +1612,7 @@ class ChatWebServer:
             on_link_closed=self._on_link_closed,
             on_queue_sent=self._on_queue_sent,
             on_transfer_revoked=self._on_transfer_revoked,
+            on_call_event=self._on_call_event,
             display_name=effective_display_name(settings),
             auto_announce=auto_announce,
             receive_dir=received_dir,
@@ -2482,6 +2483,15 @@ class ChatWebServer:
                 }),
                 self._loop
             )
+
+    def _on_call_event(self, event, peer_hash, payload=None):
+        if not (self.websockets and self._loop):
+            return
+        data = {"peer": peer_hash or "", **(payload or {})}
+        asyncio.run_coroutine_threadsafe(
+            self._broadcast({"type": f"call_{event}", "data": data}),
+            self._loop,
+        )
 
     def _on_transfer_progress(self, data):
         status = data.get("status", "active")
@@ -4718,6 +4728,74 @@ class ChatWebServer:
                 await self._remove_history_message(transfer_id)
         return web.json_response({"status": "ok" if cancelled else "noop"})
 
+    async def handle_call(self, request):
+        if not self.messaging:
+            return web.json_response({"error": "not ready"}, status=400)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        action = (data.get("action") or "").strip().lower()
+        peer = (data.get("peer") or "").strip()
+        via = (data.get("via") or data.get("transport") or "").strip().lower()
+        call_id = (data.get("call_id") or "").strip() or None
+        if via not in ("lan", "serial"):
+            via = None
+        if peer and via:
+            transport_hash = self._contact_hash_for_transport(peer, via)
+            if transport_hash:
+                peer = transport_hash
+        peer = self._peer_dest_hash(peer) if peer else ""
+
+        if action == "status":
+            return web.json_response(self.messaging.call_status())
+
+        if action == "invite":
+            if not peer:
+                return web.json_response({"error": "peer required"}, status=400)
+            transport = via or "lan"
+            cid = await asyncio.to_thread(self.messaging.call_invite, peer, transport)
+            if not cid:
+                return web.json_response({"error": "invite failed"}, status=400)
+            return web.json_response({
+                "status": "ok",
+                "call_id": cid,
+                **self.messaging.call_status(),
+            })
+
+        if action == "accept":
+            ok = await asyncio.to_thread(self.messaging.call_accept, call_id)
+            if not ok:
+                return web.json_response({"error": "accept failed"}, status=400)
+            return web.json_response({"status": "ok", **self.messaging.call_status()})
+
+        if action == "reject":
+            reason = (data.get("reason") or "").strip()
+            ok = await asyncio.to_thread(self.messaging.call_reject, call_id, reason)
+            if not ok:
+                return web.json_response({"error": "reject failed"}, status=400)
+            return web.json_response({"status": "ok"})
+
+        if action == "end":
+            ok = await asyncio.to_thread(self.messaging.call_end, call_id)
+            if not ok:
+                return web.json_response({"error": "end failed"}, status=400)
+            return web.json_response({"status": "ok"})
+
+        if action == "audio":
+            audio_b64 = data.get("audio") or data.get("data") or ""
+            if not audio_b64:
+                return web.json_response({"error": "audio required"}, status=400)
+            codec = (data.get("codec") or "audio/webm").strip()
+            ok = await asyncio.to_thread(
+                self.messaging.call_send_audio, audio_b64, codec, call_id,
+            )
+            if not ok:
+                return web.json_response({"error": "audio send failed"}, status=400)
+            return web.json_response({"status": "ok"})
+
+        return web.json_response({"error": "unknown action"}, status=400)
+
     async def handle_voice_upload(self, request):
         if not self.messaging:
             return web.json_response({"error": "not ready"}, status=400)
@@ -5458,6 +5536,7 @@ class ChatWebServer:
         app.router.add_post("/api/disconnect", self.handle_disconnect)
         app.router.add_post("/api/file", self.handle_file_upload)
         app.router.add_post("/api/folder", self.handle_folder_upload)
+        app.router.add_post("/api/call", self.handle_call)
         app.router.add_post("/api/voice", self.handle_voice_upload)
         app.router.add_post("/api/play", self.handle_play_voice)
         app.router.add_get("/api/history", self.handle_history)
