@@ -5434,6 +5434,7 @@ class MessagingBackend:
                 not call_id or call_id == self.voice_call.call_id
             ):
                 self.voice_call.activate(call_id)
+                self._reset_call_audio_counters()
                 self._emit_call_event("accepted", peer, {"call_id": self.voice_call.call_id})
                 print(f"[call] Accepted by {peer[:16]}...")
             return
@@ -5468,6 +5469,10 @@ class MessagingBackend:
             self._emit_call_event("audio", peer, payload)
             return
 
+    def _reset_call_audio_counters(self):
+        self._call_audio_sent = 0
+        self._call_audio_recv = 0
+
     def call_invite(self, peer_hash, transport="lan"):
         peer = self.dest_hash_for(peer_hash)
         if not peer or peer == "unknown":
@@ -5500,6 +5505,7 @@ class MessagingBackend:
         if not self._send_call_packet(peer, CALL_ACCEPT, {"call_id": cid}, self.voice_call.transport):
             return False
         self.voice_call.activate(cid)
+        self._reset_call_audio_counters()
         self._emit_call_event("accepted", peer, {"call_id": cid})
         print(f"[call] Accepted {peer[:16]}...")
         return True

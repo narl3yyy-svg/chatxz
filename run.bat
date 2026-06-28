@@ -70,6 +70,7 @@ set "CHATXZ_PYTHON="
 if exist "%VENV_PY%" if exist ".venv\.ready" (
   "%VENV_PY%" -c "import RNS, aiohttp" >nul 2>&1
   if not errorlevel 1 (
+    call :ensure_voice_deps
     set "CHATXZ_PYTHON=%VENV_PY%"
     exit /b 0
   )
@@ -92,12 +93,20 @@ if errorlevel 1 (
 )
 exit /b 0
 
+:ensure_voice_deps
+"%VENV_PY%" -c "from chatxz.core.call_audio_engine import call_audio_available; import sys; sys.exit(0 if call_audio_available() else 1)" >nul 2>&1
+if not errorlevel 1 exit /b 0
+echo Installing voice dependencies (pyaudio, aiortc)...
+"%VENV_PY%" -m pip install -q pyaudio aiortc 2>nul
+exit /b 0
+
 :ensure_deps
 if exist "%VENV_PY%" (
   "%VENV_PY%" -m pip --version >nul 2>&1
   if not errorlevel 1 (
     "%VENV_PY%" -c "import RNS, aiohttp" >nul 2>&1
     if not errorlevel 1 (
+      call :ensure_voice_deps
       echo. > ".venv\.ready"
       set "CHATXZ_PYTHON=%VENV_PY%"
       exit /b 0
@@ -125,6 +134,7 @@ if errorlevel 1 (
   echo Failed to install dependencies.
   exit /b 1
 )
+call :ensure_voice_deps
 echo. > ".venv\.ready"
 set "CHATXZ_PYTHON=%VENV_PY%"
 exit /b 0

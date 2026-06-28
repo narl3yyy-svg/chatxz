@@ -40,11 +40,17 @@ install_voice_deps() {
         return 0
     fi
     echo "Installing voice dependencies (pyaudio, aiortc)..."
-    if "$py" -m pip install -q pyaudio aiortc 2>/dev/null; then
+    local log="$DIR/.voice-install.log"
+    if "$py" -m pip install -q pyaudio aiortc 2>"$log"; then
+        rm -f "$log"
         return 0
     fi
     echo "[setup] Native call audio unavailable (pyaudio/aiortc). Browser mic fallback still works."
-    echo "  Ubuntu: sudo apt install portaudio19-dev python3-dev"
+    if [ -s "$log" ]; then
+        tail -n 2 "$log" | sed 's/^/[setup] /'
+    fi
+    echo "  Ubuntu/Debian: sudo apt install portaudio19-dev python3-dev python3-pyaudio"
+    echo "  Arch: sudo pacman -S portaudio python-pyaudio"
     echo "  Then re-run: ./run.sh web"
     return 1
 }

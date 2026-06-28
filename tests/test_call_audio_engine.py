@@ -1,4 +1,9 @@
-from chatxz.core.call_audio_engine import CallJitterBuffer, SILENCE_PCM, call_audio_available
+from chatxz.core.call_audio_engine import (
+    CallJitterBuffer,
+    OpusCallCodec,
+    SILENCE_PCM,
+    call_audio_available,
+)
 
 
 def test_call_jitter_buffer_plc():
@@ -26,3 +31,13 @@ def test_call_jitter_buffer_prefetch():
 
 def test_call_audio_available_reports_bool():
     assert isinstance(call_audio_available(), bool)
+
+
+def test_opus_codec_decodes_silence_frame():
+    if not call_audio_available():
+        return
+    codec = OpusCallCodec()
+    pkt = codec.encode_pcm(SILENCE_PCM)
+    assert pkt and len(pkt) >= 1
+    pcm = codec.decode_opus(pkt)
+    assert pcm and len(pcm) == 960 * 2

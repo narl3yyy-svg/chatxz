@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.7.3": [
+        "Fixed silent calls: native Opus playback decode, desktop browser μ-law fallback, receive-only mode on servers without a mic.",
+        "Connection header and dual-file transfer UI fixes; Windows run.bat installs voice deps.",
+    ],
     "0.7.2": [
         "Ubuntu/Debian: ./run.sh now installs into a local .venv — fixes externally-managed-environment errors on modern Python.",
     ],

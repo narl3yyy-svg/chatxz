@@ -2,6 +2,16 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.7.3] — 2026-06-28
+
+### Fixed
+- **Silent native call playback** — Opus decode used removed PyAV `to_bytes()` API; playback now works on Arch/Linux native audio.
+- **Browser call audio on desktop** — Ubuntu/Windows/Arch browsers use proven μ-law LAN frames again; Android keeps WebCodecs Opus.
+- **Headless / no-mic servers** — native engine runs receive-only (no silence packet spam); RMS gate skips encoding silence.
+- **Connection status UI** — superseded peer hashes register aliases; link header checks all transports.
+- **Dual file transfers** — active transfer list shows each file on its own row (fixes blurred Android dock).
+- **`run.bat`** — installs pyaudio/aiortc for native call audio on Windows.
+
 ## [0.7.2] — 2026-06-28
 
 ### Fixed

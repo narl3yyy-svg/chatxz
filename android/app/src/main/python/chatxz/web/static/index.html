@@ -519,7 +519,19 @@ body::before {
   flex-direction: column;
   justify-content: center;
   gap: 4px;
+  max-height: 88px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
+#active-transfers {
+  display: none;
+  width: 100%;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--text2);
+}
+#active-transfers.active { display: flex; }
 #transfer-active-row {
   display: flex;
   align-items: center;
@@ -1737,6 +1749,7 @@ body.android-shell.sidebar-open #sidebar-backdrop {
       <span id="queue-count" style="display:none" title="Click to clear queue" onclick="clearQueue()"></span>
     </div>
     <div id="transfer-dock">
+      <div id="active-transfers"></div>
       <div id="incoming-transfers"></div>
       <div id="transfer-active-row">
         <div id="progress-bar">
@@ -2073,6 +2086,8 @@ let peersPollTimer = null;
 let activeTransfer = null;
 let cancelledTransferIds = new Set();
 let incomingTransfers = {};
+let transferTrack = {};
+let transferTrack = {};
 let allContacts = [];
 let sidebarOpen = true;
 let appPlatform = 'desktop';
@@ -2863,7 +2878,9 @@ function peerInterfaceLabel(via) {
 function updatePeerHeader() {
   if (!viewingPeer) return;
   const name = contactNameFor(viewingPeer) || truncateHash(viewingPeer);
-  const linked = isPeerLinked(viewingPeer, viewingVia);
+  const linked = isPeerLinked(viewingPeer, viewingVia)
+    || isPeerLinked(viewingPeer, 'lan')
+    || isPeerLinked(viewingPeer, 'serial');
   const rtt = linked ? rttForViewingPeer() : '';
   const rttBadge = rtt ? ` · <span class="peer-rtt">${escapeHtml(rtt)}</span>` : '';
   document.getElementById('peer-name').textContent = name;
@@ -3198,6 +3215,7 @@ function handleWSMessage(msg) {
       ['lan', 'serial'].forEach(via => linkedPeers.delete(linkKey(old, via)));
       linkedPeers.delete(key);
       const repl = data.replacement || (data.replacement_peer && data.replacement_peer.hash);
+      if (repl) registerPeerAliases(old, repl);
       if (repl && viewingPeer && peerKey(viewingPeer) === key) {
         viewingPeer = repl;
       } else if (peerKey(viewingPeer) === key && !repl) {
@@ -3235,7 +3253,7 @@ function handleWSMessage(msg) {
     if (msg.data?.hash) {
       const h = msg.data.hash;
       registerPeerAliases(h, ...(msg.data.aliases || []));
-      const linkVia = msg.data.via || viaForLinkedPeer(h) || viewingVia;
+      const linkVia = msg.data.via || viaForLinkedPeer(h) || viewingVia || 'lan';
       if (msg.data.rtt_ms != null) applyLinkRttToDiscovered(h, msg.data.rtt_ms, linkVia);
       const passive = msg.data.passive || msg.data.user_disconnected;
       if (msg.data.linked_peers) {
@@ -3243,6 +3261,7 @@ function handleWSMessage(msg) {
       } else if (!passive && msg.data.promote_active !== false) {
         setLinkPeer(h, true, linkVia);
       }
+      if (!viewingVia && linkVia) viewingVia = normalizeVia(linkVia);
       const now = Date.now();
       if (connectInFlight && !msg.data.background) {
         connectInFlight = false;
@@ -3327,10 +3346,19 @@ function sendReadReceipt(msgId) {
   }
 }
 
-function renderIncomingTransfers() {
-  const el = document.getElementById('incoming-transfers');
+function transferTrackKey(data) {
+  return data.transfer_id || ((data.direction || 'send') + ':' + (data.file_name || 'file'));
+}
+
+function renderTransferDock() {
+  const el = document.getElementById('active-transfers');
+  const legacy = document.getElementById('incoming-transfers');
+  if (legacy) {
+    legacy.classList.remove('active');
+    legacy.innerHTML = '';
+  }
   if (!el) return;
-  const items = Object.values(incomingTransfers);
+  const items = Object.values(transferTrack);
   if (!items.length) {
     el.classList.remove('active');
     el.innerHTML = '';
@@ -3341,34 +3369,53 @@ function renderIncomingTransfers() {
     const pct = t.progress || 0;
     let status = t.status || 'active';
     const via = t.transport === 'serial' ? 'USB' : (t.transport ? String(t.transport).toUpperCase() : 'LAN');
-    if (status === 'active') status = pct > 0 ? pct + '%' : 'waiting…';
-    return `<div class="incoming-item"><span>↓ ${escapeHtml(t.file_name || 'file')} <span style="opacity:0.65;font-size:10px">${escapeHtml(via)}</span></span><span>${escapeHtml(String(status))}</span></div>`;
+    const dir = t.direction === 'receive' ? '↓' : '↑';
+    if (status === 'active') status = pct > 0 ? pct + '%' : (t.direction === 'receive' ? 'waiting…' : 'starting…');
+    return `<div class="incoming-item"><span>${dir} ${escapeHtml(t.file_name || 'file')} <span style="opacity:0.65;font-size:10px">${escapeHtml(via)}</span></span><span>${escapeHtml(String(status))}</span></div>`;
   }).join('');
 }
 
+function renderIncomingTransfers() {
+  renderTransferDock();
+}
+
 function updateIncomingTransfers(data) {
-  if (!data || data.direction !== 'receive') return;
-  const key = data.transfer_id || data.file_name || ('recv-' + Date.now());
+  if (!data) return;
+  const key = transferTrackKey(data);
   if (data.status === 'complete' || data.status === 'failed' || data.status === 'cancelled') {
-    Object.keys(incomingTransfers).forEach(k => {
-      const t = incomingTransfers[k];
+    Object.keys(transferTrack).forEach(k => {
+      const t = transferTrack[k];
       if (
         (data.transfer_id && t.transfer_id === data.transfer_id) ||
-        (data.file_name && t.file_name === data.file_name)
+        (data.file_name && t.file_name === data.file_name && t.direction === data.direction)
       ) {
-        delete incomingTransfers[k];
+        delete transferTrack[k];
       }
     });
-    delete incomingTransfers[key];
+    delete transferTrack[key];
+    if (data.direction === 'receive') {
+      Object.keys(incomingTransfers).forEach(k => {
+        const t = incomingTransfers[k];
+        if (
+          (data.transfer_id && t.transfer_id === data.transfer_id) ||
+          (data.file_name && t.file_name === data.file_name)
+        ) {
+          delete incomingTransfers[k];
+        }
+      });
+    }
   } else {
-    incomingTransfers[key] = {...incomingTransfers[key], ...data, _key: key, _updated: Date.now()};
+    transferTrack[key] = {...transferTrack[key], ...data, _key: key, _updated: Date.now()};
+    if (data.direction === 'receive') {
+      incomingTransfers[key] = transferTrack[key];
+    }
   }
   const now = Date.now();
-  Object.keys(incomingTransfers).forEach(k => {
-    const t = incomingTransfers[k];
-    if (t._updated && now - t._updated > 120000) delete incomingTransfers[k];
+  Object.keys(transferTrack).forEach(k => {
+    const t = transferTrack[k];
+    if (t._updated && now - t._updated > 120000) delete transferTrack[k];
   });
-  renderIncomingTransfers();
+  renderTransferDock();
 }
 
 function showProgress(data) {
@@ -3440,7 +3487,11 @@ function hideProgress(msg) {
   if (speedEl) speedEl.textContent = '';
   cancelBtn?.classList.remove('visible');
   activeTransfer = null;
-  if (msg) toast(msg);
+  if (msg) {
+    Object.keys(transferTrack).forEach(k => delete transferTrack[k]);
+    renderTransferDock();
+    toast(msg);
+  }
 }
 
 function cancelTransfer() {
@@ -6045,7 +6096,8 @@ function updateCallDashboard() {
   }
   const codecEl = document.getElementById('call-stat-codec');
   if (codecEl) {
-    if (cfg.native) codecEl.textContent = 'Opus 48k · native';
+    const mode = callServerStats.mode ? ` · ${callServerStats.mode}` : '';
+    if (cfg.native) codecEl.textContent = `Opus 48k · native${mode}`;
     else if (cfg.useOpus) codecEl.textContent = 'Opus 48k';
     else if (cfg.useMulaw) codecEl.textContent = `μ-law ${cfg.rate / 1000}k`;
     else codecEl.textContent = `PCM ${cfg.rate / 1000}k`;
@@ -6157,14 +6209,20 @@ function callAudioConfig() {
   if (via === 'serial') {
     return { rate: 8000, frameSamples: 160, jitterTarget: 320, jitterMax: 640, useOpus: false, useMulaw: true };
   }
-  const opus = browserOpusSupported() && callBrowserOpusOk !== false;
+  if (isAndroidShell()) {
+    const opus = browserOpusSupported() && callBrowserOpusOk !== false;
+    return {
+      rate: opus ? 48000 : 16000,
+      frameSamples: opus ? 960 : 480,
+      jitterTarget: opus ? 2880 : 960,
+      jitterMax: opus ? 5760 : 1920,
+      useOpus: opus,
+      useMulaw: !opus,
+    };
+  }
   return {
-    rate: opus ? 48000 : 16000,
-    frameSamples: opus ? 960 : 480,
-    jitterTarget: opus ? 2880 : 960,
-    jitterMax: opus ? 5760 : 1920,
-    useOpus: opus,
-    useMulaw: !opus,
+    rate: 16000, frameSamples: 480, jitterTarget: 960, jitterMax: 1920,
+    useOpus: false, useMulaw: true,
   };
 }
 
@@ -6573,6 +6631,10 @@ function primeCallPlayback() {
 async function startCallCapture() {
   if (callCaptureNode) return true;
   stopCallRingtone();
+  if (!isAndroidShell() && !window.isSecureContext) {
+    toast(micAccessHint({name: 'SecurityError'}));
+    return false;
+  }
   try {
     await new Promise(r => setTimeout(r, 350));
     try {
@@ -6656,6 +6718,7 @@ function stopCallCapturePipeline() {
 function enqueueCallAudio(b64, codec, opts) {
   if (!b64 || callState !== 'active') return;
   if (useNativeCallAudio() || (opts && opts.native_playback)) return;
+  if ((codec || '').includes('opus') && b64.length <= 8) return;
   const decoded = decodeCallAudio(b64, codec);
   if (!decoded) return;
   if (decoded.opus) {

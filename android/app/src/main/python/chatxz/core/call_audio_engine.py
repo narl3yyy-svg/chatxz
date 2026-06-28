@@ -133,7 +133,7 @@ class OpusCallCodec:
         frames = self._decoder.decode(jf)
         if not frames:
             return None
-        pcm = frames[0].planes[0].to_bytes()
+        pcm = bytes(frames[0].planes[0])
         if frames[0].layout.name == "stereo" and len(pcm) >= OPUS_FRAME_SAMPLES * 4:
             shorts = struct.unpack(f"<{OPUS_FRAME_SAMPLES * 2}h", pcm[: OPUS_FRAME_SAMPLES * 4])
             mono = []
@@ -156,6 +156,7 @@ class CallAudioEngine:
         self._pa = None
         self._in_stream = None
         self._out_stream = None
+        self._send_enabled = False
         self._lock = threading.Lock()
         self.frames_sent = 0
         self.frames_recv = 0
@@ -183,10 +184,12 @@ class CallAudioEngine:
         frame_count = OPUS_FRAME_SAMPLES
 
         def input_cb(in_data, frame_count, time_info, status):
-            if not self._running:
+            if not self._running or not self._send_enabled:
                 return (None, pyaudio.paComplete)
+            if not self._pcm_has_audio(in_data):
+                return (None, pyaudio.paContinue)
             opus = self._codec.encode_pcm(in_data)
-            if opus:
+            if opus and len(opus) > 4:
                 self._seq_out += 1
                 b64 = base64.b64encode(opus).decode("ascii")
                 if self._send_fn(b64, OPUS_CODEC):
@@ -198,15 +201,21 @@ class CallAudioEngine:
                 return (SILENCE_PCM, pyaudio.paComplete)
             return (self._jitter.read(), pyaudio.paContinue)
 
+        self._send_enabled = False
         try:
-            self._in_stream = self._pa.open(
-                format=fmt,
-                channels=channels,
-                rate=rate,
-                input=True,
-                frames_per_buffer=frame_count,
-                stream_callback=input_cb,
-            )
+            try:
+                self._in_stream = self._pa.open(
+                    format=fmt,
+                    channels=channels,
+                    rate=rate,
+                    input=True,
+                    frames_per_buffer=frame_count,
+                    stream_callback=input_cb,
+                )
+                self._send_enabled = True
+            except Exception as mic_err:
+                print(f"[call-audio] No capture device ({mic_err}) — receive-only playback")
+                self._in_stream = None
             self._out_stream = self._pa.open(
                 format=fmt,
                 channels=channels,
@@ -216,9 +225,11 @@ class CallAudioEngine:
                 stream_callback=output_cb,
             )
             self._running = True
-            self._in_stream.start_stream()
+            if self._in_stream:
+                self._in_stream.start_stream()
             self._out_stream.start_stream()
-            print("[call-audio] Native Opus engine started (48 kHz, 20 ms frames)")
+            mode = "duplex" if self._send_enabled else "receive-only"
+            print(f"[call-audio] Native Opus engine started ({mode}, 48 kHz, 20 ms frames)")
             return True
         except Exception as e:
             print(f"[call-audio] Engine start failed: {e}")
@@ -282,10 +293,20 @@ class CallAudioEngine:
             pcm += SILENCE_PCM[: (OPUS_FRAME_SAMPLES - len(out)) * 2]
         return pcm[: OPUS_FRAME_SAMPLES * 2]
 
+    @staticmethod
+    def _pcm_has_audio(pcm_s16: bytes, threshold: int = 240) -> bool:
+        if len(pcm_s16) < 2:
+            return False
+        count = len(pcm_s16) // 2
+        samples = struct.unpack(f"<{count}h", pcm_s16[: count * 2])
+        peak = max(abs(s) for s in samples) if samples else 0
+        return peak >= threshold
+
     def stats(self) -> dict:
         return {
             "engine": "native-opus",
             "codec": OPUS_CODEC,
+            "mode": "duplex" if self._send_enabled else "receive-only",
             "frames_sent": self.frames_sent,
             "frames_recv": self.frames_recv,
             "jitter_ms": self._jitter.buffered_ms,

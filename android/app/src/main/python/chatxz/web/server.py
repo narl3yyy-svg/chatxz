@@ -2522,8 +2522,10 @@ class ChatWebServer:
     def _on_call_event(self, event, peer_hash, payload=None):
         payload = payload or {}
         if event == "accepted":
+            self._ws_call_audio_sent = 0
             self._start_call_audio_engine()
         elif event in ("ended", "rejected"):
+            self._ws_call_audio_sent = 0
             self._stop_call_audio_engine()
         elif event == "audio" and self.call_audio_engine:
             seq = int(payload.get("seq") or 0)
@@ -5508,6 +5510,10 @@ class ChatWebServer:
                 if audio_b64:
                     codec = (data.get("codec") or "audio/pcm;rate=8000").strip()
                     call_id = (data.get("call_id") or "").strip() or None
+                    sent = int(getattr(self, "_ws_call_audio_sent", 0) or 0) + 1
+                    self._ws_call_audio_sent = sent
+                    if sent <= 2 or sent % 40 == 0:
+                        print(f"[call] Browser audio out #{sent} ({len(audio_b64)} b64, {codec})")
                     await asyncio.to_thread(
                         self.messaging.call_send_audio,
                         audio_b64,
