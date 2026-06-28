@@ -2,6 +2,11 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.6.5] — 2026-06-28
+
+### Fixed
+- **Garbled / stuttery call audio** — μ-law compression (40 ms LAN / 20 ms serial frames), gapless ring-buffer playback via ScriptProcessor, 60 ms jitter buffer, paced send (one frame per mic tick), and 16 kHz AudioContext alignment.
+
 ## [0.6.4] — 2026-06-28
 
 ### Fixed

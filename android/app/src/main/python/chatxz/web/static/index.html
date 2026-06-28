@@ -5751,10 +5751,13 @@ let callVia = null;
 let callCaptureNode = null;
 let callCaptureSource = null;
 let callAudioCtx = null;
-let callNextPlayTime = 0;
-let callPlaybackPrimed = false;
-let callPlayQueue = [];
-let callPlaying = false;
+let callPlaybackNode = null;
+let callPlaybackGain = null;
+let callRingBuf = null;
+let callRingWrite = 0;
+let callRingRead = 0;
+let callRingCount = 0;
+let callJitterPrimed = false;
 let callTimerId = null;
 let callStartedAt = 0;
 let ringtoneTimer = null;
@@ -5778,11 +5781,10 @@ function resetCallUi() {
   callId = null;
   callVia = null;
   stopCallCapturePipeline();
+  stopCallPlaybackNode();
   releaseSharedMic();
-  callPlayQueue = [];
-  callPlaying = false;
-  callPlaybackPrimed = false;
-  callNextPlayTime = 0;
+  resetCallRingBuffer();
+  callJitterPrimed = false;
   if (callTimerId) { clearInterval(callTimerId); callTimerId = null; }
   callStartedAt = 0;
   document.getElementById('call-incoming-overlay')?.classList.remove('open');
@@ -5868,7 +5870,11 @@ function showActiveCall(peer, label) {
 
 function ensureCallAudioCtx() {
   if (!callAudioCtx) {
-    callAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    try {
+      callAudioCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 16000});
+    } catch (_) {
+      callAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
   }
   if (callAudioCtx.state === 'suspended') callAudioCtx.resume();
   return callAudioCtx;
@@ -5877,23 +5883,101 @@ function ensureCallAudioCtx() {
 function callAudioConfig() {
   const via = normalizeVia(callVia || viewingVia);
   if (via === 'serial') {
-    return { rate: 8000, frameSamples: 100, maxQueue: 4, primeSec: 0.05, batchPlayback: 2 };
+    return { rate: 8000, frameSamples: 160, jitterTarget: 320, jitterMax: 640, useMulaw: true };
   }
-  return { rate: 16000, frameSamples: 240, maxQueue: 5, primeSec: 0.04, batchPlayback: 2 };
+  return { rate: 16000, frameSamples: 640, jitterTarget: 960, jitterMax: 1920, useMulaw: true };
 }
 
-function callMaxPcmChunkSamples(cfg) {
-  return cfg.rate >= 16000 ? 240 : 100;
+const CALL_RING_CAPACITY = 32000;
+
+function resetCallRingBuffer() {
+  callRingBuf = new Float32Array(CALL_RING_CAPACITY);
+  callRingWrite = 0;
+  callRingRead = 0;
+  callRingCount = 0;
 }
 
-function sendPcmFrames(pcm, codec) {
-  const cfg = callAudioConfig();
-  const chunkSamples = callMaxPcmChunkSamples(cfg);
-  for (let i = 0; i < pcm.length; i += chunkSamples) {
-    const slice = pcm.subarray(i, Math.min(i + chunkSamples, pcm.length));
-    if (!slice.length) continue;
-    sendCallAudioFrame(pcmToB64(slice), codec);
+function ringWriteSamples(samples) {
+  if (!callRingBuf) resetCallRingBuffer();
+  for (let i = 0; i < samples.length; i++) {
+    if (callRingCount >= CALL_RING_CAPACITY) {
+      callRingRead = (callRingRead + 1) % CALL_RING_CAPACITY;
+      callRingCount--;
+    }
+    callRingBuf[callRingWrite] = samples[i];
+    callRingWrite = (callRingWrite + 1) % CALL_RING_CAPACITY;
+    callRingCount++;
   }
+}
+
+function ringDropSamples(count) {
+  const drop = Math.min(count, callRingCount);
+  callRingRead = (callRingRead + drop) % CALL_RING_CAPACITY;
+  callRingCount -= drop;
+}
+
+function ringReadTo(out, count) {
+  const n = Math.min(count, callRingCount);
+  for (let i = 0; i < n; i++) {
+    out[i] = callRingBuf[callRingRead];
+    callRingRead = (callRingRead + 1) % CALL_RING_CAPACITY;
+    callRingCount--;
+  }
+  for (let i = n; i < count; i++) out[i] = 0;
+}
+
+function linearToMulaw(sample) {
+  const CLIP = 32635;
+  const BIAS = 0x84;
+  let sign = (sample >> 8) & 0x80;
+  if (sign) sample = -sample;
+  if (sample > CLIP) sample = CLIP;
+  sample += BIAS;
+  let exp = 7;
+  for (let mask = 0x4000; (sample & mask) === 0 && exp > 0; mask >>= 1) exp--;
+  const mantissa = (sample >> (exp + 3)) & 0x0f;
+  return ~(sign | (exp << 4) | mantissa) & 0xff;
+}
+
+function mulawToLinear(ulaw) {
+  ulaw = (~ulaw) & 0xff;
+  const sign = ulaw & 0x80;
+  const exp = (ulaw >> 4) & 0x07;
+  const mantissa = ulaw & 0x0f;
+  let sample = ((mantissa << 3) + 0x84) << exp;
+  sample -= 0x84;
+  return sign ? -sample : sample;
+}
+
+function pcmToMulawBytes(pcm) {
+  const bytes = new Uint8Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) bytes[i] = linearToMulaw(pcm[i]);
+  return bytes;
+}
+
+function pcmToMulawB64(pcm) {
+  const bytes = pcmToMulawBytes(pcm);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+function mulawB64ToFloats(b64) {
+  const bin = atob(b64);
+  const floats = new Float32Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    floats[i] = mulawToLinear(bin.charCodeAt(i)) / 32768;
+  }
+  return floats;
+}
+
+function encodeCallFrame(pcm, cfg) {
+  if (cfg.useMulaw) {
+    return { b64: pcmToMulawB64(pcm), codec: `audio/pcmulaw;rate=${cfg.rate}` };
+  }
+  return { b64: pcmToB64(pcm), codec: callPcmCodec(cfg.rate) };
 }
 
 function floatToPcm(samples) {
@@ -5950,10 +6034,40 @@ function callPcmCodec(rate) {
   return `audio/pcm;rate=${rate || callAudioConfig().rate}`;
 }
 
-function parseCallPcmRate(codec) {
+function parseCallAudioRate(codec) {
   const raw = codec || '';
   const m = raw.match(/rate=(\d+)/i);
   return m ? parseInt(m[1], 10) : callAudioConfig().rate;
+}
+
+function resampleFloats(input, inputRate, outputRate) {
+  if (!input || !input.length || inputRate === outputRate) return input;
+  const outLen = Math.max(1, Math.round(input.length * outputRate / inputRate));
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const src = i * inputRate / outputRate;
+    const idx = Math.floor(src);
+    const frac = src - idx;
+    const s0 = input[Math.min(idx, input.length - 1)] || 0;
+    const s1 = input[Math.min(idx + 1, input.length - 1)] || s0;
+    out[i] = s0 + (s1 - s0) * frac;
+  }
+  return out;
+}
+
+function decodeCallAudio(b64, codec) {
+  const rate = parseCallAudioRate(codec);
+  const raw = codec || '';
+  if (raw.includes('pcmulaw')) {
+    return { samples: mulawB64ToFloats(b64), rate };
+  }
+  if (raw.startsWith('audio/pcm')) {
+    const pcm = b64ToPcm(b64);
+    const floats = new Float32Array(pcm.length);
+    for (let i = 0; i < pcm.length; i++) floats[i] = pcm[i] / 32768;
+    return { samples: floats, rate };
+  }
+  return null;
 }
 
 function sharedMicActive() {
@@ -6040,6 +6154,42 @@ function sendCallAudioFrame(b64, codec) {
   }).catch(() => {});
 }
 
+function ensureCallPlaybackNode() {
+  if (callPlaybackNode) return;
+  const ctx = ensureCallAudioCtx();
+  const proc = ctx.createScriptProcessor(2048, 0, 1);
+  proc.onaudioprocess = e => {
+    const out = e.outputBuffer.getChannelData(0);
+    if (callState !== 'active' || !callJitterPrimed) {
+      out.fill(0);
+      return;
+    }
+    ringReadTo(out, out.length);
+  };
+  callPlaybackGain = ctx.createGain();
+  callPlaybackGain.gain.value = 1;
+  proc.connect(callPlaybackGain);
+  callPlaybackGain.connect(ctx.destination);
+  callPlaybackNode = proc;
+}
+
+function stopCallPlaybackNode() {
+  if (callPlaybackNode) {
+    try { callPlaybackNode.disconnect(); } catch (_) {}
+    callPlaybackNode = null;
+  }
+  if (callPlaybackGain) {
+    try { callPlaybackGain.disconnect(); } catch (_) {}
+    callPlaybackGain = null;
+  }
+}
+
+function primeCallPlayback() {
+  resetCallRingBuffer();
+  callJitterPrimed = false;
+  ensureCallPlaybackNode();
+}
+
 async function startCallCapture() {
   if (callCaptureNode) return true;
   stopCallRingtone();
@@ -6047,15 +6197,16 @@ async function startCallCapture() {
     const stream = await acquireSharedMic({forCall: true});
     const ctx = ensureCallAudioCtx();
     await ctx.resume();
+    primeCallPlayback();
     stopCallCapturePipeline();
     callCaptureSource = ctx.createMediaStreamSource(stream);
     const cfg = callAudioConfig();
-    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    const processor = ctx.createScriptProcessor(2048, 1, 1);
     const silent = ctx.createGain();
     silent.gain.value = 0;
     let accum = new Float32Array(0);
     const inputRate = ctx.sampleRate;
-    const frameInputSamples = Math.ceil(cfg.frameSamples * inputRate / cfg.rate);
+    const frameInputSamples = Math.max(1, Math.round(cfg.frameSamples * inputRate / cfg.rate));
     processor.onaudioprocess = e => {
       if (callState !== 'active') return;
       const input = e.inputBuffer.getChannelData(0);
@@ -6063,12 +6214,14 @@ async function startCallCapture() {
       merged.set(accum, 0);
       merged.set(input, accum.length);
       accum = merged;
-      const codec = callPcmCodec(cfg.rate);
-      while (accum.length >= frameInputSamples) {
+      if (accum.length >= frameInputSamples) {
         const chunk = accum.subarray(0, frameInputSamples);
         accum = accum.subarray(frameInputSamples);
         const pcm = resampleLinearToPcm(chunk, inputRate, cfg.rate);
-        if (pcm.length) sendPcmFrames(pcm, codec);
+        if (pcm.length >= cfg.frameSamples) {
+          const frame = encodeCallFrame(pcm.subarray(0, cfg.frameSamples), cfg);
+          sendCallAudioFrame(frame.b64, frame.codec);
+        }
       }
     };
     callCaptureSource.connect(processor);
@@ -6094,91 +6247,22 @@ function stopCallCapturePipeline() {
 }
 
 function enqueueCallAudio(b64, codec) {
-  if (!b64) return;
-  const cfg = callAudioConfig();
-  while (callPlayQueue.length >= cfg.maxQueue) callPlayQueue.shift();
-  callPlayQueue.push({
-    b64,
-    codec: codec || callPcmCodec(cfg.rate),
-    rate: parseCallPcmRate(codec),
-  });
-  if (!callPlaying) drainCallAudioQueue();
-}
-
-function mergePcmChunks(chunks) {
-  let total = 0;
-  chunks.forEach(c => { total += c.length; });
-  const merged = new Int16Array(total);
-  let off = 0;
-  chunks.forEach(c => {
-    merged.set(c, off);
-    off += c.length;
-  });
-  return merged;
-}
-
-async function drainCallAudioQueue() {
-  if (!callPlayQueue.length || callPlaying) {
-    if (!callPlayQueue.length) callPlaying = false;
-    return;
+  if (!b64 || callState !== 'active') return;
+  const decoded = decodeCallAudio(b64, codec);
+  if (!decoded || !decoded.samples.length) return;
+  const ctx = ensureCallAudioCtx();
+  let samples = decoded.samples;
+  if (decoded.rate !== ctx.sampleRate) {
+    samples = resampleFloats(samples, decoded.rate, ctx.sampleRate);
   }
-  callPlaying = true;
+  ensureCallPlaybackNode();
   const cfg = callAudioConfig();
-  try {
-    const batch = [];
-    const take = Math.min(cfg.batchPlayback || 2, callPlayQueue.length);
-    for (let i = 0; i < take; i++) batch.push(callPlayQueue.shift());
-    const chunk = batch[0];
-    if ((chunk.codec || '').startsWith('audio/pcm')) {
-      const ctx = ensureCallAudioCtx();
-      await ctx.resume();
-      const rate = chunk.rate || cfg.rate;
-      const pcmChunks = batch.map(c => b64ToPcm(c.b64));
-      const pcm = mergePcmChunks(pcmChunks);
-      const floats = new Float32Array(pcm.length);
-      for (let i = 0; i < pcm.length; i++) floats[i] = pcm[i] / 32768;
-      const buf = ctx.createBuffer(1, floats.length, rate);
-      buf.copyToChannel(floats, 0);
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      src.connect(ctx.destination);
-      const now = ctx.currentTime;
-      if (!callPlaybackPrimed) {
-        callPlaybackPrimed = true;
-        callNextPlayTime = now + cfg.primeSec;
-      }
-      if (callNextPlayTime < now - 0.05) {
-        callNextPlayTime = now + 0.02;
-      }
-      const startAt = Math.max(now + 0.01, callNextPlayTime);
-      src.start(startAt);
-      callNextPlayTime = startAt + buf.duration;
-      src.onended = () => {
-        callPlaying = false;
-        if (callPlayQueue.length) drainCallAudioQueue();
-      };
-      return;
-    }
-    const bin = atob(chunk.b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const blob = new Blob([bytes], {type: chunk.codec || 'audio/webm'});
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    audio.onended = () => {
-      URL.revokeObjectURL(url);
-      callPlaying = false;
-      drainCallAudioQueue();
-    };
-    audio.onerror = () => {
-      URL.revokeObjectURL(url);
-      callPlaying = false;
-      drainCallAudioQueue();
-    };
-    await audio.play();
-  } catch (_) {
-    callPlaying = false;
-    if (callPlayQueue.length) drainCallAudioQueue();
+  ringWriteSamples(samples);
+  if (callRingCount > cfg.jitterMax) {
+    ringDropSamples(callRingCount - cfg.jitterMax);
+  }
+  if (!callJitterPrimed && callRingCount >= cfg.jitterTarget) {
+    callJitterPrimed = true;
   }
 }
 
@@ -6202,6 +6286,7 @@ function handleCallWS(event, data) {
       callId = data.call_id || callId;
       stopCallRingtone();
       showActiveCall(callPeer || peer, 'Connected');
+      primeCallPlayback();
       startCallCapture().then(ok => {
         if (!ok && callState === 'active') {
           toast('Microphone unavailable — call is connected but you are muted');
