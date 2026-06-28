@@ -63,4 +63,26 @@ public class ChatxzBridge {
     public void showNotification(String title, String body, String peerHash) {
         activity.runOnUiThread(() -> activity.showMessageNotification(title, body, peerHash));
     }
+
+    @JavascriptInterface
+    public void setCallActive(boolean active) {
+        activity.runOnUiThread(() -> activity.setCallActive(active));
+    }
+
+    @JavascriptInterface
+    public void vibrateIncomingCall() {
+        activity.runOnUiThread(activity::vibrateIncomingCall);
+    }
+
+    @JavascriptInterface
+    public void stopCallVibrate() {
+        activity.runOnUiThread(activity::stopCallVibrate);
+    }
+
+    @JavascriptInterface
+    public void releaseMicCapture() {
+        activity.runOnUiThread(() -> activity.evaluateJavascript(
+                "if(typeof releaseSharedMic==='function')releaseSharedMic(true);",
+                null));
+    }
 }

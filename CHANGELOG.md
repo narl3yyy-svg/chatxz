@@ -2,6 +2,15 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.6.2] — 2026-06-27
+
+### Added
+- **Incoming call ringtone** — dual-tone ring in the web UI; vibration pattern on Android.
+
+### Fixed
+- **Android microphone busy** — single shared mic stream with retries, audio-focus handling, and proper release between calls and voice notes.
+- **Call audio** — WebSocket `call_audio` frames (lower latency than HTTP), 64-sample serial / 128-sample LAN PCM frames, 100 ms playback jitter buffer.
+
 ## [0.6.1] — 2026-06-27
 
 ### Fixed

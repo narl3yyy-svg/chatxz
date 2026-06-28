@@ -3026,6 +3026,7 @@ function connectWS() {
 
 window.addEventListener('pagehide', () => {
   if (callState !== 'idle') endVoiceCall();
+  releaseSharedMic(true);
   closeWS();
 });
 
@@ -5747,18 +5748,21 @@ let callState = 'idle';
 let callPeer = null;
 let callId = null;
 let callVia = null;
-let callRecorder = null;
-let callStream = null;
-let callMime = '';
 let callCaptureNode = null;
+let callCaptureSource = null;
 let callAudioCtx = null;
 let callNextPlayTime = 0;
+let callPlaybackPrimed = false;
 const CALL_PCM_RATE = 8000;
-const CALL_PCM_FRAME_SAMPLES = 128;
 let callPlayQueue = [];
 let callPlaying = false;
 let callTimerId = null;
 let callStartedAt = 0;
+let ringtoneTimer = null;
+let sharedMicStream = null;
+let sharedMicRefs = 0;
+let sharedMicForCall = false;
+let voiceMicStream = null;
 
 function callApi(body) {
   return fetch('/api/call', {
@@ -5769,13 +5773,17 @@ function callApi(body) {
 }
 
 function resetCallUi() {
+  stopCallRingtone();
   callState = 'idle';
   callPeer = null;
   callId = null;
   callVia = null;
-  stopCallCapture();
+  stopCallCapturePipeline();
+  releaseSharedMic();
   callPlayQueue = [];
   callPlaying = false;
+  callPlaybackPrimed = false;
+  callNextPlayTime = 0;
   if (callTimerId) { clearInterval(callTimerId); callTimerId = null; }
   callStartedAt = 0;
   document.getElementById('call-incoming-overlay')?.classList.remove('open');
@@ -5796,7 +5804,45 @@ function showIncomingCall(peer, data) {
   if (title) title.textContent = 'Incoming call';
   if (sub) sub.textContent = `${name} · ${peerInterfaceLabel(callVia)}`;
   document.getElementById('call-incoming-overlay')?.classList.add('open');
+  startCallRingtone();
   updatePeerHeader();
+}
+
+function startCallRingtone() {
+  stopCallRingtone();
+  if (window.chatxzAndroid?.vibrateIncomingCall) {
+    window.chatxzAndroid.vibrateIncomingCall();
+  }
+  const ctx = ensureCallAudioCtx();
+  const playBurst = () => {
+    if (callState !== 'incoming') return;
+    const t = ctx.currentTime;
+    [[440, 0], [480, 0.12]].forEach(([freq, offset]) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, t + offset);
+      gain.gain.linearRampToValueAtTime(0.18, t + offset + 0.04);
+      gain.gain.linearRampToValueAtTime(0, t + offset + 0.35);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t + offset);
+      osc.stop(t + offset + 0.4);
+    });
+  };
+  playBurst();
+  ringtoneTimer = setInterval(playBurst, 2200);
+}
+
+function stopCallRingtone() {
+  if (ringtoneTimer) {
+    clearInterval(ringtoneTimer);
+    ringtoneTimer = null;
+  }
+  if (window.chatxzAndroid?.stopCallVibrate) {
+    window.chatxzAndroid.stopCallVibrate();
+  }
 }
 
 function showActiveCall(peer, label) {
@@ -5876,84 +5922,151 @@ function parseCallPcmRate(codec) {
   return m ? parseInt(m[1], 10) : CALL_PCM_RATE;
 }
 
-async function releaseMicForCall() {
-  if (recording) stopVoice();
-  stopCallCapture();
-  await new Promise(r => setTimeout(r, isAndroidShell() ? 450 : 180));
+function sharedMicActive() {
+  return sharedMicStream
+    && sharedMicStream.active
+    && sharedMicStream.getAudioTracks().some(t => t.readyState === 'live');
 }
 
-async function startCallCapture() {
-  if (callCaptureNode) return true;
-  await releaseMicForCall();
+async function acquireSharedMic(opts) {
+  const forCall = !!(opts && opts.forCall);
+  if (sharedMicActive() && sharedMicForCall === forCall) {
+    sharedMicRefs++;
+    return sharedMicStream;
+  }
+  await releaseSharedMic(true);
+  if (recording) stopVoice();
+  await new Promise(r => setTimeout(r, isAndroidShell() ? 300 : 120));
   const richAudio = {
     audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true},
     video: false,
   };
-  try {
-    callStream = await navigator.mediaDevices.getUserMedia(richAudio);
-  } catch (_) {
+  const tries = isAndroidShell() ? 5 : 2;
+  let lastErr = null;
+  for (let i = 0; i < tries; i++) {
     try {
-      callStream = await navigator.mediaDevices.getUserMedia({audio: true, video: false});
+      sharedMicStream = await navigator.mediaDevices.getUserMedia(richAudio);
+      sharedMicRefs = 1;
+      sharedMicForCall = forCall;
+      if (forCall && window.chatxzAndroid?.setCallActive) window.chatxzAndroid.setCallActive(true);
+      return sharedMicStream;
     } catch (err) {
-      toast(micAccessHint(err));
-      return false;
+      lastErr = err;
+      try {
+        sharedMicStream = await navigator.mediaDevices.getUserMedia({audio: true, video: false});
+        sharedMicRefs = 1;
+        sharedMicForCall = forCall;
+        if (forCall && window.chatxzAndroid?.setCallActive) window.chatxzAndroid.setCallActive(true);
+        return sharedMicStream;
+      } catch (err2) {
+        lastErr = err2;
+      }
+      await new Promise(r => setTimeout(r, 180 + i * 220));
     }
   }
-  const ctx = ensureCallAudioCtx();
-  const src = ctx.createMediaStreamSource(callStream);
-  const processor = ctx.createScriptProcessor(2048, 1, 1);
-  const silent = ctx.createGain();
-  silent.gain.value = 0;
-  let accum = new Float32Array(0);
-  const inputRate = ctx.sampleRate;
-  const frameInputSamples = Math.max(
-    CALL_PCM_FRAME_SAMPLES,
-    Math.ceil(CALL_PCM_FRAME_SAMPLES * inputRate / CALL_PCM_RATE),
-  );
-  processor.onaudioprocess = e => {
-    if (callState !== 'active') return;
-    const input = e.inputBuffer.getChannelData(0);
-    const merged = new Float32Array(accum.length + input.length);
-    merged.set(accum, 0);
-    merged.set(input, accum.length);
-    accum = merged;
-    while (accum.length >= frameInputSamples) {
-      const chunk = accum.slice(0, frameInputSamples);
-      accum = accum.slice(frameInputSamples);
-      const pcm = downsampleToPcm(chunk, inputRate, CALL_PCM_RATE);
-      const b64 = pcmToB64(pcm);
-      if (b64.length > 480) continue;
-      callApi({
-        action: 'audio',
-        peer: callPeer,
-        via: callVia || viewingVia,
-        call_id: callId,
-        audio: b64,
-        codec: callPcmCodec(CALL_PCM_RATE),
-      }).catch(() => {});
-    }
-  };
-  src.connect(processor);
-  processor.connect(silent);
-  silent.connect(ctx.destination);
-  callCaptureNode = processor;
-  return true;
+  throw lastErr || new Error('microphone unavailable');
 }
 
-function stopCallCapture() {
+async function releaseSharedMic(force) {
+  if (!force) {
+    sharedMicRefs = Math.max(0, sharedMicRefs - 1);
+    if (sharedMicRefs > 0) return;
+  }
+  stopCallCapturePipeline();
+  if (sharedMicStream) {
+    sharedMicStream.getTracks().forEach(t => {
+      try { t.stop(); } catch (_) {}
+    });
+    sharedMicStream = null;
+  }
+  sharedMicRefs = 0;
+  if (sharedMicForCall && window.chatxzAndroid?.setCallActive) window.chatxzAndroid.setCallActive(false);
+  sharedMicForCall = false;
+}
+
+function callFrameSamples() {
+  const via = normalizeVia(callVia || viewingVia);
+  return via === 'serial' ? 64 : 128;
+}
+
+function sendCallAudioFrame(b64, codec) {
+  const payload = {
+    type: 'call_audio',
+    peer: callPeer,
+    via: callVia || viewingVia,
+    call_id: callId,
+    audio: b64,
+    codec: codec || callPcmCodec(CALL_PCM_RATE),
+  };
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(payload));
+    return;
+  }
+  callApi({
+    action: 'audio',
+    peer: callPeer,
+    via: callVia || viewingVia,
+    call_id: callId,
+    audio: b64,
+    codec: codec || callPcmCodec(CALL_PCM_RATE),
+  }).catch(() => {});
+}
+
+async function startCallCapture() {
+  if (callCaptureNode) return true;
+  stopCallRingtone();
+  try {
+    const stream = await acquireSharedMic({forCall: true});
+    const ctx = ensureCallAudioCtx();
+    await ctx.resume();
+    stopCallCapturePipeline();
+    callCaptureSource = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(2048, 1, 1);
+    const silent = ctx.createGain();
+    silent.gain.value = 0;
+    let accum = new Float32Array(0);
+    const inputRate = ctx.sampleRate;
+    const pcmFrame = callFrameSamples();
+    const frameInputSamples = Math.max(
+      pcmFrame,
+      Math.ceil(pcmFrame * inputRate / CALL_PCM_RATE),
+    );
+    processor.onaudioprocess = e => {
+      if (callState !== 'active') return;
+      const input = e.inputBuffer.getChannelData(0);
+      const merged = new Float32Array(accum.length + input.length);
+      merged.set(accum, 0);
+      merged.set(input, accum.length);
+      accum = merged;
+      while (accum.length >= frameInputSamples) {
+        const chunk = accum.slice(0, frameInputSamples);
+        accum = accum.slice(frameInputSamples);
+        const pcm = downsampleToPcm(chunk, inputRate, CALL_PCM_RATE);
+        const b64 = pcmToB64(pcm);
+        if (b64.length > 480) continue;
+        sendCallAudioFrame(b64, callPcmCodec(CALL_PCM_RATE));
+      }
+    };
+    callCaptureSource.connect(processor);
+    processor.connect(silent);
+    silent.connect(ctx.destination);
+    callCaptureNode = processor;
+    return true;
+  } catch (err) {
+    toast(micAccessHint(err));
+    return false;
+  }
+}
+
+function stopCallCapturePipeline() {
   if (callCaptureNode) {
     try { callCaptureNode.disconnect(); } catch (_) {}
     callCaptureNode = null;
   }
-  if (callRecorder && callRecorder.state !== 'inactive') {
-    try { callRecorder.stop(); } catch (_) {}
+  if (callCaptureSource) {
+    try { callCaptureSource.disconnect(); } catch (_) {}
+    callCaptureSource = null;
   }
-  callRecorder = null;
-  if (callStream) {
-    callStream.getTracks().forEach(t => t.stop());
-    callStream = null;
-  }
-  callNextPlayTime = 0;
 }
 
 function enqueueCallAudio(b64, codec) {
@@ -5983,6 +6096,10 @@ async function drainCallAudioQueue() {
       src.buffer = buf;
       src.connect(ctx.destination);
       const now = ctx.currentTime;
+      if (!callPlaybackPrimed) {
+        callPlaybackPrimed = true;
+        callNextPlayTime = now + 0.1;
+      }
       const startAt = Math.max(now + 0.02, callNextPlayTime);
       src.start(startAt);
       callNextPlayTime = startAt + buf.duration;
@@ -6021,8 +6138,13 @@ function handleCallWS(event, data) {
   if (event === 'accepted') {
     if (callState === 'outgoing' || callState === 'incoming') {
       callId = data.call_id || callId;
+      stopCallRingtone();
       showActiveCall(callPeer || peer, 'Connected');
-      startCallCapture();
+      startCallCapture().then(ok => {
+        if (!ok && callState === 'active') {
+          toast('Microphone unavailable — call is connected but you are muted');
+        }
+      });
     }
     return;
   }
@@ -6071,6 +6193,8 @@ async function toggleVoiceCall() {
 
 async function acceptVoiceCall() {
   if (callState !== 'incoming') return;
+  stopCallRingtone();
+  ensureCallAudioCtx();
   const res = await callApi({action: 'accept', peer: callPeer, via: callVia, call_id: callId});
   if (res.error) {
     toast('Could not accept call');
@@ -6078,7 +6202,8 @@ async function acceptVoiceCall() {
     return;
   }
   showActiveCall(callPeer, 'Connected');
-  await startCallCapture();
+  const ok = await startCallCapture();
+  if (!ok) toast('Microphone unavailable — call connected but you are muted');
 }
 
 async function rejectVoiceCall() {
@@ -6245,8 +6370,9 @@ async function startVoice(skipPermissionCheck) {
       }
       throw err;
     });
-  requestMic()
+  acquireSharedMic()
     .then(stream => {
+      voiceMicStream = stream;
       recording = true;
       voiceChunks = [];
       setVoiceRecordingUi(true);
@@ -6259,7 +6385,8 @@ async function startVoice(skipPermissionCheck) {
       const blobType = mediaRecorder.mimeType || mimeType || 'audio/webm';
       mediaRecorder.ondataavailable = e => { if (e.data.size > 0) voiceChunks.push(e.data); };
       mediaRecorder.onstop = () => {
-        stream.getTracks().forEach(t => t.stop());
+        voiceMicStream = null;
+        releaseSharedMic();
         const blob = new Blob(voiceChunks, {type: blobType});
         const reader = new FileReader();
         reader.onloadend = () => {
@@ -6278,7 +6405,7 @@ async function startVoice(skipPermissionCheck) {
       mediaRecorder.start();
     })
     .catch(err => {
-      console.warn('getUserMedia failed', err);
+      console.warn('acquireSharedMic failed', err);
       if (window.chatxzAndroid && !window.chatxzAndroid.hasAudioPermission()) {
         pendingVoiceAfterPermission = true;
         window.chatxzAndroid.requestAudioPermission();

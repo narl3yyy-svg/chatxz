@@ -5449,6 +5449,18 @@ class ChatWebServer:
                 link = link or self.messaging.active_link
                 if link:
                     self.messaging.send_read_receipt(link, msg_id)
+        elif msg_type == "call_audio":
+            if self.messaging:
+                audio_b64 = data.get("audio") or data.get("data") or ""
+                if audio_b64:
+                    codec = (data.get("codec") or "audio/pcm;rate=8000").strip()
+                    call_id = (data.get("call_id") or "").strip() or None
+                    await asyncio.to_thread(
+                        self.messaging.call_send_audio,
+                        audio_b64,
+                        codec,
+                        call_id,
+                    )
 
     async def _init_rns_background(self):
         try:
