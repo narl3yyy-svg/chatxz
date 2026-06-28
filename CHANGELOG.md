@@ -2,6 +2,17 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.5.7] — 2026-06-27
+
+### Fixed
+- **Duplicate contacts** — split LAN/USB save files and orphan JSON rows merge into one contact on load; stale duplicate files are removed from disk.
+- **Saved peers in Discovered** — LAN and serial hashes already on a saved contact no longer appear in Discovered (including related names like 330s/330ss).
+- **RTT in ms** — link RTT is preferred over UDP probes; serial peers without an IP get latency from the active RNS link; chat header and contact rows show live ms.
+- **Android display name** — announces and beacons use the configured name or device model when settings name is empty (no more hash-only label).
+
+### Added
+- **Collapsible desktop sidebar** — toggle with ☰ on wide screens; state persists in localStorage.
+
 ## [0.5.6] — 2026-06-27
 
 ### Fixed

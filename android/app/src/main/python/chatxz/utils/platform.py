@@ -86,6 +86,36 @@ def host_platform():
     return "desktop"
 
 
+def default_device_display_name():
+    """Fallback label for announces/beacons when settings name is unset."""
+    if is_android():
+        try:
+            from android.os import Build
+            model = (getattr(Build, "MODEL", None) or "").strip()
+            if model:
+                return model[:50]
+        except Exception:
+            pass
+    try:
+        import socket
+        host = (socket.gethostname() or "").strip()
+        if host and host.lower() not in ("localhost", "android"):
+            return host[:50]
+    except Exception:
+        pass
+    return ""
+
+
+def effective_display_name(settings=None):
+    """User-configured name, or a stable device fallback for discovery payloads."""
+    settings = settings or {}
+    name = (settings.get("name") or "").strip()
+    if name:
+        return name[:50]
+    fallback = default_device_display_name()
+    return fallback[:50] if fallback else ""
+
+
 def is_android():
     """True on Chaquopy/Android — never cache False before env/java checks run."""
     global _android

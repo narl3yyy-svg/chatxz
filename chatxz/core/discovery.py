@@ -607,8 +607,23 @@ class PeerDiscovery:
                 existing["identity_hash"] = peer["identity_hash"]
             if peer.get("pubkey") and not existing.get("pubkey"):
                 existing["pubkey"] = peer["pubkey"]
-            if peer.get("name") and peer["name"] != hash_hex[:8]:
-                existing["name"] = peer["name"]
+            incoming_name = (peer.get("name") or "").strip()
+            existing_name = (existing.get("name") or "").strip()
+            hash_prefix = hash_hex[:8]
+            incoming_is_hash = (
+                not incoming_name
+                or incoming_name == hash_prefix
+                or incoming_name.lower() == hash_prefix.lower()
+            )
+            existing_is_hash = (
+                not existing_name
+                or existing_name == hash_prefix
+                or existing_name.lower() == hash_prefix.lower()
+            )
+            if incoming_name and not incoming_is_hash:
+                existing["name"] = incoming_name
+            elif existing_name and not existing_is_hash and incoming_is_hash:
+                peer["name"] = existing_name
             existing["last_seen"] = peer.get("last_seen", time.time())
             peer = existing
         else:

@@ -3,6 +3,13 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.5.7": [
+        "Duplicate contacts from fast LAN/USB saves or page refresh are merged automatically.",
+        "Saved peers no longer show in Discovered — only unsaved hashes appear there.",
+        "Latency in ms shows on contacts, Discovered peers, and in the chat header when connected.",
+        "Android sends your device name (or model) in discovery instead of a hash prefix.",
+        "Desktop web UI: collapse the sidebar with the menu button; it remembers your preference.",
+    ],
     "0.5.6": [
         "Saved contacts pick up the correct LAN/USB hash from Discovered automatically.",
         "Fixes contacts stuck on an old hash that fails to connect while Discovered shows the right peer.",

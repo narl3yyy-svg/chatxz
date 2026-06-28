@@ -224,18 +224,12 @@ def sync_contact_from_discovery(
             return entry
 
         file_key = contact_primary_hash(entry) or new_hash
-        old_keys = set()
-        for key in ("hash", "lan_hash", "serial_hash"):
-            h = (contact.get(key) or "").replace(":", "")
-            if h and h != file_key:
-                old_keys.add(h)
-        old_keys.add(contact_primary_hash(contact))
         path = _contact_path(config_dir, file_key)
         with open(path, "w") as fh:
             json.dump(entry, fh, indent=2)
-        for old_key in old_keys:
-            if old_key and old_key != file_key:
-                delete_contact(config_dir, old_key)
+        stale = dict(contact)
+        stale.update(entry)
+        _purge_stale_contact_files(config_dir, stale, file_key)
         return entry
     return None
 
@@ -353,7 +347,8 @@ def save_contact(
                 break
     if not merged and display:
         for c in list_contacts(config_dir):
-            if (c.get("name") or "").strip().lower() == display.lower():
+            cname = (c.get("name") or "").strip()
+            if cname.lower() == display.lower() or _names_related(cname, display):
                 merged = dict(normalize_contact(c))
                 break
 
@@ -393,12 +388,12 @@ def save_contact(
         existing["serial_hash"] = str(serial_hash).strip().replace(":", "")
 
     file_key = contact_primary_hash(existing) or clean
-    old_key = clean if clean != file_key else None
     path = _contact_path(config_dir, file_key)
     with open(path, "w") as fh:
         json.dump(existing, fh, indent=2)
-    if old_key and old_key != file_key:
-        delete_contact(config_dir, old_key)
+    _purge_stale_contact_files(config_dir, existing, file_key)
+    if clean != file_key:
+        delete_contact(config_dir, clean)
     return existing
 
 
@@ -410,15 +405,175 @@ def delete_contact(config_dir, peer_hash):
     return False
 
 
+def _purge_stale_contact_files(config_dir, entry, keep_key):
+    """Remove duplicate on-disk contact files after a hash or primary key change."""
+    keep = (keep_key or "").replace(":", "")
+    removed = []
+    for h in _contact_hashes(entry or {}):
+        if h and h != keep:
+            if delete_contact(config_dir, h):
+                removed.append(h)
+    return removed
+
+
+def _contact_dedup_keys(contact):
+    """All keys that may refer to the same saved peer (incl. split lan/serial files)."""
+    c = normalize_contact(contact or {})
+    keys = []
+    ident = (c.get("identity_hash") or "").replace(":", "")
+    if ident:
+        keys.append(f"ident:{ident}")
+    lan = (c.get("lan_hash") or c.get("hash") or "").replace(":", "")
+    serial = (c.get("serial_hash") or "").replace(":", "")
+    if lan or serial:
+        keys.append(f"h:{lan}:{serial}")
+    name = (c.get("name") or "").strip().lower()
+    if name and not _name_is_hash_like(c.get("name"), _contact_hashes(c)):
+        keys.append(f"name:{name}")
+    if not keys:
+        keys.append(f"orphan:{lan or serial or 'unknown'}")
+    return keys
+
+
+def _contact_dedup_key(contact):
+    return _contact_dedup_keys(contact)[0]
+
+
+def _should_merge_contacts(primary, secondary):
+    """True when two on-disk rows are the same peer (split lan/serial files, etc.)."""
+    a = normalize_contact(primary or {})
+    b = normalize_contact(secondary or {})
+    if set(_contact_hashes(a)) & set(_contact_hashes(b)):
+        return True
+    a_ident = (a.get("identity_hash") or "").replace(":", "")
+    b_ident = (b.get("identity_hash") or "").replace(":", "")
+    if a_ident and b_ident and a_ident == b_ident:
+        return True
+    a_lan = (a.get("lan_hash") or "").replace(":", "")
+    a_serial = (a.get("serial_hash") or "").replace(":", "")
+    b_lan = (b.get("lan_hash") or "").replace(":", "")
+    b_serial = (b.get("serial_hash") or "").replace(":", "")
+    if not a_lan and not a_serial and a.get("hash"):
+        a_lan = (a.get("hash") or "").replace(":", "")
+    if not b_lan and not b_serial and b.get("hash"):
+        b_lan = (b.get("hash") or "").replace(":", "")
+    complementary = (
+        (a_lan and b_serial and not a_serial and not b_lan)
+        or (a_serial and b_lan and not a_lan and not b_serial)
+    )
+    if complementary and _names_related(a.get("name"), b.get("name")):
+        return True
+    a_name = (a.get("name") or "").strip().lower()
+    b_name = (b.get("name") or "").strip().lower()
+    if (
+        complementary
+        and a_name
+        and b_name
+        and a_name == b_name
+        and not _name_is_hash_like(a.get("name"), _contact_hashes(a))
+    ):
+        return True
+    return False
+
+
+def _merge_contact_entries(primary, secondary):
+    """Merge two contact records that refer to the same peer."""
+    out = normalize_contact(dict(primary or {}))
+    other = normalize_contact(dict(secondary or {}))
+    for key in (
+        "hash", "lan_hash", "serial_hash",
+        "identity_hash", "lan_identity_hash", "serial_identity_hash",
+        "ip", "port", "name",
+    ):
+        if not (out.get(key) or "").strip() and (other.get(key) or "").strip():
+            out[key] = other.get(key)
+    if other.get("custom_name"):
+        out["custom_name"] = True
+        if (other.get("name") or "").strip():
+            out["name"] = other.get("name")
+    if not out.get("lan_hash") and out.get("hash"):
+        out["lan_hash"] = out["hash"]
+    return normalize_contact(out)
+
+
 def list_contacts(config_dir):
-    out = []
+    raw = []
     base = contacts_dir(config_dir)
+    if not os.path.isdir(base):
+        return []
     for fname in sorted(os.listdir(base)):
         if fname.startswith("."):
             continue
         entry = load_contact(config_dir, fname)
         if entry:
-            out.append(entry)
+            raw.append(entry)
+    deduped = {}
+    key_to_primary = {}
+    orphans = []
+    for entry in raw:
+        entry = normalize_contact(dict(entry))
+        keys = _contact_dedup_keys(entry)
+        primary = None
+        for key in keys:
+            if key in key_to_primary:
+                primary = key_to_primary[key]
+                break
+        if primary is None:
+            primary = keys[0]
+            deduped[primary] = entry
+            for key in keys:
+                key_to_primary[key] = primary
+            continue
+        merged = _merge_contact_entries(deduped[primary], entry)
+        deduped[primary] = merged
+        for key in keys:
+            key_to_primary[key] = primary
+        keep = contact_primary_hash(merged)
+        for h in _contact_hashes(entry):
+            if h and h != keep:
+                orphans.append(h)
+        for h in _contact_hashes(deduped[primary]):
+            if h and h != keep:
+                orphans.append(h)
+    out = list(deduped.values())
+    merged_out = []
+    used = set()
+    for i, entry in enumerate(out):
+        if i in used:
+            continue
+        current = normalize_contact(dict(entry))
+        for j in range(i + 1, len(out)):
+            if j in used:
+                continue
+            if _should_merge_contacts(current, out[j]):
+                current = _merge_contact_entries(current, out[j])
+                keep = contact_primary_hash(current)
+                for h in _contact_hashes(out[j]):
+                    if h and h != keep:
+                        orphans.append(h)
+                used.add(j)
+        merged_out.append(current)
+    out = merged_out
+    for entry in out:
+        keep = contact_primary_hash(entry) or ""
+        for h in _contact_hashes(entry):
+            if h and h != keep:
+                orphans.append(h)
+    needs_persist = len(raw) > len(out) or bool(orphans)
+    for entry in out:
+        keep = contact_primary_hash(entry) or ""
+        if needs_persist and keep:
+            path = _contact_path(config_dir, keep)
+            try:
+                with open(path, "w") as fh:
+                    json.dump(normalize_contact(entry), fh, indent=2)
+            except OSError:
+                pass
+        _purge_stale_contact_files(config_dir, entry, keep)
+    for orphan in set(orphans):
+        keepers = {contact_primary_hash(c) for c in out}
+        if orphan not in keepers:
+            delete_contact(config_dir, orphan)
     return out
 
 

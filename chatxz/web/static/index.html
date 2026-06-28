@@ -1240,6 +1240,19 @@ body.modal-open #save-contact-dialog * { pointer-events: auto; user-select: auto
 }
 body.sidebar-open #sidebar-backdrop { display: block; }
 
+@media (min-width: 861px) {
+  body:not(.android-shell) #sidebar-toggle {
+    display: flex;
+  }
+  body.desktop-sidebar-collapsed:not(.android-shell) #sidebar {
+    width: 0;
+    min-width: 0;
+    border-right: none;
+    overflow: hidden;
+    pointer-events: none;
+  }
+}
+
 @media (max-width: 860px), (hover: none) and (pointer: coarse) {
   #workspace { position: relative; }
   #sidebar {
@@ -1919,8 +1932,23 @@ function updateAndroidShellLayout() {
 
 function setSidebarOpen(open) {
   sidebarOpen = open;
-  document.getElementById('sidebar')?.classList.toggle('collapsed', !open);
-  document.body.classList.toggle('sidebar-open', open && isMobileLayout() && !isAndroidShell());
+  const sidebar = document.getElementById('sidebar');
+  if (isAndroidShell()) {
+    sidebar?.classList.remove('collapsed');
+    document.body.classList.remove('sidebar-open', 'desktop-sidebar-collapsed');
+    document.getElementById('sidebar-toggle')?.classList.toggle('active', open);
+    return;
+  }
+  if (isMobileLayout()) {
+    sidebar?.classList.toggle('collapsed', !open);
+    document.body.classList.toggle('sidebar-open', open);
+    document.body.classList.remove('desktop-sidebar-collapsed');
+  } else {
+    sidebar?.classList.remove('collapsed');
+    document.body.classList.remove('sidebar-open');
+    document.body.classList.toggle('desktop-sidebar-collapsed', !open);
+    try { localStorage.setItem('desktopSidebarCollapsed', open ? '0' : '1'); } catch (_) {}
+  }
   document.getElementById('sidebar-toggle')?.classList.toggle('active', open);
 }
 
@@ -1944,14 +1972,22 @@ function initMobileLayout() {
     });
     return;
   }
-  setSidebarOpen(!isMobileLayout());
+  if (isMobileLayout()) {
+    setSidebarOpen(false);
+  } else {
+    let collapsed = false;
+    try { collapsed = localStorage.getItem('desktopSidebarCollapsed') === '1'; } catch (_) {}
+    setSidebarOpen(!collapsed);
+  }
   updateAndroidComposerMode();
   window.addEventListener('resize', () => {
     updateAndroidComposerMode();
-    if (!isMobileLayout()) {
+    if (!isMobileLayout() && !isAndroidShell()) {
       document.body.classList.remove('sidebar-open');
-      setSidebarOpen(true);
-    } else if (!sidebarOpen) {
+      let collapsed = false;
+      try { collapsed = localStorage.getItem('desktopSidebarCollapsed') === '1'; } catch (_) {}
+      setSidebarOpen(!collapsed);
+    } else if (isMobileLayout() && !sidebarOpen) {
       document.getElementById('sidebar')?.classList.add('collapsed');
     }
   });
@@ -2551,10 +2587,41 @@ function showWelcome() {
   renderContacts(allContacts);
 }
 
+function applyLinkRttToDiscovered(hash, rttMs) {
+  const n = parseInt(rttMs, 10);
+  if (!hash || !Number.isFinite(n) || n < 0) return;
+  window._discoveredPeers = (window._discoveredPeers || []).map(p => {
+    if (!peersMatch(p.hash, hash) && !peersMatch(p.identity_hash, hash)) return p;
+    return {...p, rtt_ms: n, rtt_avg_ms: n};
+  });
+}
+
+function rttForViewingPeer() {
+  if (!viewingPeer) return '';
+  const via = normalizeVia(viewingVia) === 'serial' ? 'serial' : 'lan';
+  const contact = allContacts.find(c =>
+    peerKey(c.hash) === peerKey(viewingPeer)
+    || peerKey(c.lan_hash) === peerKey(viewingPeer)
+    || peerKey(c.serial_hash) === peerKey(viewingPeer)
+    || peersMatch(c.hash, viewingPeer)
+    || peersMatch(c.lan_hash, viewingPeer)
+    || peersMatch(c.serial_hash, viewingPeer)
+  );
+  if (contact) {
+    const fromContact = rttForContactTransport(contact, via);
+    if (fromContact) return fromContact;
+  }
+  const p = discoveredPeerForHash(viewingPeer)
+    || (window._discoveredPeers || []).find(x => peersMatch(x.hash, viewingPeer));
+  return formatRtt(p?.rtt_avg_ms || p?.rtt_ms);
+}
+
 function updatePeerHeader() {
   if (!viewingPeer) return;
   const name = contactNameFor(viewingPeer) || truncateHash(viewingPeer);
-  document.getElementById('peer-name').textContent = name;
+  const rtt = rttForViewingPeer();
+  const rttBadge = rtt ? `<span class="peer-rtt">${escapeHtml(rtt)}</span>` : '';
+  document.getElementById('peer-name').innerHTML = `${escapeHtml(name)}${rttBadge}`;
   const linked = isPeerLinked(viewingPeer, viewingVia);
   linkPeer = linked ? linkKey(viewingPeer, viewingVia) : null;
   const transportLabel = viewingVia === 'serial' ? 'USB' : (viewingVia === 'lan' ? 'LAN' : '');
@@ -2570,9 +2637,18 @@ function updatePeerHeader() {
 function contactNameFor(hash) {
   if (hash === HUB_GROUP_PEER) return 'Group Chat';
   const key = peerKey(hash);
-  const c = allContacts.find(x => peerKey(x.hash) === key);
-  if (c && c.name) return c.name;
-  const d = (window._discoveredPeers || []).find(x => peerKey(x.hash) === key);
+  const c = allContacts.find(x =>
+    peerKey(x.hash) === key
+    || peerKey(x.lan_hash) === key
+    || peerKey(x.serial_hash) === key
+    || peersMatch(x.hash, hash)
+    || peersMatch(x.lan_hash, hash)
+    || peersMatch(x.serial_hash, hash)
+  );
+  if (c) return contactDisplayName(c);
+  const d = (window._discoveredPeers || []).find(x =>
+    peerKey(x.hash) === key || peersMatch(x.hash, hash)
+  );
   return d?.name || '';
 }
 
@@ -2891,6 +2967,7 @@ function handleWSMessage(msg) {
     if (msg.data?.hash) {
       const h = msg.data.hash;
       registerPeerAliases(h, ...(msg.data.aliases || []));
+      if (msg.data.rtt_ms != null) applyLinkRttToDiscovered(h, msg.data.rtt_ms);
       const passive = msg.data.passive || msg.data.user_disconnected;
       if (!passive && msg.data.promote_active !== false) {
         setLinkPeer(h, true);
@@ -3268,18 +3345,92 @@ function renderContactTransportRow(contact, via) {
   </div>`;
 }
 
-function isDiscoveredPeerSaved(peer) {
+function contactMatchesDiscoveryPeer(contact, peer) {
+  if (!contact || !peer) return false;
   const isSerial = (peer.via || peer.transport || '') === 'serial';
   const peerH = peerKey(peer.hash);
-  if (!peerH) return false;
+  if (peerH) {
+    const targets = isSerial
+      ? [contact.serial_hash]
+      : [contact.lan_hash, contact.hash];
+    if (targets.map(peerKey).filter(Boolean).some(h =>
+      h === peerH || peersMatch(h, peer.hash)
+    )) return true;
+  }
+  if (peer.identity_hash) {
+    const ident = peerKey(peer.identity_hash);
+    const savedIdents = [
+      contact.identity_hash,
+      contact.lan_identity_hash,
+      contact.serial_identity_hash,
+    ].map(peerKey).filter(Boolean);
+    if (savedIdents.some(h => h === ident || peersMatch(h, peer.identity_hash))) {
+      return true;
+    }
+  }
+  if (!isSerial && peer.ip && contact.ip && peer.ip === contact.ip) return true;
+  return contactMatchesPeer(contact, peer);
+}
+
+function contactSavedHashes(c) {
+  return [c.hash, c.lan_hash, c.serial_hash, c.identity_hash, c.lan_identity_hash, c.serial_identity_hash]
+    .map(peerKey).filter(Boolean);
+}
+
+function isDiscoveredPeerSaved(peer) {
+  const peerH = peerKey(peer.hash);
+  const peerIdent = peerKey(peer.identity_hash);
   return allContacts.some(c => {
-    const saved = isSerial ? c.serial_hash : (c.lan_hash || c.hash);
-    const savedH = peerKey(saved);
-    return savedH && (savedH === peerH || peersMatch(saved, peer.hash));
+    if (contactMatchesDiscoveryPeer(c, peer)) return true;
+    const hashes = contactSavedHashes(c);
+    return hashes.some(h =>
+      (peerH && (h === peerH || peersMatch(h, peer.hash)))
+      || (peerIdent && (h === peerIdent || peersMatch(h, peer.identity_hash)))
+    );
   });
 }
 
+function dedupeContacts(contacts) {
+  const byKey = {};
+  const keyToPrimary = {};
+  (contacts || []).forEach(c => {
+    const ident = peerKey(c.identity_hash);
+    const lan = peerKey(c.lan_hash || c.hash);
+    const serial = peerKey(c.serial_hash);
+    const name = (c.name || '').trim().toLowerCase();
+    const nameIsHash = name && (name === lan?.slice(0, 8) || name === serial?.slice(0, 8));
+    const keys = [];
+    if (ident) keys.push(`ident:${ident}`);
+    if (lan || serial) keys.push(`h:${lan || ''}:${serial || ''}`);
+    if (name && !nameIsHash) keys.push(`name:${name}`);
+    if (!keys.length) keys.push(`orphan:${lan || serial || 'unknown'}`);
+    let primary = null;
+    for (const key of keys) {
+      if (keyToPrimary[key]) {
+        primary = keyToPrimary[key];
+        break;
+      }
+    }
+    if (!primary) {
+      primary = keys[0];
+      byKey[primary] = {...c};
+      keys.forEach(k => { keyToPrimary[k] = primary; });
+      return;
+    }
+    const merged = {...byKey[primary]};
+    ['hash', 'lan_hash', 'serial_hash', 'identity_hash', 'lan_identity_hash',
+      'serial_identity_hash', 'ip', 'port', 'name'].forEach(field => {
+      if (!merged[field] && c[field]) merged[field] = c[field];
+    });
+    if (c.custom_name) merged.custom_name = true;
+    byKey[primary] = merged;
+    keys.forEach(k => { keyToPrimary[k] = primary; });
+  });
+  return Object.values(byKey);
+}
+
 function renderContacts(contacts) {
+  contacts = dedupeContacts(contacts);
   if (contacts === allContacts || !document.getElementById('contact-search')?.value) allContacts = contacts;
   seedPeerAliasesFromContacts(contacts);
   const el = document.getElementById('contacts-list');
@@ -3298,10 +3449,19 @@ function renderContacts(contacts) {
     const lanRow = renderContactTransportRow(c, 'lan');
     const serialRow = serialHash ? renderContactTransportRow(c, 'serial') : '';
     const rows = lanRow + serialRow;
+    const nameRtt = formatRtt(
+      (discoveredForContactTransport(c, 'lan')?.rtt_avg_ms
+        || discoveredForContactTransport(c, 'lan')?.rtt_ms
+        || discoveredForContactTransport(c, 'serial')?.rtt_avg_ms
+        || discoveredForContactTransport(c, 'serial')?.rtt_ms
+        || c.rtt_avg_ms
+        || c.rtt_ms)
+    );
+    const nameRttBadge = nameRtt ? `<span class="peer-rtt">${escapeHtml(nameRtt)}</span>` : '';
     div.className = 'contact-item contact-card' + (active ? ' active' : '');
     div.innerHTML = `<div class="contact-avatar contact-avatar-saved">${escapeHtml(name).charAt(0).toUpperCase()}</div>
       <div class="contact-info">
-        <div class="contact-name">${escapeHtml(name)}</div>
+        <div class="contact-name">${escapeHtml(name)}${nameRttBadge}</div>
         ${rows
           ? `<div class="contact-transport-rows">${rows}</div>`
           : `<div class="contact-hash">${truncateHash(c.hash)}</div>`}
@@ -4255,6 +4415,14 @@ function peerMergeKey(p) {
   return base ? `${base}:${via}` : '';
 }
 
+function namesRelated(a, b) {
+  const left = (a || '').trim().toLowerCase();
+  const right = (b || '').trim().toLowerCase();
+  if (!left || !right) return false;
+  if (left === right) return true;
+  return left.startsWith(right) || right.startsWith(left);
+}
+
 function contactMatchesPeer(c, p) {
   if (!c || !p) return false;
   if (peersMatch(c.hash, p.hash)) return true;
@@ -4264,7 +4432,7 @@ function contactMatchesPeer(c, p) {
   if (c.identity_hash && p.identity_hash && peerKey(c.identity_hash) === peerKey(p.identity_hash)) return true;
   const cn = (c.name || '').trim().toLowerCase();
   const pn = (p.name || '').trim().toLowerCase();
-  if (cn && pn && cn === pn) return true;
+  if (cn && pn && (cn === pn || namesRelated(cn, pn))) return true;
   return false;
 }
 

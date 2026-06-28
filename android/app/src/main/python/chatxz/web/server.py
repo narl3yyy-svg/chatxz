@@ -82,6 +82,7 @@ from chatxz.utils.debug_log import (
 )
 from chatxz.utils.android_notify import show_message_notification
 from chatxz.utils.platform import (
+    effective_display_name,
     host_platform,
     is_android,
     apply_lan_interface_preference,
@@ -841,9 +842,9 @@ class ChatWebServer:
 
     def _probe_discovered_peers(self):
         if not self.discovery or not self.discovery.accept_peers:
-            return 0
+            return 0, False
         if self.messaging and self.messaging._has_active_transfer():
-            return 0
+            return 0, False
         from chatxz.core.peer_probe import (
             link_rtt_ms,
             probe_serial_path,
@@ -870,15 +871,18 @@ class ChatWebServer:
             rtt = None
             if self.messaging:
                 rtt = link_rtt_ms(self.messaging, hash_hex)
-            if rtt is None and is_serial:
+            if rtt is not None:
+                self.discovery.update_peer_probe(hash_hex, rtt_ms=rtt, ok=True)
+                rtt_updated = True
+                continue
+            if is_serial:
                 rtt = probe_serial_path(hash_hex, timeout_s=1.5)
                 if rtt is not None:
                     self.discovery.update_peer_probe(hash_hex, rtt_ms=rtt, ok=True)
                     rtt_updated = True
                 continue
             if ip:
-                if rtt is None:
-                    rtt = probe_udp_peer(ip, timeout_s=1.5)
+                rtt = probe_udp_peer(ip, timeout_s=1.5)
                 if rtt is not None:
                     self.discovery.update_peer_probe(hash_hex, rtt_ms=rtt, ok=True)
                     rtt_updated = True
@@ -887,7 +891,7 @@ class ChatWebServer:
         removed = self.discovery.purge_stale_probes()
         if rtt_updated and self.websockets and self._loop:
             self._schedule_peers_broadcast()
-        return removed
+        return removed, bool(rtt_updated)
 
     async def _remove_history_message(self, msg_id):
         clean = (msg_id or "").strip()
@@ -1584,7 +1588,7 @@ class ChatWebServer:
             on_link_closed=self._on_link_closed,
             on_queue_sent=self._on_queue_sent,
             on_transfer_revoked=self._on_transfer_revoked,
-            display_name=settings.get("name", ""),
+            display_name=effective_display_name(settings),
             auto_announce=auto_announce,
             receive_dir=received_dir,
             peer_resolver=self._resolve_incoming_peer,
@@ -1632,7 +1636,7 @@ class ChatWebServer:
             self.lan_beacon = LanBeacon(
                 self.discovery,
                 my_dest_clean,
-                display_name=settings.get("name", ""),
+                display_name=effective_display_name(settings),
                 ip=my_ip,
                 port=self.port,
                 periodic=auto_announce,
@@ -2404,6 +2408,13 @@ class ChatWebServer:
         self._register_link_peer_in_discovery(
             resolved, peer_ip=peer_ip or None, link=link,
         )
+        link_rtt = None
+        if self.discovery and self.messaging:
+            from chatxz.core.peer_probe import link_rtt_ms
+            link_rtt = link_rtt_ms(self.messaging, resolved)
+            if link_rtt is not None:
+                self.discovery.update_peer_probe(resolved, rtt_ms=link_rtt, ok=True)
+                self._schedule_peers_broadcast()
         self._maybe_update_hub_server_hash(resolved)
         user_disconnected = bool(
             self.messaging and self.messaging.is_user_disconnected(resolved)
@@ -2429,6 +2440,7 @@ class ChatWebServer:
                         "promote_active": promote_active,
                         "passive": passive,
                         "user_disconnected": user_disconnected,
+                        "rtt_ms": link_rtt,
                         "linked_peers": (
                             self.messaging.linked_peers() if self.messaging else []
                         ),
@@ -3980,7 +3992,7 @@ class ChatWebServer:
             setup_fast = bool(data.get("setup_complete"))
             if setup_fast:
                 if self.messaging:
-                    self.messaging.display_name = settings.get("name", "")
+                    self.messaging.display_name = effective_display_name(settings)
                 if lan_scope_changed:
                     async def _safe_lan_scope():
                         try:
@@ -4016,7 +4028,7 @@ class ChatWebServer:
             if "probe_interval_s" in data:
                 self._apply_probe_interval_settings(settings)
             if self.messaging:
-                self.messaging.display_name = settings.get("name", "")
+                self.messaging.display_name = effective_display_name(settings)
             if lan_scope_changed and self.websockets and self._loop:
                 await self._broadcast({
                     "type": "link_closed",
@@ -4079,11 +4091,11 @@ class ChatWebServer:
                 )
             except Exception:
                 self.lan_beacon.identity_pubkey = None
-            self.lan_beacon.display_name = self.load_settings().get("name", "")
+            self.lan_beacon.display_name = effective_display_name(self.load_settings())
 
         self.active_peer = None
         if self.messaging:
-            self.messaging.display_name = self.load_settings().get("name", "")
+            self.messaging.display_name = effective_display_name(self.load_settings())
 
         if self.websockets and self._loop:
             await self._broadcast({
@@ -4143,9 +4155,9 @@ class ChatWebServer:
         await asyncio.to_thread(self._apply_hub_runtime, settings)
         self._apply_auto_announce_settings(settings)
         if self.messaging:
-            self.messaging.display_name = settings.get("name", "")
+            self.messaging.display_name = effective_display_name(settings)
         if self.lan_beacon:
-            self.lan_beacon.display_name = settings.get("name", "")
+            self.lan_beacon.display_name = effective_display_name(settings)
 
     def _spawn_unix_server_restart(self):
         """Re-exec via restart-server.sh so dialout/uucp (sg) is preserved on Linux."""
@@ -4925,8 +4937,10 @@ class ChatWebServer:
                     print(f"[probe] Peers broadcast after scope drift failed: {exc}")
             try:
                 if self.discovery and self.discovery.accept_peers:
-                    removed = await asyncio.to_thread(self._probe_discovered_peers)
-                    if removed or scope_changed:
+                    removed, rtt_updated = await asyncio.to_thread(
+                        self._probe_discovered_peers
+                    )
+                    if removed or rtt_updated or scope_changed:
                         await self._broadcast_peers(authoritative=bool(removed))
             except Exception as exc:
                 print(f"[probe] Peer probe failed: {exc}")
