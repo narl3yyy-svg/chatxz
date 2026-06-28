@@ -2261,8 +2261,20 @@ class ChatWebServer:
             peer["hash"] = dest
         if peer.get("identity_hash"):
             self.messaging.register_peer_mapping(dest, peer.get("identity_hash"))
+        from chatxz.core.contacts import sync_contact_from_discovery
+
         contacts_dirty = False
-        if peer.get("ip") and any(
+        peer_record = dict(peer)
+        peer_record["hash"] = dest
+        synced = sync_contact_from_discovery(
+            self.config_dir,
+            peer_record,
+            peers_equivalent=self._peers_equivalent,
+            local_scope_ip=self._discovery_scope_ip(),
+        )
+        if synced:
+            contacts_dirty = True
+        elif peer.get("ip") and any(
             (c.get("ip") or "").strip() == peer.get("ip")
             for c in list_contacts(self.config_dir)
         ):

@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.5.6": [
+        "Saved contacts pick up the correct LAN/USB hash from Discovered automatically.",
+        "Fixes contacts stuck on an old hash that fails to connect while Discovered shows the right peer.",
+        "Tapping a contact's LAN row connects using the live discovered hash.",
+    ],
     "0.5.5": [
         "Custom contact names stick — discovery no longer overwrites what you saved.",
         "Saving LAN or USB adds the right hash to one contact; tap LAN or USB row to connect on that path.",

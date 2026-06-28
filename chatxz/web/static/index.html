@@ -3221,12 +3221,27 @@ function contactViewingActive(c) {
 
 function discoveredForContactTransport(contact, via) {
   const target = via === 'serial' ? contactSerialHash(contact) : contactLanHash(contact);
-  if (!target) return null;
-  return (window._discoveredPeers || []).find(p => {
+  const peers = window._discoveredPeers || [];
+  const wantVia = via === 'serial' ? 'serial' : 'lan';
+  let match = peers.find(p => {
     const pVia = (p.via || '') === 'serial' ? 'serial' : 'lan';
-    if (pVia !== via) return false;
-    return peersMatch(p.hash, target) || peerKey(p.hash) === peerKey(target);
+    if (pVia !== wantVia) return false;
+    return target && (peersMatch(p.hash, target) || peerKey(p.hash) === peerKey(target));
   });
+  if (!match && wantVia === 'lan' && contact.ip) {
+    match = peers.find(p => {
+      const pVia = (p.via || '') === 'serial' ? 'serial' : 'lan';
+      return pVia === 'lan' && p.ip === contact.ip;
+    });
+  }
+  if (!match) {
+    match = peers.find(p => {
+      const pVia = (p.via || '') === 'serial' ? 'serial' : 'lan';
+      if (pVia !== wantVia) return false;
+      return contactMatchesPeer(contact, p);
+    });
+  }
+  return match || null;
 }
 
 function rttForContactTransport(contact, via) {
@@ -3237,11 +3252,11 @@ function rttForContactTransport(contact, via) {
 }
 
 function renderContactTransportRow(contact, via) {
-  const hash = via === 'serial' ? contactSerialHash(contact) : contactLanHash(contact);
+  const p = discoveredForContactTransport(contact, via);
+  const hash = (p?.hash || (via === 'serial' ? contactSerialHash(contact) : contactLanHash(contact)));
   if (!hash) return '';
   const label = via === 'serial' ? 'USB' : 'LAN';
   const labelClass = via === 'serial' ? 'usb' : 'lan';
-  const p = discoveredForContactTransport(contact, via);
   const linked = isPeerLinked(hash, via);
   const rowActive = viewingPeer && peersMatch(viewingPeer, hash) && normalizeVia(viewingVia) === normalizeVia(via);
   const rttHint = rttForContactTransport(contact, via);
@@ -3296,8 +3311,8 @@ function renderContacts(contacts) {
       row.onclick = (e) => {
         e.stopPropagation();
         const via = row.dataset.via;
-        const hash = via === 'serial' ? contactSerialHash(c) : contactLanHash(c);
         const p = discoveredForContactTransport(c, via);
+        const hash = (p?.hash || (via === 'serial' ? contactSerialHash(c) : contactLanHash(c)));
         openChat(hash, true, {
           via: via === 'serial' ? 'serial' : undefined,
           ip: via === 'lan' ? (p?.ip || c.ip) : undefined,
@@ -4309,29 +4324,56 @@ function bestPeerForContact(peers, contact) {
 function syncContactIpsFromDiscovered(peers) {
   let changed = false;
   allContacts = allContacts.map(c => {
-    const p = bestPeerForContact(peers, c);
-    if (!p) return c;
-    const port = p.port || c.port || 8742;
-    const scope = window._localLanIp;
-    if (scope && c.ip && p.ip && sameSubnet(c.ip, scope) && !sameSubnet(p.ip, scope)) {
-      const rttSame = c.rtt_ms === p.rtt_ms && c.rtt_avg_ms === p.rtt_avg_ms;
-      if (rttSame) return c;
-      changed = true;
-      return {...c, rtt_ms: p.rtt_ms, rtt_avg_ms: p.rtt_avg_ms};
+    const lanP = discoveredForContactTransport(c, 'lan');
+    const serialP = discoveredForContactTransport(c, 'serial');
+    const p = lanP || bestPeerForContact(peers, c);
+    let next = {...c};
+    let rowChanged = false;
+    if (lanP?.hash) {
+      const live = peerKey(lanP.hash);
+      const saved = peerKey(contactLanHash(c));
+      if (live && saved !== live) {
+        next.lan_hash = live;
+        next.hash = live;
+        rowChanged = true;
+      }
     }
-    const ipSame = c.ip === p.ip && (c.port || 8742) === port;
-    const idSame = (c.identity_hash || '') === (p.identity_hash || c.identity_hash || '');
-    const rttSame = c.rtt_ms === p.rtt_ms && c.rtt_avg_ms === p.rtt_avg_ms;
-    if (ipSame && rttSame && idSame) return c;
-    changed = true;
-    return {
-      ...c,
-      ip: ipSame ? c.ip : p.ip,
-      port,
-      identity_hash: p.identity_hash || c.identity_hash,
-      rtt_ms: p.rtt_ms,
-      rtt_avg_ms: p.rtt_avg_ms,
-    };
+    if (serialP?.hash) {
+      const live = peerKey(serialP.hash);
+      const saved = peerKey(contactSerialHash(c));
+      if (live && saved !== live) {
+        next.serial_hash = live;
+        rowChanged = true;
+      }
+    }
+    if (!p) {
+      if (rowChanged) changed = true;
+      return next;
+    }
+    const port = p.port || next.port || 8742;
+    const scope = window._localLanIp;
+    if (scope && next.ip && p.ip && sameSubnet(next.ip, scope) && !sameSubnet(p.ip, scope)) {
+      const rttSame = next.rtt_ms === p.rtt_ms && next.rtt_avg_ms === p.rtt_avg_ms;
+      if (!rttSame) {
+        rowChanged = true;
+        next.rtt_ms = p.rtt_ms;
+        next.rtt_avg_ms = p.rtt_avg_ms;
+      }
+    } else {
+      const ipSame = next.ip === p.ip && (next.port || 8742) === port;
+      const idSame = (next.identity_hash || '') === (p.identity_hash || next.identity_hash || '');
+      const rttSame = next.rtt_ms === p.rtt_ms && next.rtt_avg_ms === p.rtt_avg_ms;
+      if (!ipSame || !rttSame || !idSame) {
+        rowChanged = true;
+        if (!ipSame && p.ip) next.ip = p.ip;
+        next.port = port;
+        next.identity_hash = p.identity_hash || next.identity_hash;
+        next.rtt_ms = p.rtt_ms;
+        next.rtt_avg_ms = p.rtt_avg_ms;
+      }
+    }
+    if (rowChanged) changed = true;
+    return next;
   });
   if (changed) renderContacts(allContacts);
 }

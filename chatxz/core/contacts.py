@@ -98,6 +98,148 @@ def contact_has_hash(config_dir, peer_hash):
     return find_contact_by_hash(config_dir, peer_hash) is not None
 
 
+def _peer_transport_family(via):
+    raw = (via or "").strip().lower()
+    if raw == "serial":
+        return "serial"
+    return "lan"
+
+
+def _names_related(a, b):
+    """Loose name match for discovery refresh (e.g. 330s vs 330ss)."""
+    left = (a or "").strip().lower()
+    right = (b or "").strip().lower()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    return left.startswith(right) or right.startswith(left)
+
+
+def _contact_matches_discovery_peer(contact, peer, peers_equivalent=None):
+    c = normalize_contact(contact or {})
+    peer = dict(peer or {})
+    new_hash = (peer.get("hash") or "").replace(":", "")
+    if not new_hash:
+        return False
+    if new_hash in _contact_hashes(c):
+        return True
+    peer_ident = (peer.get("identity_hash") or "").replace(":", "")
+    if peer_ident and peer_ident in _contact_hashes(c):
+        return True
+    if peers_equivalent:
+        lan = (c.get("lan_hash") or c.get("hash") or "").replace(":", "")
+        serial = (c.get("serial_hash") or "").replace(":", "")
+        c_ident = (c.get("identity_hash") or "").replace(":", "")
+        if peers_equivalent(lan, new_hash) or peers_equivalent(serial, new_hash):
+            return True
+        if peer_ident and c_ident and peers_equivalent(c_ident, peer_ident):
+            return True
+    peer_ip = (peer.get("ip") or "").strip()
+    c_ip = (c.get("ip") or "").strip()
+    if peer_ip and c_ip and peer_ip == c_ip:
+        return True
+    peer_name = (peer.get("name") or "").strip()
+    c_name = (c.get("name") or "").strip()
+    if peer_ip and _names_related(c_name, peer_name):
+        return True
+    if peer_name and _names_related(c_name, peer_name):
+        lan = (c.get("lan_hash") or c.get("hash") or "").replace(":", "")
+        serial = (c.get("serial_hash") or "").replace(":", "")
+        if lan == serial and lan:
+            return True
+    return False
+
+
+def sync_contact_from_discovery(
+    config_dir,
+    peer,
+    peers_equivalent=None,
+    local_scope_ip=None,
+):
+    """Refresh saved contact transport hashes from a live discovery peer."""
+    peer = dict(peer or {})
+    new_hash = (peer.get("hash") or "").replace(":", "")
+    if not new_hash:
+        return None
+    family = _peer_transport_family(peer.get("via"))
+    peer_ip = (peer.get("ip") or "").strip()
+    peer_ident = (peer.get("identity_hash") or "").replace(":", "")
+    peer_name = peer.get("name")
+    peer_port = peer.get("port")
+
+    for contact in list_contacts(config_dir):
+        if not _contact_matches_discovery_peer(contact, peer, peers_equivalent):
+            continue
+        entry = normalize_contact(dict(contact))
+        lan = (entry.get("lan_hash") or entry.get("hash") or "").replace(":", "")
+        serial = (entry.get("serial_hash") or "").replace(":", "")
+        changed = False
+
+        if family == "serial":
+            if serial != new_hash:
+                entry["serial_hash"] = new_hash
+                changed = True
+            if peer_ident:
+                entry["serial_identity_hash"] = peer_ident
+                changed = True
+        else:
+            if lan != new_hash:
+                entry["lan_hash"] = new_hash
+                entry["hash"] = new_hash
+                changed = True
+            if lan == serial and serial and new_hash != serial:
+                entry["lan_hash"] = new_hash
+                entry["hash"] = new_hash
+                changed = True
+            if peer_ip and should_update_contact_ip(
+                (entry.get("ip") or "").strip(), peer_ip, local_scope_ip
+            ):
+                entry["ip"] = peer_ip
+                changed = True
+            elif peer_ip and not (entry.get("ip") or "").strip():
+                entry["ip"] = peer_ip
+                changed = True
+            if peer_port is not None:
+                try:
+                    port_val = int(peer_port)
+                except (TypeError, ValueError):
+                    port_val = None
+                if port_val is not None and entry.get("port") != port_val:
+                    entry["port"] = port_val
+                    changed = True
+            if peer_ident:
+                entry["lan_identity_hash"] = peer_ident
+                entry["identity_hash"] = peer_ident
+                changed = True
+
+        if peer_name:
+            resolved = _resolve_contact_name(entry, peer_name)
+            if resolved and resolved != (entry.get("name") or "").strip():
+                if not entry.get("custom_name"):
+                    entry["name"] = resolved
+                    changed = True
+
+        if not changed:
+            return entry
+
+        file_key = contact_primary_hash(entry) or new_hash
+        old_keys = set()
+        for key in ("hash", "lan_hash", "serial_hash"):
+            h = (contact.get(key) or "").replace(":", "")
+            if h and h != file_key:
+                old_keys.add(h)
+        old_keys.add(contact_primary_hash(contact))
+        path = _contact_path(config_dir, file_key)
+        with open(path, "w") as fh:
+            json.dump(entry, fh, indent=2)
+        for old_key in old_keys:
+            if old_key and old_key != file_key:
+                delete_contact(config_dir, old_key)
+        return entry
+    return None
+
+
 def update_contact_transport_hash(
     config_dir,
     old_hash,
@@ -341,26 +483,28 @@ def migrate_contact_by_ip(config_dir, ip, new_hash, name=None, port=None, identi
     if not ip or not new_clean:
         return []
     removed = []
-    matched = False
     for contact in list_contacts(config_dir):
         if (contact.get("ip") or "").strip() != ip:
             continue
-        matched = True
-        old_hash = (contact.get("hash") or "").replace(":", "")
-        if old_hash and old_hash != new_clean:
-            delete_contact(config_dir, old_hash)
-            removed.append(old_hash)
-    if matched:
-        prior = find_contact_by_hash(config_dir, new_clean)
-        save_contact(
+        old_key = contact_primary_hash(contact)
+        prior = normalize_contact(dict(contact))
+        updated = save_contact(
             config_dir,
             new_clean,
-            name=_resolve_contact_name(prior or {}, name) if prior else name,
+            name=_resolve_contact_name(prior, name),
             ip=ip,
             port=port,
             identity_hash=identity_hash,
-            custom_name=bool((prior or {}).get("custom_name")),
+            via="lan",
+            lan_hash=new_clean,
+            serial_hash=prior.get("serial_hash"),
+            serial_identity_hash=prior.get("serial_identity_hash"),
+            custom_name=bool(prior.get("custom_name")),
         )
+        new_key = contact_primary_hash(updated) or new_clean
+        if old_key and old_key != new_key:
+            delete_contact(config_dir, old_key)
+            removed.append(old_key)
     return removed
 
 
@@ -422,19 +566,40 @@ def update_contact_endpoint(
             same = ih == ident or ch == ident
         if not same and peer_name:
             cn = (contact.get("name") or "").strip().lower()
-            if cn and cn == peer_name:
+            if cn and (_names_related(cn, peer_name) or cn == peer_name):
                 same = True
         if not same:
             continue
         contact_ip = (contact.get("ip") or "").strip()
+        lan = (contact.get("lan_hash") or ch or "").replace(":", "")
+        needs_hash = clean and lan != clean and ch == lan
+        if needs_hash:
+            updated = save_contact(
+                config_dir,
+                clean,
+                name=_resolve_contact_name(contact, name),
+                ip=target_ip or contact_ip or None,
+                port=port if port is not None else contact.get("port"),
+                identity_hash=identity_hash or ih or None,
+                via="lan",
+                lan_hash=clean,
+                serial_hash=contact.get("serial_hash"),
+                serial_identity_hash=contact.get("serial_identity_hash"),
+                custom_name=bool(contact.get("custom_name")),
+            )
+            break
         if target_ip and should_update_contact_ip(contact_ip, target_ip, local_scope_ip):
             updated = save_contact(
                 config_dir,
-                ch,
+                ch or clean,
                 name=_resolve_contact_name(contact, name),
                 ip=target_ip,
                 port=port if port is not None else contact.get("port"),
                 identity_hash=identity_hash or ih or None,
+                via="lan",
+                lan_hash=lan or clean,
+                serial_hash=contact.get("serial_hash"),
+                serial_identity_hash=contact.get("serial_identity_hash"),
                 custom_name=bool(contact.get("custom_name")),
             )
         break
