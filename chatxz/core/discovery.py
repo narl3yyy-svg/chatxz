@@ -568,6 +568,8 @@ class PeerDiscovery:
             return False
         peer = dict(peer)
         peer["hash"] = hash_hex
+        if (peer.get("via") or "").strip() == "serial":
+            peer.setdefault("serial_rns", True)
         sanitized = self._sanitize_peer_scope(peer)
         if not sanitized:
             storage_key = self._peer_storage_key(peer)
@@ -668,8 +670,6 @@ class PeerDiscovery:
             if scope and not peer_in_scope(announce_ip, scope):
                 return
             via = "rns"
-        elif serial_discovery_active():
-            via = "serial"
         else:
             return
         if via == "serial":
@@ -681,6 +681,8 @@ class PeerDiscovery:
             "last_seen": time.time(),
             "via": via,
         }
+        if via == "serial":
+            peer["serial_rns"] = True
         if announce_ip:
             peer["ip"] = announce_ip
         if identity_hex:
@@ -776,14 +778,9 @@ class PeerDiscovery:
                         name = en
                         break
         peer["name"] = name or hash_hex[:8]
-        serial_key = f"{hash_hex}:serial"
-        if serial_key in self.peers and serial_discovery_active():
-            self.peers[serial_key]["last_seen"] = time.time()
-            if register_identity_from_beacon(data):
-                self._log_once(
-                    f"beacon-id:{hash_hex}:serial",
-                    f"[discovery] Beacon identity refreshed: {name} (serial row)",
-                )
+        serial_key = self._peer_storage_key({"hash": hash_hex, "via": "serial"})
+        if serial_key in self.peers and not self.peers[serial_key].get("serial_rns"):
+            self._remove_peer_entry(serial_key)
         if register_identity_from_beacon(data):
             peer["via"] = peer.get("via") or "rns"
             self._log_once(
@@ -922,6 +919,15 @@ class PeerDiscovery:
             if (peer.get("via") or "").strip() == "serial":
                 if not usb_up:
                     continue
+                peer_hash = normalize_hash(peer.get("hash"))
+                if not peer.get("serial_rns"):
+                    has_lan_row = any(
+                        normalize_hash(other.get("hash")) == peer_hash
+                        and (other.get("via") or "").strip() != "serial"
+                        for other in deduped.values()
+                    )
+                    if has_lan_row:
+                        continue
                 serial_peer = dict(peer)
                 serial_peer.pop("ip", None)
                 no_ip_peers.append(serial_peer)

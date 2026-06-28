@@ -2,6 +2,15 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.5.5] — 2026-06-27
+
+### Fixed
+- **Custom contact names** — user-saved names are never overwritten by device announce names on startup or discovery refresh (`custom_name` flag).
+- **Dual-hash contact save** — saving LAN or USB merges into one contact with distinct `lan_hash` / `serial_hash`; connect uses the transport row you tapped.
+- **False serial in Discovered** — LAN-only peers (e.g. GZ16) no longer appear as `(serial)` when USB is enabled on your machine; phantom serial rows are dropped on LAN beacon.
+- **Own hash in contacts** — local LAN/serial hashes are filtered from Discovered and blocked when saving a contact.
+- **Ip-less announce misclassification** — RNS announces without a receiving interface are rejected instead of defaulting to serial.
+
 ## [0.5.4] — 2026-06-27
 
 ### Fixed

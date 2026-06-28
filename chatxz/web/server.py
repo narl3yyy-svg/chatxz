@@ -2028,8 +2028,26 @@ class ChatWebServer:
             return pvia == "serial"
         return pvia in ("rns", "beacon", "lan", "")
 
+    def _contact_hash_for_transport(self, peer_hash, prefer_via=None):
+        from chatxz.core.contacts import find_contact_by_hash
+
+        contact = find_contact_by_hash(self.config_dir, self._peer_dest_hash(peer_hash))
+        if not contact:
+            return None
+        via = (prefer_via or "").strip().lower()
+        if via == "serial":
+            serial = (contact.get("serial_hash") or "").replace(":", "")
+            return serial or None
+        if via in ("lan", "rns", "beacon", "udp", "tcp"):
+            lan = (contact.get("lan_hash") or contact.get("hash") or "").replace(":", "")
+            return lan or None
+        return None
+
     def _resolve_current_peer_hash(self, peer_hash, peer_ip=None, prefer_via=None):
         clean = self._peer_dest_hash(peer_hash)
+        transport_hash = self._contact_hash_for_transport(clean, prefer_via)
+        if transport_hash:
+            clean = transport_hash
         if self._peer_is_current(clean):
             return clean
         if peer_ip:
@@ -2564,6 +2582,7 @@ class ChatWebServer:
                 via=data.get("via"),
                 lan_hash=data.get("lan_hash"),
                 serial_hash=data.get("serial_hash"),
+                custom_name=bool(name and str(name).strip()),
             )
             self._schedule_contacts_broadcast()
             return web.json_response({"status": "ok", "contact": entry})
@@ -2669,6 +2688,9 @@ class ChatWebServer:
             peer_ip = (data.get("ip") or "").strip() or None
             peer_port = data.get("port") or 8742
             prefer_via = (data.get("via") or "").strip() or None
+            transport_hash = self._contact_hash_for_transport(peer_hash, prefer_via)
+            if transport_hash:
+                peer_hash = transport_hash
             self._enable_discovery(clear=False)
             settings = self.load_settings()
             configured = settings.get("rns_interfaces")

@@ -3338,7 +3338,11 @@ function renderDiscovered(peers, opts) {
   el.innerHTML = '';
   let hasLink = linkedPeers.size > 0;
   let discovered = window._discoveredPeers
-    ? window._discoveredPeers.filter(p => !p.connected && !isDiscoveredPeerSaved(p))
+    ? window._discoveredPeers.filter(p =>
+        !p.connected
+        && !isDiscoveredPeerSaved(p)
+        && !isLocalPeerHash(p.hash)
+      )
     : [];
   let count = discovered.length;
   const linkCount = linkedPeers.size;
@@ -3476,15 +3480,26 @@ function doSaveContact() {
   const hash = document.getElementById('save-contact-hash').value;
   const name = document.getElementById('save-contact-name').value.trim();
   if (!hash) return;
+  if (isLocalPeerHash(hash)) {
+    toast('Cannot save your own device hash as a contact');
+    return;
+  }
+  const disc = discoveredPeerForHash(hash);
   const meta = peerMetaForHash(hash) || {};
+  const via = (disc?.via || meta.via || '').toLowerCase() === 'serial' ? 'serial' : (
+    (disc?.via || meta.via) ? 'lan' : undefined
+  );
   const body = {
     hash,
-    name: name || hash.substring(0, 12),
-    ip: meta.ip || undefined,
-    port: meta.port || undefined,
-    identity_hash: meta.identity_hash || undefined,
-    via: meta.via || undefined,
+    name: name || disc?.name || meta.name || hash.substring(0, 12),
+    ip: via === 'serial' ? undefined : (disc?.ip || meta.ip || undefined),
+    port: disc?.port || meta.port || undefined,
+    identity_hash: disc?.identity_hash || meta.identity_hash || undefined,
+    via,
+    custom_name: !!name,
   };
+  if (via === 'serial') body.serial_hash = hash.replace(/:/g, '');
+  else if (via === 'lan') body.lan_hash = hash.replace(/:/g, '');
   fetch('/api/contacts', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -4898,11 +4913,29 @@ function contactDisplayName(c) {
     [c?.hash, c?.lan_hash, c?.serial_hash, contactLanHash(c), contactSerialHash(c)]
       .map(peerKey).filter(Boolean)
   );
+  if (c?.custom_name && raw) return raw;
   if (raw && !hashes.has(peerKey(raw)) && raw.length <= 24) return raw;
   const disc = bestPeerForContact(window._discoveredPeers || [], c);
-  if (disc?.name && !hashes.has(peerKey(disc.name))) return disc.name;
+  if (!c?.custom_name && disc?.name && !hashes.has(peerKey(disc.name))) return disc.name;
   if (raw && raw.length <= 16) return raw;
   return truncateHash(c?.lan_hash || c?.serial_hash || c?.hash || raw);
+}
+
+function isLocalPeerHash(hash) {
+  const key = peerKey(hash);
+  if (!key) return false;
+  return [myHash, mySerialHash].map(peerKey).filter(Boolean).some(h => h === key || peersMatch(h, key));
+}
+
+function discoveredPeerForHash(hash) {
+  const key = peerKey(hash);
+  if (!key) return null;
+  return (window._discoveredPeers || []).find(p =>
+    peerKey(p.hash) === key
+    || peerKey(p.identity_hash) === key
+    || peersMatch(p.hash, hash)
+    || peersMatch(p.identity_hash, hash)
+  );
 }
 
 function isPeerLinked(hash, via) {

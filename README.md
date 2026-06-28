@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — each transport uses its own RNS identity, and messages travel over encrypted links on your LAN (Wi‑Fi, Ethernet, USB serial).
 
-**Current version:** 0.5.4
+**Current version:** 0.5.5
 
 ## How chatxz works (v0.5+)
 
@@ -287,6 +287,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.5.5** — **Contacts + discovery:** custom contact names persist; LAN/USB save to one contact with distinct hashes; false serial rows for LAN-only peers removed; own hash blocked from contacts
 - **v0.5.4** — **Serial announce fix:** USB hot-add creates serial identity/destination; serial announces stay on `/dev/ttyUSB0` (no LAN broadcast toast); self-hashes filtered from discovery; session reconnect stays on chosen transport
 - **v0.5.3** — **Dual-transport stability:** saved contacts survive server restart and USB unplug; LAN + USB discovery rows no longer evict each other; connect respects saved contact transport; Announce Serial visible on page load; false “connection failed” toasts suppressed when already linked
 - **v0.5.2** — **Discovered list fix:** web UI renders discovered peers again (JS ReferenceError in v0.5.1); LAN/USB rows no longer merge in the sidebar

@@ -29,7 +29,39 @@ def normalize_contact(entry):
         entry["hash"] = lan
     if lan and not entry.get("identity_hash") and entry.get("lan_identity_hash"):
         entry["identity_hash"] = entry["lan_identity_hash"]
+    if entry.get("custom_name") is None:
+        entry["custom_name"] = False
     return entry
+
+
+def _name_is_hash_like(name, hashes):
+    """True when a display name is just a hash prefix, not a user label."""
+    raw = (name or "").strip().lower()
+    if not raw:
+        return True
+    for h in hashes:
+        if not h:
+            continue
+        if raw == h or raw == h[:8] or raw == h[:12] or raw.startswith(h[:8]):
+            return True
+    return False
+
+
+def _resolve_contact_name(existing, name=None, custom_name=False):
+    """Pick stored contact name; user-chosen names always win over discovery."""
+    entry = normalize_contact(existing or {})
+    hashes = _contact_hashes(entry)
+    incoming = str(name).strip() if name is not None and str(name).strip() else ""
+    if custom_name and incoming:
+        return incoming
+    if entry.get("custom_name"):
+        return (entry.get("name") or "").strip() or incoming
+    if incoming and not _name_is_hash_like(incoming, hashes):
+        return incoming
+    saved = (entry.get("name") or "").strip()
+    if saved and not _name_is_hash_like(saved, hashes):
+        return saved
+    return incoming or saved
 
 
 def contact_primary_hash(contact):
@@ -108,7 +140,7 @@ def update_contact_transport_hash(
             except (TypeError, ValueError):
                 pass
     if name is not None and str(name).strip():
-        entry["name"] = str(name).strip()
+        entry["name"] = _resolve_contact_name(entry, name)
     file_key = contact_primary_hash(entry) or new_clean
     path = _contact_path(config_dir, file_key)
     with open(path, "w") as fh:
@@ -150,16 +182,34 @@ def save_contact(
     serial_hash=None,
     lan_identity_hash=None,
     serial_identity_hash=None,
+    custom_name=None,
 ):
     clean = (peer_hash or "").strip().replace(":", "")
     if not clean:
         raise ValueError("hash required")
-    transport = (via or "lan").strip().lower()
-    is_serial = transport == "serial"
+    transport = (via or "").strip().lower()
+    explicit_serial = transport == "serial"
+    explicit_lan = transport in ("lan", "rns", "beacon", "udp", "tcp")
+    if serial_hash and not lan_hash and not explicit_lan:
+        explicit_serial = True
+    if lan_hash and not serial_hash and not explicit_serial:
+        explicit_lan = True
+    is_serial = explicit_serial and not explicit_lan
+    if not explicit_serial and not explicit_lan:
+        is_serial = False
     display = str(name).strip() if name is not None and str(name).strip() else None
+    user_named = bool(custom_name)
 
-    merged = None
-    if display:
+    merged = find_contact_by_hash(config_dir, clean)
+    if merged:
+        merged = dict(merged)
+    elif identity_hash:
+        ident = str(identity_hash).strip().replace(":", "")
+        for c in list_contacts(config_dir):
+            if ident in _contact_hashes(c):
+                merged = dict(normalize_contact(c))
+                break
+    if not merged and display:
         for c in list_contacts(config_dir):
             if (c.get("name") or "").strip().lower() == display.lower():
                 merged = dict(normalize_contact(c))
@@ -167,8 +217,11 @@ def save_contact(
 
     existing = merged or load_contact(config_dir, clean) or {"hash": clean, "name": clean or display}
     existing = normalize_contact(existing)
-    if display:
-        existing["name"] = display
+    if user_named:
+        existing["custom_name"] = True
+    resolved_name = _resolve_contact_name(existing, display, custom_name=user_named)
+    if resolved_name:
+        existing["name"] = resolved_name
     if is_serial:
         existing["serial_hash"] = clean
         if serial_hash:
@@ -271,7 +324,7 @@ def migrate_contact_hash(
             except (TypeError, ValueError):
                 pass
     if name is not None and str(name).strip():
-        entry["name"] = str(name).strip()
+        entry["name"] = _resolve_contact_name(entry, name)
     file_key = contact_primary_hash(entry) or new_clean
     path = _contact_path(config_dir, file_key)
     with open(path, "w") as fh:
@@ -298,13 +351,15 @@ def migrate_contact_by_ip(config_dir, ip, new_hash, name=None, port=None, identi
             delete_contact(config_dir, old_hash)
             removed.append(old_hash)
     if matched:
+        prior = find_contact_by_hash(config_dir, new_clean)
         save_contact(
             config_dir,
             new_clean,
-            name=name,
+            name=_resolve_contact_name(prior or {}, name) if prior else name,
             ip=ip,
             port=port,
             identity_hash=identity_hash,
+            custom_name=bool((prior or {}).get("custom_name")),
         )
     return removed
 
@@ -376,10 +431,11 @@ def update_contact_endpoint(
             updated = save_contact(
                 config_dir,
                 ch,
-                name=contact.get("name"),
+                name=_resolve_contact_name(contact, name),
                 ip=target_ip,
                 port=port if port is not None else contact.get("port"),
                 identity_hash=identity_hash or ih or None,
+                custom_name=bool(contact.get("custom_name")),
             )
         break
     return updated

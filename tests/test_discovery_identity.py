@@ -118,7 +118,7 @@ class DiscoveryIdentityTests(unittest.TestCase):
             "serial",
         )
 
-    def test_ipless_announce_without_packet_iface_accepted_as_serial(self):
+    def test_ipless_announce_without_packet_iface_rejected(self):
         disc = PeerDiscovery()
         disc.running = True
         disc.accept_peers = True
@@ -128,11 +128,7 @@ class DiscoveryIdentityTests(unittest.TestCase):
             with patch("chatxz.core.discovery.interface_family", return_value=""):
                 with patch("chatxz.core.discovery.serial_discovery_active", return_value=True):
                     disc._on_announce(peer_hash, app_data, announced_identity=None)
-        self.assertTrue(disc.has_peer_hash("986da79e42cd8b10dc6ccb069d978420"))
-        self.assertEqual(
-            disc.peer_row("986da79e42cd8b10dc6ccb069d978420", via="serial").get("via"),
-            "serial",
-        )
+        self.assertFalse(disc.has_peer_hash("986da79e42cd8b10dc6ccb069d978420"))
 
     def test_stale_peer_pruned_after_ttl(self):
         disc = PeerDiscovery()

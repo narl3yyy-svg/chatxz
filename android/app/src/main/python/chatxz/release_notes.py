@@ -3,6 +3,12 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.5.5": [
+        "Custom contact names stick — discovery no longer overwrites what you saved.",
+        "Saving LAN or USB adds the right hash to one contact; tap LAN or USB row to connect on that path.",
+        "LAN-only peers no longer show a false USB row when your machine has serial enabled.",
+        "Your own device hash no longer appears in Discovered or saved contacts.",
+    ],
     "0.5.4": [
         "Announce Serial now announces only on the USB serial port — no more LAN broadcast in the toast.",
         "USB hot-add works without restart: serial identity is created and peers appear in Discovered.",
