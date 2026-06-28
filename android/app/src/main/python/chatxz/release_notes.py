@@ -3,6 +3,12 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.7.5": [
+        "Unified LAN call codec: desktop browsers use WebCodecs Opus (48 kHz) like Android and native audio — μ-law only when Opus is unavailable.",
+        "Fixed one-way/silent calls: Opus decoder now initializes for receive even when sending μ-law; incoming Opus from native peers plays correctly.",
+        "Fixed chat showing disconnected after a call when the RNS link was still active — duplicate link teardown no longer clears the connected state.",
+        "Ubuntu/Debian: .venv is created with --system-site-packages so apt-installed python3-pyaudio is visible to native call audio.",
+    ],
     "0.7.4": [
         "Fixed web UI not loading — duplicate JavaScript variable from v0.7.3 transfer dock change.",
     ],

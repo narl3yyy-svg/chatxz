@@ -2,6 +2,14 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.7.5] — 2026-06-28
+
+### Fixed
+- **Codec mismatch on LAN calls** — desktop browsers (Ubuntu/Windows) use WebCodecs Opus again, matching Android and native audio; μ-law is fallback only.
+- **One-way audio** — Opus decoder initializes for receive even when the browser sends μ-law, so native Opus from Arch plays correctly.
+- **Disconnected after hang-up** — duplicate RNS link teardown no longer clears the connected state while the peer link stays active.
+- **Ubuntu native audio** — `.venv` uses `--system-site-packages` so apt `python3-pyaudio` is visible after `pip` build fails.
+
 ## [0.7.4] — 2026-06-28
 
 ### Fixed

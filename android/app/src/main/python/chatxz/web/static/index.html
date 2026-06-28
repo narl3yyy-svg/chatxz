@@ -3286,9 +3286,16 @@ function handleWSMessage(msg) {
       setLinkPeer(msg.data.peer, false, closedVia);
       applyLinkRttToDiscovered(msg.data.peer, null, closedVia);
     }
+    const viewingStillLinked = viewingPeer && (
+      isPeerLinked(viewingPeer, viewingVia)
+      || isPeerLinked(viewingPeer, 'lan')
+      || isPeerLinked(viewingPeer, 'serial')
+    );
+    if (callState !== 'idle' && callPeer && !isPeerLinked(callPeer, callVia || viewingVia)) {
+      resetCallUi();
+    }
     updatePeerHeader();
-    if (callState !== 'idle') resetCallUi();
-    if (!linkedPeers.size) {
+    if (!viewingStillLinked && !linkedPeers.size) {
       setLinkStatus('disconnected', 'Inactive');
     }
     pollQueue();
@@ -5933,6 +5940,7 @@ let callOpusDecodeTs = 0;
 let callOpusEncodeTs = 0;
 let callOpusPending = null;
 let callBrowserOpusOk = null;
+let callOpusRecvPrimed = false;
 let ringtoneTimer = null;
 let sharedMicStream = null;
 let sharedMicRefs = 0;
@@ -5965,6 +5973,7 @@ function resetCallUi() {
   callLocalFramesIn = 0;
   callLocalFramesOut = 0;
   callBrowserOpusOk = null;
+  callOpusRecvPrimed = false;
   callServerStats = {};
   document.getElementById('call-incoming-overlay')?.classList.remove('open');
   document.getElementById('call-active-overlay')?.classList.remove('open');
@@ -6146,6 +6155,7 @@ function startCallStatsPolling() {
 function showActiveCall(peer, label) {
   callState = 'active';
   callPeer = peerKey(peer) || peer;
+  void primeCallOpusReceive();
   document.getElementById('call-incoming-overlay')?.classList.remove('open');
   if (!callTimerId) {
     callStartedAt = Date.now();
@@ -6208,21 +6218,22 @@ function callAudioConfig() {
   if (via === 'serial') {
     return { rate: 8000, frameSamples: 160, jitterTarget: 320, jitterMax: 640, useOpus: false, useMulaw: true };
   }
-  if (isAndroidShell()) {
-    const opus = browserOpusSupported() && callBrowserOpusOk !== false;
-    return {
-      rate: opus ? 48000 : 16000,
-      frameSamples: opus ? 960 : 480,
-      jitterTarget: opus ? 2880 : 960,
-      jitterMax: opus ? 5760 : 1920,
-      useOpus: opus,
-      useMulaw: !opus,
-    };
-  }
+  const opus = browserOpusSupported() && callBrowserOpusOk !== false;
   return {
-    rate: 16000, frameSamples: 480, jitterTarget: 960, jitterMax: 1920,
-    useOpus: false, useMulaw: true,
+    rate: opus ? 48000 : 16000,
+    frameSamples: opus ? 960 : 480,
+    jitterTarget: opus ? 2880 : 960,
+    jitterMax: opus ? 5760 : 1920,
+    useOpus: opus,
+    useMulaw: !opus,
   };
+}
+
+async function primeCallOpusReceive() {
+  if (!browserOpusSupported() || callOpusRecvPrimed) return true;
+  const ok = await ensureCallOpusDecoder({ useOpus: true, rate: 48000 });
+  if (ok) callOpusRecvPrimed = true;
+  return ok;
 }
 
 async function probeBrowserOpus(rate) {
@@ -6654,13 +6665,16 @@ async function startCallCapture() {
     if (callBrowserOpusOk === null) {
       callBrowserOpusOk = await probeBrowserOpus(48000);
     }
+    await primeCallOpusReceive();
     let cfg = callAudioConfig();
     if (cfg.useOpus) {
       const encOk = await ensureCallOpusEncoder(cfg);
-      const decOk = await ensureCallOpusDecoder(cfg);
+      const decOk = callOpusRecvPrimed || await ensureCallOpusDecoder(cfg);
       if (!encOk || !decOk) {
         callBrowserOpusOk = false;
         cfg = callAudioConfig();
+      } else {
+        callOpusRecvPrimed = true;
       }
     }
     const processor = ctx.createScriptProcessor(2048, 1, 1);
@@ -6721,8 +6735,18 @@ function enqueueCallAudio(b64, codec, opts) {
   const decoded = decodeCallAudio(b64, codec);
   if (!decoded) return;
   if (decoded.opus) {
-    const cfg = callAudioConfig();
-    decodeOpusB64(decoded.b64, cfg);
+    const rate = parseCallAudioRate(codec) || 48000;
+    const decCfg = { useOpus: true, rate };
+    if (!callOpusDecoder || callOpusDecoder.state !== 'configured') {
+      void ensureCallOpusDecoder(decCfg).then(ok => {
+        if (ok) {
+          callOpusRecvPrimed = true;
+          if (callState === 'active') decodeOpusB64(b64, decCfg);
+        }
+      });
+      return;
+    }
+    decodeOpusB64(decoded.b64, decCfg);
     return;
   }
   if (!decoded.samples.length) return;

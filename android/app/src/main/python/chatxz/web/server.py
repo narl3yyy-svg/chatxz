@@ -2346,6 +2346,8 @@ class ChatWebServer:
             return
         peer = self._peer_dest_hash(peer_hash)
         still_linked = bool(self.messaging and peer and self.messaging._peer_link_active(peer))
+        if still_linked:
+            return
         removed = 0
         if (
             peer

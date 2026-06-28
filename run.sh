@@ -51,7 +51,7 @@ install_voice_deps() {
     fi
     echo "  Ubuntu/Debian: sudo apt install portaudio19-dev python3-dev python3-pyaudio"
     echo "  Arch: sudo pacman -S portaudio python-pyaudio"
-    echo "  Then re-run: ./run.sh web"
+    echo "  Then re-run: ./run.sh web  (or rm -rf .venv && ./run.sh web to pick up apt python3-pyaudio)"
     return 1
 }
 
@@ -85,7 +85,11 @@ ensure_venv() {
     if [ -d "$VENV" ]; then
         rm -rf "$VENV"
     fi
-    if ! "$SYS_PY" -m venv "$VENV"; then
+    VENV_FLAGS=()
+    if [ "$(uname -s 2>/dev/null || echo)" = "Linux" ]; then
+        VENV_FLAGS=(--system-site-packages)
+    fi
+    if ! "$SYS_PY" -m venv "${VENV_FLAGS[@]}" "$VENV"; then
         echo "Failed to create .venv."
         echo "Ubuntu/Debian: sudo apt install python3-venv python3-pip"
         exit 1
