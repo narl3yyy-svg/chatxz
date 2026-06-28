@@ -2,6 +2,11 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.7.4] — 2026-06-28
+
+### Fixed
+- **Web UI blank/broken after v0.7.3** — duplicate `let transferTrack` declaration caused a JavaScript parse error that prevented the entire page from loading.
+
 ## [0.7.3] — 2026-06-28
 
 ### Fixed
