@@ -264,6 +264,26 @@ class PeerDiscovery:
             peer["probe_failures"] = 0
             peer["last_probe_ok"] = float(peer.get("last_seen") or time.time())
 
+    def reset_probe_timers(self):
+        """Force the next probe cycle to run immediately (e.g. after interval change)."""
+        for peer in self.peers.values():
+            peer.pop("last_rtt_probe_at", None)
+
+    def clear_peer_rtt(self, hash_hex):
+        """Drop cached latency for a peer (link down or probe failed)."""
+        clean = normalize_hash(hash_hex)
+        if not clean:
+            return False
+        changed = False
+        for peer in self.peers.values():
+            if normalize_hash(peer.get("hash")) != clean:
+                continue
+            for key in ("rtt_ms", "rtt_avg_ms", "rtt_samples"):
+                if key in peer:
+                    peer.pop(key, None)
+                    changed = True
+        return changed
+
     def update_peer_probe(self, hash_hex, rtt_ms=None, ok=True):
         """Record optional probe RTT; never overrides fresh announce liveness."""
         clean = normalize_hash(hash_hex)
@@ -290,6 +310,9 @@ class PeerDiscovery:
                     continue
                 peer["probe_failures"] = int(peer.get("probe_failures") or 0) + 1
                 peer["last_probe_at"] = now
+                peer.pop("rtt_ms", None)
+                peer.pop("rtt_avg_ms", None)
+                peer.pop("rtt_samples", None)
 
     def purge_stale_probes(self, max_rtt_ms=10000, stale_s=30, max_failures=5):
         """Drop LAN peers only after stale announces AND repeated probe failures."""

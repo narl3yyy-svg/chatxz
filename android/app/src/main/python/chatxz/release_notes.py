@@ -3,6 +3,13 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.5.8": [
+        "Chat header shows the full peer hash and LAN/USB interface type.",
+        "RTT clears when a peer disconnects — no more stale 2ms after unplugging.",
+        "Fixed contact click crash and delete not removing contacts from the list.",
+        "LAN ping interval changes apply immediately; optional ping packet size (32–1472 B).",
+        "Custom sidebar title (18 chars), better emoji search, robot sidebar toggle.",
+    ],
     "0.5.7": [
         "Duplicate contacts from fast LAN/USB saves or page refresh are merged automatically.",
         "Saved peers no longer show in Discovered — only unsaved hashes appear there.",

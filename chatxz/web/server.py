@@ -846,6 +846,8 @@ class ChatWebServer:
         if self.messaging and self.messaging._has_active_transfer():
             return 0, False
         from chatxz.core.peer_probe import (
+            PROBE_PACKET_DEFAULT_BYTES,
+            clamp_probe_packet_bytes,
             link_rtt_ms,
             probe_serial_path,
             probe_udp_peer,
@@ -868,26 +870,35 @@ class ChatWebServer:
             if last_probe and (now - last_probe) < probe_interval:
                 continue
             peer["last_rtt_probe_at"] = now
-            rtt = None
-            if self.messaging:
-                rtt = link_rtt_ms(self.messaging, hash_hex)
-            if rtt is not None:
-                self.discovery.update_peer_probe(hash_hex, rtt_ms=rtt, ok=True)
-                rtt_updated = True
-                continue
+            link_rtt = link_rtt_ms(self.messaging, hash_hex) if self.messaging else None
             if is_serial:
-                rtt = probe_serial_path(hash_hex, timeout_s=1.5)
-                if rtt is not None:
-                    self.discovery.update_peer_probe(hash_hex, rtt_ms=rtt, ok=True)
-                    rtt_updated = True
-                continue
-            if ip:
-                rtt = probe_udp_peer(ip, timeout_s=1.5)
+                rtt = link_rtt
+                if rtt is None:
+                    rtt = probe_serial_path(hash_hex, timeout_s=1.5)
                 if rtt is not None:
                     self.discovery.update_peer_probe(hash_hex, rtt_ms=rtt, ok=True)
                     rtt_updated = True
                 else:
+                    if self.discovery.clear_peer_rtt(hash_hex):
+                        rtt_updated = True
                     self.discovery.update_peer_probe(hash_hex, ok=False)
+                continue
+            if ip:
+                packet_bytes = clamp_probe_packet_bytes(
+                    settings.get("lan_probe_packet_bytes", PROBE_PACKET_DEFAULT_BYTES)
+                )
+                rtt = probe_udp_peer(ip, timeout_s=1.5, packet_bytes=packet_bytes)
+                if rtt is not None:
+                    self.discovery.update_peer_probe(hash_hex, rtt_ms=rtt, ok=True)
+                    rtt_updated = True
+                else:
+                    if self.discovery.clear_peer_rtt(hash_hex):
+                        rtt_updated = True
+                    self.discovery.update_peer_probe(hash_hex, ok=False)
+                continue
+            if link_rtt is not None:
+                self.discovery.update_peer_probe(hash_hex, rtt_ms=link_rtt, ok=True)
+                rtt_updated = True
         removed = self.discovery.purge_stale_probes()
         if rtt_updated and self.websockets and self._loop:
             self._schedule_peers_broadcast()
@@ -1329,6 +1340,8 @@ class ChatWebServer:
             "serial_announce_interval_s": 0,
             "lan_probe_interval_s": 30,
             "serial_probe_interval_s": 30,
+            "lan_probe_packet_bytes": 64,
+            "brand_title": "",
             "setup_complete": False,
             "last_release_notes_seen": "",
         }
@@ -2335,6 +2348,8 @@ class ChatWebServer:
                     }),
                     self._loop,
                 )
+            if peer and self.discovery and self.discovery.clear_peer_rtt(peer):
+                self._schedule_peers_broadcast()
             asyncio.run_coroutine_threadsafe(
                 self._broadcast({
                     "type": "link_closed",
@@ -2414,6 +2429,8 @@ class ChatWebServer:
             link_rtt = link_rtt_ms(self.messaging, resolved)
             if link_rtt is not None:
                 self.discovery.update_peer_probe(resolved, rtt_ms=link_rtt, ok=True)
+                self._schedule_peers_broadcast()
+            elif self.discovery.clear_peer_rtt(resolved):
                 self._schedule_peers_broadcast()
         self._maybe_update_hub_server_hash(resolved)
         user_disconnected = bool(
@@ -2617,6 +2634,7 @@ class ChatWebServer:
         try:
             peer_hash = request.match_info["hash"].replace(":", "")
             if delete_saved_contact(self.config_dir, peer_hash):
+                self._schedule_contacts_broadcast()
                 return web.json_response({"status": "ok"})
             return web.json_response({"error": "not found"}, status=404)
         except Exception as e:
@@ -3958,7 +3976,11 @@ class ChatWebServer:
                     {"error": "LAN IPv4 interface is required — pick an address from the list"},
                     status=400,
                 )
-            from chatxz.core.peer_probe import clamp_announce_interval, clamp_probe_interval
+            from chatxz.core.peer_probe import (
+                clamp_announce_interval,
+                clamp_probe_interval,
+                clamp_probe_packet_bytes,
+            )
             for key in ("lan_probe_interval_s", "serial_probe_interval_s", "probe_interval_s"):
                 if key in data:
                     val = clamp_probe_interval(data.get(key))
@@ -3968,6 +3990,12 @@ class ChatWebServer:
                         settings["serial_probe_interval_s"] = val
                     else:
                         settings[key] = val
+            if "lan_probe_packet_bytes" in data:
+                settings["lan_probe_packet_bytes"] = clamp_probe_packet_bytes(
+                    data.get("lan_probe_packet_bytes")
+                )
+            if "brand_title" in data:
+                settings["brand_title"] = str(data.get("brand_title") or "").strip()[:18]
             for key in ("lan_announce_interval_s", "serial_announce_interval_s"):
                 if key in data:
                     settings[key] = clamp_announce_interval(data.get(key))
@@ -4008,8 +4036,19 @@ class ChatWebServer:
                     asyncio.create_task(self._apply_hub_runtime(settings))
                 if "auto_announce" in data:
                     self._apply_auto_announce_settings(settings)
-                if "probe_interval_s" in data:
+                if any(
+                    k in data
+                    for k in (
+                        "probe_interval_s",
+                        "lan_probe_interval_s",
+                        "serial_probe_interval_s",
+                        "lan_probe_packet_bytes",
+                    )
+                ):
                     self._apply_probe_interval_settings(settings)
+                    if self.discovery:
+                        self.discovery.reset_probe_timers()
+                    self._schedule_peers_broadcast()
                 return web.json_response({
                     "status": "ok",
                     "settings": self._settings_api_payload(settings),
@@ -4025,8 +4064,19 @@ class ChatWebServer:
                 await asyncio.to_thread(self._apply_hub_runtime, settings)
             if "auto_announce" in data:
                 self._apply_auto_announce_settings(settings)
-            if "probe_interval_s" in data:
+            if any(
+                k in data
+                for k in (
+                    "probe_interval_s",
+                    "lan_probe_interval_s",
+                    "serial_probe_interval_s",
+                    "lan_probe_packet_bytes",
+                )
+            ):
                 self._apply_probe_interval_settings(settings)
+                if self.discovery:
+                    self.discovery.reset_probe_timers()
+                self._schedule_peers_broadcast()
             if self.messaging:
                 self.messaging.display_name = effective_display_name(settings)
             if lan_scope_changed and self.websockets and self._loop:

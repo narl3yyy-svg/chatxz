@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from chatxz.core.contacts import (
     _contact_path,
+    _merge_contact_entries,
+    delete_contact,
     find_contact_by_hash,
     list_contacts,
     save_contact,
@@ -77,6 +79,23 @@ class ContactDedupTests(unittest.TestCase):
         self.assertEqual(contacts[0].get("serial_hash"), serial)
         self.assertIsNotNone(find_contact_by_hash(self.tmp, lan))
         self.assertIsNotNone(find_contact_by_hash(self.tmp, serial))
+
+
+    def test_merge_contact_entries_handles_int_port(self):
+        merged = _merge_contact_entries(
+            {"hash": "a" * 32, "port": 8742},
+            {"hash": "a" * 32, "name": "peer"},
+        )
+        self.assertEqual(merged.get("port"), 8742)
+        self.assertEqual(merged.get("name"), "peer")
+
+    def test_delete_contact_by_serial_hash_removes_merged_entry(self):
+        lan = "3428352734b6dcc09472039c449e65b1"
+        serial = "b9033de66c42b63e98d7a18f74db63aa"
+        save_contact(self.tmp, lan, name="330ss", via="lan", custom_name=True)
+        save_contact(self.tmp, serial, name="330ss", via="serial", custom_name=True)
+        self.assertTrue(delete_contact(self.tmp, serial))
+        self.assertEqual(list_contacts(self.tmp), [])
 
 
 if __name__ == "__main__":

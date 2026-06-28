@@ -17,6 +17,9 @@ PROBE_TIMEOUT_S = 3.0
 PROBE_MAX_RTT_MS = 10000
 PROBE_STALE_S = 30
 PROBE_AVG_WINDOW = 6
+PROBE_PACKET_MIN_BYTES = 32
+PROBE_PACKET_MAX_BYTES = 1472
+PROBE_PACKET_DEFAULT_BYTES = 64
 
 
 def clamp_probe_interval(seconds):
@@ -26,6 +29,15 @@ def clamp_probe_interval(seconds):
     except (TypeError, ValueError):
         value = PROBE_INTERVAL_S
     return max(PROBE_INTERVAL_MIN_S, min(PROBE_INTERVAL_MAX_S, value))
+
+
+def clamp_probe_packet_bytes(value):
+    """UDP probe payload size for LAN RTT measurement (32–1472 bytes)."""
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        size = PROBE_PACKET_DEFAULT_BYTES
+    return max(PROBE_PACKET_MIN_BYTES, min(PROBE_PACKET_MAX_BYTES, size))
 
 
 def clamp_announce_interval(seconds):
@@ -79,7 +91,7 @@ def register_probe_ack(probe_id, rtt_ms, source_ip=""):
     return True
 
 
-def _send_udp_probe(sock, host, probe_id, ts):
+def _send_udp_probe(sock, host, probe_id, ts, packet_bytes=PROBE_PACKET_DEFAULT_BYTES):
     payload = {
         "app": "chatxz",
         "type": "probe",
@@ -87,10 +99,13 @@ def _send_udp_probe(sock, host, probe_id, ts):
         "ts": ts,
     }
     packet = MAGIC + json.dumps(payload).encode("utf-8")
+    target = clamp_probe_packet_bytes(packet_bytes)
+    if len(packet) < target:
+        packet += b"\x00" * (target - len(packet))
     sock.sendto(packet, (host, BEACON_PORT))
 
 
-def probe_udp_peer(host, timeout_s=PROBE_TIMEOUT_S):
+def probe_udp_peer(host, timeout_s=PROBE_TIMEOUT_S, packet_bytes=PROBE_PACKET_DEFAULT_BYTES):
     host = (host or "").strip()
     if not host:
         return None
@@ -102,7 +117,7 @@ def probe_udp_peer(host, timeout_s=PROBE_TIMEOUT_S):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.settimeout(0.5)
-        _send_udp_probe(sock, host, probe_id, ts)
+        _send_udp_probe(sock, host, probe_id, ts, packet_bytes=packet_bytes)
         if not event.wait(timeout_s):
             with _pending_lock:
                 _pending_probes.pop(probe_id, None)

@@ -282,7 +282,7 @@ def update_contact_transport_hash(
     with open(path, "w") as fh:
         json.dump(normalize_contact(entry), fh, indent=2)
     if old_clean != file_key:
-        delete_contact(config_dir, old_clean)
+        _unlink_contact_file(config_dir, old_clean)
     return normalize_contact(entry)
 
 
@@ -393,16 +393,32 @@ def save_contact(
         json.dump(existing, fh, indent=2)
     _purge_stale_contact_files(config_dir, existing, file_key)
     if clean != file_key:
-        delete_contact(config_dir, clean)
+        _unlink_contact_file(config_dir, clean)
     return existing
 
 
-def delete_contact(config_dir, peer_hash):
+def _unlink_contact_file(config_dir, peer_hash):
+    """Delete one on-disk contact JSON file (internal; does not load/merge contacts)."""
     path = _contact_path(config_dir, peer_hash)
     if os.path.exists(path):
         os.unlink(path)
         return True
     return False
+
+
+def delete_contact(config_dir, peer_hash):
+    """Remove a saved contact by any stored hash (lan, serial, or legacy file key)."""
+    clean = (peer_hash or "").strip().replace(":", "")
+    if not clean:
+        return False
+    contact = find_contact_by_hash(config_dir, clean)
+    if contact:
+        removed = False
+        for h in _contact_hashes(contact):
+            if _unlink_contact_file(config_dir, h):
+                removed = True
+        return removed
+    return _unlink_contact_file(config_dir, clean)
 
 
 def _purge_stale_contact_files(config_dir, entry, keep_key):
@@ -411,7 +427,7 @@ def _purge_stale_contact_files(config_dir, entry, keep_key):
     removed = []
     for h in _contact_hashes(entry or {}):
         if h and h != keep:
-            if delete_contact(config_dir, h):
+            if _unlink_contact_file(config_dir, h):
                 removed.append(h)
     return removed
 
@@ -476,6 +492,14 @@ def _should_merge_contacts(primary, secondary):
     return False
 
 
+def _contact_field_empty(val):
+    if val is None:
+        return True
+    if isinstance(val, str):
+        return not val.strip()
+    return False
+
+
 def _merge_contact_entries(primary, secondary):
     """Merge two contact records that refer to the same peer."""
     out = normalize_contact(dict(primary or {}))
@@ -483,10 +507,12 @@ def _merge_contact_entries(primary, secondary):
     for key in (
         "hash", "lan_hash", "serial_hash",
         "identity_hash", "lan_identity_hash", "serial_identity_hash",
-        "ip", "port", "name",
+        "ip", "name",
     ):
-        if not (out.get(key) or "").strip() and (other.get(key) or "").strip():
+        if _contact_field_empty(out.get(key)) and not _contact_field_empty(other.get(key)):
             out[key] = other.get(key)
+    if out.get("port") is None and other.get("port") is not None:
+        out["port"] = other.get("port")
     if other.get("custom_name"):
         out["custom_name"] = True
         if (other.get("name") or "").strip():
@@ -573,7 +599,7 @@ def list_contacts(config_dir):
     for orphan in set(orphans):
         keepers = {contact_primary_hash(c) for c in out}
         if orphan not in keepers:
-            delete_contact(config_dir, orphan)
+            _unlink_contact_file(config_dir, orphan)
     return out
 
 
@@ -627,7 +653,7 @@ def migrate_contact_hash(
     with open(path, "w") as fh:
         json.dump(entry, fh, indent=2)
     if old_clean != file_key:
-        delete_contact(config_dir, old_clean)
+        _unlink_contact_file(config_dir, old_clean)
     return True
 
 
@@ -658,7 +684,7 @@ def migrate_contact_by_ip(config_dir, ip, new_hash, name=None, port=None, identi
         )
         new_key = contact_primary_hash(updated) or new_clean
         if old_key and old_key != new_key:
-            delete_contact(config_dir, old_key)
+            _unlink_contact_file(config_dir, old_key)
             removed.append(old_key)
     return removed
 

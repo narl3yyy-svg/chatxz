@@ -73,7 +73,11 @@ class ProbeIntervalTests(unittest.TestCase):
                 with patch.object(server.discovery, "purge_stale_probes", return_value=0):
                     server.discovery.update_peer_probe = MagicMock()
                     server._probe_discovered_peers()
-        udp_probe.assert_called_once_with("10.0.30.10", timeout_s=1.5)
+        udp_probe.assert_called_once()
+        args, kwargs = udp_probe.call_args
+        self.assertEqual(args[0], "10.0.30.10")
+        self.assertEqual(kwargs.get("timeout_s"), 1.5)
+        self.assertIn("packet_bytes", kwargs)
         server.discovery.update_peer_probe.assert_called_once()
 
 

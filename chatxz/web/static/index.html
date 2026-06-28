@@ -596,8 +596,19 @@ body::before {
   width: 38px; height: 38px; border-radius: var(--radius-md);
   cursor: pointer; font-size: 18px; align-items: center; justify-content: center;
 }
+#sidebar-toggle .toggle-bot {
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+  font-size: 10px; letter-spacing: -0.03em; line-height: 1; color: var(--accent);
+}
 #chat-header .peer-info { font-size: 15px; font-weight: 600; }
-#chat-header .peer-info .status { font-size: 12px; color: var(--text3); font-weight: 400; margin-top: 2px; }
+#chat-header .peer-info .status {
+  font-size: 11px; color: var(--text3); font-weight: 400; margin-top: 3px;
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+  word-break: break-all; line-height: 1.35;
+}
+#chat-header .peer-info .status .peer-rtt {
+  font-family: 'Inter', sans-serif; font-size: 10px; margin-left: 4px;
+}
 #disconnect-btn {
   background: var(--danger-soft); border: 1px solid rgba(255,107,122,0.25);
   color: var(--danger); padding: 8px 16px; border-radius: var(--radius-md);
@@ -1411,7 +1422,7 @@ body.android-shell.sidebar-open #sidebar-backdrop {
       </div>
       <input type="file" id="brand-logo-input" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
       <div class="brand-text">
-        <h1>chatxz <span id="header-version" style="font-size:12px;color:var(--text3);font-weight:500"></span></h1>
+        <h1><span id="brand-title">chatxz</span> <span id="header-version" style="font-size:12px;color:var(--text3);font-weight:500"></span></h1>
         <div class="brand-sub">Encrypted mesh messaging</div>
         <div id="identity-box" onclick="openIdentityModal()" title="Your identity — click to manage">Loading...</div>
       </div>
@@ -1528,7 +1539,7 @@ body.android-shell.sidebar-open #sidebar-backdrop {
   <main id="main">
     <div id="chat-header">
       <div class="header-left">
-        <button id="sidebar-toggle" onclick="event.stopPropagation(); toggleSidebar()" title="Toggle sidebar">☰</button>
+        <button id="sidebar-toggle" onclick="event.stopPropagation(); toggleSidebar()" title="Toggle sidebar"><span class="toggle-bot">[=•]=</span></button>
         <div class="peer-info">
           <span id="peer-name">No chat selected</span>
           <div class="status" id="peer-status">Pick a contact or discovered peer</div>
@@ -1647,6 +1658,12 @@ body.android-shell.sidebar-open #sidebar-backdrop {
             <input id="settings-name" placeholder="Your name on the network...">
           </div>
           <div class="settings-section">
+            <label for="settings-brand-title">Sidebar title</label>
+            <input id="settings-brand-title" maxlength="18" placeholder="chatxz"
+              onchange="saveBrandTitle()" onblur="saveBrandTitle()">
+            <p class="field-hint">Custom text in the top-left header (max 18 characters).</p>
+          </div>
+          <div class="settings-section">
             <label>LAN connect hash</label>
             <input id="settings-hash-lan" readonly style="font-family:ui-monospace,monospace;font-size:12px;color:var(--text2)">
             <p class="field-hint">Share this hash for Wi-Fi/Ethernet peers. This is your LAN message destination.</p>
@@ -1725,6 +1742,12 @@ body.android-shell.sidebar-open #sidebar-backdrop {
             <input type="number" id="settings-lan-probe-interval" min="0" max="18000" step="1" value="30"
               onchange="saveLanProbeInterval()" onblur="saveLanProbeInterval()">
             <p class="field-hint">How often to ping LAN discovered peers and refresh RTT. 0 = off, max 18000s.</p>
+          </div>
+          <div class="settings-section">
+            <label for="settings-lan-probe-packet-bytes">LAN ping packet size (bytes)</label>
+            <input type="number" id="settings-lan-probe-packet-bytes" min="32" max="1472" step="1" value="64"
+              onchange="saveLanProbePacketBytes()" onblur="saveLanProbePacketBytes()">
+            <p class="field-hint">UDP probe payload size for RTT measurement (32–1472 bytes).</p>
           </div>
           <div class="settings-section">
             <label for="settings-lan-announce-interval">LAN auto-announce interval (seconds)</label>
@@ -1899,8 +1922,18 @@ let sidebarOpen = true;
 let appPlatform = 'desktop';
 const peerAliasGroups = new Map();
 
+const EMOJI_EXTRA_TERMS = {
+  '😀': 'happy grin smile', '😃': 'happy smile', '😄': 'happy smile', '😁': 'happy grin',
+  '😅': 'happy sweat smile', '😂': 'funny laugh lol joy', '🤣': 'funny rofl laugh',
+  '😊': 'happy blush smile', '😍': 'happy love heart eyes', '🥰': 'happy love hearts',
+  '😢': 'sad cry unhappy tear', '😭': 'sad sob cry unhappy', '😔': 'sad pensive',
+  '😠': 'angry mad', '😡': 'angry rage mad', '🤬': 'angry swear mad',
+  '😴': 'sleep tired', '😎': 'cool sunglasses', '🤡': 'funny clown silly',
+  '❤️': 'love heart red', '💔': 'sad broken heart', '👍': 'thumbs up good', '👎': 'thumbs down bad',
+  '🔥': 'fire hot lit', '💯': 'hundred perfect', '🎉': 'party celebrate', '🙏': 'pray please thanks',
+};
 const EMOJI_SEARCH_GROUPS = [
-  {terms: 'smile happy face grin laugh joy tear wink cool sick mask', from: 0, to: 59},
+  {terms: 'smile happy face grin laugh joy funny tear wink cool sick mask sad', from: 0, to: 59},
   {terms: 'hand wave thumbs clap pray muscle finger point ok peace', from: 60, to: 95},
   {terms: 'heart love romance kiss valentine red pink', from: 96, to: 118},
   {terms: 'plant flower tree leaf sun moon star weather rain snow cloud fire', from: 180, to: 280},
@@ -2211,10 +2244,17 @@ function applySettingsToForm(s, ifaces) {
   if (hubHost) hubHost.value = s.hub_host || '';
   const hubPort = document.getElementById('settings-hub-port');
   if (hubPort) hubPort.value = s.hub_port || 4242;
+  applyBrandTitle(s.brand_title);
+  const brandTitleEl = document.getElementById('settings-brand-title');
+  if (brandTitleEl) brandTitleEl.value = (s.brand_title || '').slice(0, 18);
   const lanProbeEl = document.getElementById('settings-lan-probe-interval');
   if (lanProbeEl) {
     const v = s.lan_probe_interval_s != null ? s.lan_probe_interval_s : s.probe_interval_s;
     lanProbeEl.value = String(v != null ? v : 30);
+  }
+  const lanProbePktEl = document.getElementById('settings-lan-probe-packet-bytes');
+  if (lanProbePktEl) {
+    lanProbePktEl.value = String(s.lan_probe_packet_bytes != null ? s.lan_probe_packet_bytes : 64);
   }
   const serialProbeEl = document.getElementById('settings-serial-probe-interval');
   if (serialProbeEl) {
@@ -2383,6 +2423,30 @@ function clampIntervalInput(el, fallback, max) {
   return sec;
 }
 
+function applyBrandTitle(title) {
+  const el = document.getElementById('brand-title');
+  if (!el) return;
+  const text = (title || '').trim().slice(0, 18) || 'chatxz';
+  el.textContent = text;
+}
+
+function saveBrandTitle() {
+  const el = document.getElementById('settings-brand-title');
+  const title = (el?.value || '').trim().slice(0, 18);
+  if (el) el.value = title;
+  applyBrandTitle(title);
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({brand_title: title}),
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') {
+      window._appSettings = d.settings || {};
+      applyBrandTitle(d.settings?.brand_title);
+    } else toast('Save failed: ' + (d.error || ''));
+  }).catch(() => toast('Save failed'));
+}
+
 function saveLanProbeInterval() {
   const el = document.getElementById('settings-lan-probe-interval');
   const sec = clampIntervalInput(el, 30);
@@ -2394,6 +2458,24 @@ function saveLanProbeInterval() {
     if (d.status === 'ok') {
       window._appSettings = d.settings || {};
       toast(sec ? ('LAN link ping: ' + sec + 's') : 'LAN link ping: off');
+    } else toast('Save failed: ' + (d.error || ''));
+  }).catch(() => toast('Save failed'));
+}
+
+function saveLanProbePacketBytes() {
+  const el = document.getElementById('settings-lan-probe-packet-bytes');
+  let bytes = parseInt(el?.value, 10);
+  if (!Number.isFinite(bytes)) bytes = 64;
+  bytes = Math.max(32, Math.min(1472, bytes));
+  if (el) el.value = String(bytes);
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({lan_probe_packet_bytes: bytes}),
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') {
+      window._appSettings = d.settings || {};
+      toast('LAN ping packet: ' + bytes + ' bytes');
     } else toast('Save failed: ' + (d.error || ''));
   }).catch(() => toast('Save failed'));
 }
@@ -2588,16 +2670,25 @@ function showWelcome() {
 }
 
 function applyLinkRttToDiscovered(hash, rttMs) {
+  if (!hash) return;
   const n = parseInt(rttMs, 10);
-  if (!hash || !Number.isFinite(n) || n < 0) return;
+  const clear = !Number.isFinite(n) || n < 0;
   window._discoveredPeers = (window._discoveredPeers || []).map(p => {
     if (!peersMatch(p.hash, hash) && !peersMatch(p.identity_hash, hash)) return p;
+    if (clear) {
+      const next = {...p};
+      delete next.rtt_ms;
+      delete next.rtt_avg_ms;
+      return next;
+    }
     return {...p, rtt_ms: n, rtt_avg_ms: n};
   });
+  renderDiscovered(window._discoveredPeers || []);
 }
 
 function rttForViewingPeer() {
   if (!viewingPeer) return '';
+  if (!isPeerLinked(viewingPeer, viewingVia)) return '';
   const via = normalizeVia(viewingVia) === 'serial' ? 'serial' : 'lan';
   const contact = allContacts.find(c =>
     peerKey(c.hash) === peerKey(viewingPeer)
@@ -2616,19 +2707,28 @@ function rttForViewingPeer() {
   return formatRtt(p?.rtt_avg_ms || p?.rtt_ms);
 }
 
+function peerInterfaceLabel(via) {
+  const v = normalizeVia(via);
+  if (v === 'serial') return 'USB Serial';
+  if (v === 'lan') return 'LAN';
+  return 'Unknown';
+}
+
 function updatePeerHeader() {
   if (!viewingPeer) return;
   const name = contactNameFor(viewingPeer) || truncateHash(viewingPeer);
-  const rtt = rttForViewingPeer();
+  const linked = isPeerLinked(viewingPeer, viewingVia);
+  const rtt = linked ? rttForViewingPeer() : '';
   const rttBadge = rtt ? `<span class="peer-rtt">${escapeHtml(rtt)}</span>` : '';
   document.getElementById('peer-name').innerHTML = `${escapeHtml(name)}${rttBadge}`;
-  const linked = isPeerLinked(viewingPeer, viewingVia);
   linkPeer = linked ? linkKey(viewingPeer, viewingVia) : null;
-  const transportLabel = viewingVia === 'serial' ? 'USB' : (viewingVia === 'lan' ? 'LAN' : '');
-  const transportHint = transportLabel ? ` · ${transportLabel}` : '';
-  document.getElementById('peer-status').textContent = linked
-    ? `Encrypted · Connected${transportHint}`
-    : 'Viewing history · not connected';
+  const fullHash = peerKey(viewingPeer) || '';
+  const iface = peerInterfaceLabel(viewingVia);
+  const statusEl = document.getElementById('peer-status');
+  if (statusEl) {
+    const conn = linked ? 'Connected' : 'Not connected';
+    statusEl.innerHTML = `${escapeHtml(fullHash)} · ${escapeHtml(iface)} · ${conn}${rttBadge}`;
+  }
   document.getElementById('disconnect-btn').style.display = linked ? 'block' : 'none';
   setLinkStatus(linked ? 'connected' : 'disconnected', linked ? 'Active' : 'Inactive');
   document.getElementById('input-area').style.display = 'block';
@@ -2991,7 +3091,10 @@ function handleWSMessage(msg) {
       pollQueue();
     }
   } else if (msg.type === 'link_closed') {
-    if (msg.data?.peer) setLinkPeer(msg.data.peer, false);
+    if (msg.data?.peer) {
+      setLinkPeer(msg.data.peer, false);
+      applyLinkRttToDiscovered(msg.data.peer, null);
+    }
     if (msg.data?.linked_peers) syncLinkedPeers(msg.data.linked_peers);
     updatePeerHeader();
     if (!linkedPeers.size) {
@@ -4876,7 +4979,14 @@ function saveSettings() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       name, history_retention: retention, received_dir, hub_role, hub_host, hub_port,
-      lan_probe_interval_s, serial_probe_interval_s, lan_announce_interval_s, serial_announce_interval_s,
+      lan_probe_interval_s, serial_probe_interval_s,
+      lan_probe_packet_bytes: (() => {
+        let b = parseInt(document.getElementById('settings-lan-probe-packet-bytes')?.value, 10);
+        if (!Number.isFinite(b)) b = 64;
+        return Math.max(32, Math.min(1472, b));
+      })(),
+      brand_title: (document.getElementById('settings-brand-title')?.value || '').trim().slice(0, 18),
+      lan_announce_interval_s, serial_announce_interval_s,
     })
   }).then(async r => {
     const d = await r.json();
@@ -5352,7 +5462,7 @@ function toggleEmoji() {
 }
 
 function emojiSearchTerms(index, emoji) {
-  const terms = [EMOJI_KEYWORD_MAP[emoji] || ''];
+  const terms = [EMOJI_KEYWORD_MAP[emoji] || '', EMOJI_EXTRA_TERMS[emoji] || ''];
   EMOJI_SEARCH_GROUPS.forEach(g => {
     if (index >= g.from && index <= g.to) terms.push(g.terms);
   });

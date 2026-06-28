@@ -2,6 +2,21 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.5.8] — 2026-06-27
+
+### Fixed
+- **Contact crash** — merging contacts with integer `port` no longer raises `'int' object has no attribute 'strip'`.
+- **Delete contact** — deleting by LAN or serial hash removes the full merged contact and updates the UI immediately.
+- **Stale RTT** — latency clears when the link drops or UDP ping fails (e.g. peer unplugged); header RTT only shows while actually connected.
+- **Probe interval** — changing LAN/serial ping interval takes effect immediately and re-probes on the next cycle.
+
+### Added
+- **Chat header details** — full peer hash and interface type (LAN / USB Serial) shown under the display name.
+- **LAN ping packet size** — configurable UDP probe payload (32–1472 bytes) under Network settings.
+- **Custom sidebar title** — replace “chatxz” in the header (max 18 characters) in Profile settings.
+- **Emoji search** — common terms like happy, sad, and funny match relevant emojis.
+- **Sidebar toggle** — robot-style `[=•]=` button instead of the hamburger menu.
+
 ## [0.5.7] — 2026-06-27
 
 ### Fixed
