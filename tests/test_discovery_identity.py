@@ -142,6 +142,29 @@ class DiscoveryIdentityTests(unittest.TestCase):
         peers = disc.get_peers()
         self.assertEqual(peers, [])
 
+    def test_refresh_stale_entries_drops_old_rows(self):
+        disc = PeerDiscovery()
+        disc.accept_peers = True
+        disc.peers["abcdabcdabcdabcdabcdabcdabcdabcd"] = {
+            "hash": "abcdabcdabcdabcdabcdabcdabcdabcd",
+            "name": "ghost",
+            "last_seen": time.time() - 200,
+            "via": "rns",
+            "ip": "10.0.0.5",
+        }
+        disc.peers["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] = {
+            "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "name": "live",
+            "last_seen": time.time(),
+            "via": "rns",
+            "ip": "10.0.0.6",
+        }
+        removed = disc.refresh_stale_entries(max_age_s=120)
+        self.assertGreaterEqual(removed, 1)
+        hashes = {p["hash"] for p in disc.get_peers()}
+        self.assertNotIn("abcdabcdabcdabcdabcdabcdabcdabcd", hashes)
+        self.assertIn("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", hashes)
+
     def test_out_of_scope_lan_ip_rejected_even_when_usb_up(self):
         disc = PeerDiscovery()
         disc.running = True

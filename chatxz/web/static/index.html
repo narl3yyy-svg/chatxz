@@ -185,6 +185,16 @@ body::before {
   background: rgba(255,255,255,0.04); padding: 2px 8px;
   border-radius: 99px;
 }
+.section-actions {
+  display: flex; align-items: center; gap: 6px;
+}
+.section-refresh-btn {
+  background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+  color: var(--text3); border-radius: 99px; width: 26px; height: 22px;
+  font-size: 12px; line-height: 1; cursor: pointer; padding: 0;
+}
+.section-refresh-btn:hover { color: var(--text); border-color: var(--primary); }
+.section-refresh-btn:disabled { opacity: 0.45; cursor: wait; }
 .search-box {
   position: relative; margin-bottom: 12px;
 }
@@ -1697,7 +1707,10 @@ body.android-shell.sidebar-open #sidebar-backdrop {
 
         <div class="section-header" style="margin-top:16px">
           <h3>Discovered</h3>
-          <span class="section-count" id="discovered-count">0</span>
+          <div class="section-actions">
+            <button type="button" class="section-refresh-btn" id="discovered-refresh-btn" onclick="refreshDiscoveredPeers()" title="Refresh discovered peers (re-probe LAN, drop stale)">↻</button>
+            <span class="section-count" id="discovered-count">0</span>
+          </div>
         </div>
         <div id="discovered-list"></div>
       </div>
@@ -2779,7 +2792,10 @@ function saveSerialAnnounceInterval() {
 }
 
 function setupVisibilitySync() {
-  const sync = () => syncUiState();
+  const sync = () => {
+    syncUiState();
+    if (!document.hidden) refreshDiscoveredPeers({quiet: true});
+  };
   document.addEventListener('visibilitychange', sync);
   window.addEventListener('focus', sync);
   window.addEventListener('blur', sync);
@@ -3627,13 +3643,45 @@ function cancelTransfer() {
   }).catch(() => toast('Cancel failed'));
 }
 
+let discoverRefreshInFlight = false;
+
+function refreshDiscoveredPeers(opts) {
+  opts = opts || {};
+  if (discoverRefreshInFlight) return Promise.resolve();
+  discoverRefreshInFlight = true;
+  const btn = document.getElementById('discovered-refresh-btn');
+  if (btn) btn.disabled = true;
+  const url = opts.quiet ? '/api/discover?refresh=1&authoritative=1' : '/api/discover/refresh';
+  const req = opts.quiet
+    ? fetch(url).then(r => r.json())
+    : fetch(url, {method: 'POST'}).then(r => r.json());
+  return req
+    .then(d => {
+      const peers = d.peers || [];
+      renderDiscovered(peers, {authoritative: true});
+      if (!opts.quiet && d.status === 'ok') {
+        const removed = Number(d.removed || 0);
+        const hint = removed ? `, ${removed} stale removed` : '';
+        toast(`Discovered list refreshed (${peers.length} peer${peers.length !== 1 ? 's' : ''}${hint})`);
+      }
+      return d;
+    })
+    .catch(() => {
+      if (!opts.quiet) toast('Refresh failed — server not reachable');
+    })
+    .finally(() => {
+      discoverRefreshInFlight = false;
+      if (btn) btn.disabled = false;
+    });
+}
+
 function startPeerPolling() {
   if (peersPollTimer) clearInterval(peersPollTimer);
   peersPollTimer = setInterval(() => {
-    fetch('/api/discover')
+    fetch('/api/discover?authoritative=1')
       .then(r => r.json())
       .then(d => {
-        renderDiscovered(d.peers);
+        renderDiscovered(d.peers || [], {authoritative: !!d.authoritative});
       })
       .catch(() => {});
     pollTemperature();
@@ -3997,9 +4045,15 @@ function renderDiscovered(peers, opts) {
       return;
     }
   }
-  const merged = mergeDiscoveredPeers(prev, peers);
-  if (merged.length) window._discoveredPeersAt = Date.now();
-  window._discoveredPeers = merged.length ? merged : peers;
+  let nextPeers;
+  if (opts.authoritative) {
+    nextPeers = filterPhantomSerialPeers(peers);
+  } else {
+    const merged = mergeDiscoveredPeers(prev, peers);
+    nextPeers = merged.length ? merged : peers;
+  }
+  if (nextPeers.length) window._discoveredPeersAt = Date.now();
+  window._discoveredPeers = nextPeers;
   syncContactIpsFromDiscovered(window._discoveredPeers);
   const el = document.getElementById('discovered-list');
   el.innerHTML = '';
@@ -5120,7 +5174,7 @@ function filterPhantomSerialPeers(peers) {
 }
 
 function mergeDiscoveredPeers(prev, incoming) {
-  if (!incoming || !incoming.length) return filterPhantomSerialPeers(prev || []);
+  if (!incoming || !incoming.length) return [];
   const byKey = {};
   (prev || []).forEach(p => {
     const k = peerMergeKey(p);
@@ -6066,6 +6120,7 @@ let callOpusEncodeTs = 0;
 let callBrowserOpusOk = null;
 let callOpusRecvPrimed = false;
 let callNativeWatchId = null;
+let callForceBrowserPlayback = false;
 let callDecodeSeqByTs = new Map();
 let callSeqJitter = new Map();
 let callSeqNext = null;
@@ -6139,6 +6194,7 @@ function resetCallUi(opts) {
   callBrowserOpusOk = null;
   callOpusRecvPrimed = false;
   callServerStats = {};
+  callForceBrowserPlayback = false;
   if (isAndroidShell()) {
     window.chatxzAndroid?.setCallActive?.(false);
     window.chatxzAndroid?.setSpeakerphone?.(false);
@@ -6399,11 +6455,18 @@ function updateCallDashboard() {
 }
 
 function useNativeCallAudio() {
+  if (callForceBrowserPlayback) return false;
   if (callServerStats && callServerStats.running && callServerStats.engine === 'native-opus') {
-    return true;
+    if (!isAndroidShell()) return true;
+    const outN = Number(callServerStats.frames_sent || callServerStats.audio_out || 0);
+    const inN = Number(callServerStats.frames_recv || callServerStats.audio_in || 0);
+    if (outN > 0 || inN > 0) return true;
+    if (callStartedAt && (Date.now() - callStartedAt) < 6000) return true;
+    return false;
   }
   return !!(isAndroidShell() && callServerStats && callServerStats.state === 'active'
-    && callServerStats.native_android);
+    && callServerStats.native_android
+    && callStartedAt && (Date.now() - callStartedAt) < 6000);
 }
 
 function nativeCallAudioCapable() {
@@ -6904,16 +6967,35 @@ function primeCallPlayback() {
 function scheduleCallNativeFallbackWatchdog() {
   clearCallNativeWatchdog();
   callNativeWatchId = setTimeout(async () => {
-    if (callState !== 'active' || callCaptureNode) return;
+    if (callState !== 'active') return;
     try {
       const st = await callApi({action: 'status'});
       if (st && !st.error) callServerStats = st;
     } catch (_) {}
     const sent = Number(callServerStats.frames_sent || callServerStats.audio_out || 0);
+    const recv = Number(callServerStats.frames_recv || callServerStats.audio_in || 0);
     const peak = Number(callServerStats.mic_peak_max || 0);
-    if (useNativeCallAudio() && (sent === 0 || (sent > 30 && peak === 0))) {
+    const nativeActive = !!(callServerStats.running && callServerStats.engine === 'native-opus');
+    if (!nativeActive && !callCaptureNode && isAndroidShell()) {
+      toast('Native audio unavailable — switching to browser Opus');
+      await startCallCapture({forceBrowser: true});
+      return;
+    }
+    if (nativeActive && sent === 0 && recv === 0 && isAndroidShell()) {
+      toast('Native audio stalled — switching to browser Opus');
+      callForceBrowserPlayback = true;
+      await startCallCapture({forceBrowser: true});
+      return;
+    }
+    if (callCaptureNode) return;
+    if (nativeActive && (sent === 0 || (sent > 30 && peak === 0))) {
       toast('Native mic silent — switching to browser Opus');
       await startCallCapture({forceBrowser: true});
+      return;
+    }
+    if (nativeActive && recv === 0 && sent > 0) {
+      callForceBrowserPlayback = true;
+      primeCallPlayback();
     }
   }, 4000);
 }
@@ -6941,6 +7023,7 @@ function toggleCallSpeaker() {
 
 async function startCallCapture(opts) {
   const forceBrowser = !!(opts && opts.forceBrowser);
+  if (forceBrowser) callForceBrowserPlayback = true;
   if (callCaptureNode) return true;
   stopCallRingtone();
   if (!isAndroidShell() && !window.isSecureContext) {

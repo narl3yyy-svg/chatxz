@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — each transport uses its own RNS identity, and messages travel over encrypted links on your LAN (Wi‑Fi, Ethernet, USB serial).
 
-**Current version:** 0.9.1
+**Current version:** 0.9.5
 
 ## How chatxz works (v0.5+)
 
@@ -32,6 +32,7 @@ chatxz treats **LAN** and **USB serial** as **separate endpoints** on the same d
 | **Announce LAN** | RNS announce + UDP beacon on your pinned IPv4 |
 | **Announce Serial** | RNS announce on USB (shown when serial is online) |
 | Tap **Discovered** row | Opens chat on that transport |
+| **↻** (Discovered header) | Refresh discovered peers — re-probe LAN, drop stale hashes |
 | Tap **contact sub-row** | Opens chat on LAN or USB for that saved peer |
 
 ### Settings → Network
@@ -48,10 +49,11 @@ Regenerate identities under **Settings → Profile** (**Regenerate LAN** / **Reg
 
 - **Serial peer missing after Announce** — tap **Announce Serial** (not LAN only); ensure USB serial is online in Settings → Network.
 - **Two rows for one name** — expected when a peer has both LAN and USB; both stay visible in Discovered (v0.5.1+).
+- **Stale discovered peers** — tap **↻** next to Discovered (or bring the app to foreground on Android) to refresh; use **Announce LAN** if no peers appear.
 - **Android sleep** — tap the contact to wake and reconnect (LAN wake is automatic).
 - **Cross-subnet LAN** — pick matching pinned IPv4 on both devices.
 
-**Voice calls:** when connected to a peer, tap **📞** in the chat header for a live duplex **Opus** call over RNS (LAN or USB). All voice code is under `chatxz/core/audio/` — Opus 48 kHz / 20 ms frames, adaptive jitter buffer, threaded capture/playback on desktop. See **[docs/VOICE.md](docs/VOICE.md)**.
+**Voice calls:** when connected to a peer, tap **📞** in the chat header for a live duplex **Opus** call over RNS (LAN or USB). All voice code is under `chatxz/core/audio/` — Opus 48 kHz / 20 ms frames, adaptive jitter buffer, threaded capture/playback on desktop. If native audio stalls, the UI automatically falls back to browser Opus. See **[docs/VOICE.md](docs/VOICE.md)**.
 
 | Platform | Audio path |
 |----------|------------|
@@ -297,6 +299,8 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.9.5** — **Discovered refresh:** sidebar ↻ re-probes LAN and drops stale peer hashes; authoritative list on Android foreground; voice call audio flush + browser Opus fallback when native stalls
+- **v0.9.4** — **Call reliability:** hang-up no longer deadlocks on ALSA init; invite blocked when link down; macOS `run.sh` empty-array fix
 - **v0.8.3** — **Voice calls fixed:** seq-ordered jitter + PLC on all platforms; Android MediaCodec decode fix; Linux PulseAudio mic selection; speakerphone; keyboard stays open after send
 - **v0.8.2** — **Voice reliability:** PulseAudio-aware mic/output pick; silent-mic browser fallback; call hang-up cleanup
 - **v0.8.1** — **Opus cleanup:** removed μ-law call paths; `docs/VOICE.md` architecture guide

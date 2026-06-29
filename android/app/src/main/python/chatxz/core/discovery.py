@@ -346,6 +346,21 @@ class PeerDiscovery:
             self._remove_peer_entry(key)
         return len(removed)
 
+    def refresh_stale_entries(self, max_age_s=120, probe_stale_s=15, max_failures=2):
+        """Aggressive eviction for manual sidebar refresh (drops ghosts, old hashes)."""
+        removed = self.purge_stale_probes(
+            stale_s=probe_stale_s,
+            max_failures=max_failures,
+        )
+        now = time.time()
+        for key in list(self.peers.keys()):
+            peer = self.peers.get(key) or {}
+            last_seen = float(peer.get("last_seen") or 0)
+            if last_seen and (now - last_seen) > max_age_s:
+                self._remove_peer_entry(key)
+                removed += 1
+        return removed
+
     def purge_ipless_non_serial(self):
         """Drop LAN/beacon peers with no in-scope IP (ghost entries when USB is up)."""
         removed = 0

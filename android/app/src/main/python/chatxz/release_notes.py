@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.9.5": [
+        "Discovered list refresh: tap ↻ beside Discovered to re-probe LAN and drop stale peer hashes.",
+        "Android foreground refresh updates the discovered list automatically when you return to the app.",
+        "Voice calls: early Opus frames no longer lost on Android; browser Opus fallback when native audio stalls.",
+    ],
     "0.9.0": [
         "Voice system rewritten: all call audio code consolidated under chatxz/core/audio/.",
         "Desktop engine uses dedicated capture/playback threads (reliable stop and Ctrl+C during calls).",

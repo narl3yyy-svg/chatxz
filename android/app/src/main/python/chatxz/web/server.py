@@ -2550,6 +2550,7 @@ class ChatWebServer:
         if ok:
             self._android_call_audio = True
             print("[call-audio] Android native Opus engine started")
+            self._flush_pending_call_audio()
         else:
             android_call_audio.clear_handlers()
             print("[call-audio] Android native engine unavailable — browser Opus fallback")
@@ -2564,13 +2565,44 @@ class ChatWebServer:
         android_call_audio.clear_handlers()
         self._android_call_audio = False
 
-    def _flush_pending_call_audio(self):
+    def _native_playback_active(self):
+        if getattr(self, "_android_call_audio", False):
+            return True
         engine = self.call_audio_engine
-        if not engine:
-            self._pending_call_audio.clear()
-            return
+        return bool(engine and engine.is_running())
+
+    def _android_call_stats(self):
+        stats = {
+            "engine": "native-opus",
+            "native_android": True,
+            "running": True,
+            "codec": OPUS_CODEC,
+        }
+        try:
+            from java import jclass
+            engine = jclass("com.chatxz.android.CallAudioEngine").getInstance()
+            stats["frames_sent"] = int(engine.getFramesEncoded())
+            stats["frames_recv"] = int(engine.getFramesDecoded())
+        except Exception:
+            pass
+        return stats
+
+    def _flush_pending_call_audio(self):
         pending = list(self._pending_call_audio)
         self._pending_call_audio.clear()
+        if not pending:
+            return
+        if getattr(self, "_android_call_audio", False):
+            from chatxz.core.audio import android as android_call_audio
+            for seq, data, codec in pending:
+                try:
+                    android_call_audio.play_incoming_opus(seq, data)
+                except Exception:
+                    pass
+            return
+        engine = self.call_audio_engine
+        if not engine:
+            return
         for seq, data, codec in pending:
             try:
                 engine.receive_frame(seq, data, codec)
@@ -2688,11 +2720,14 @@ class ChatWebServer:
             self._ws_call_audio_sent = 0
             self._call_stats_last_key = None
             if not self.call_audio_engine and not getattr(self, "_android_call_audio", False):
-                threading.Thread(
-                    target=self._start_call_audio_engine,
-                    name="call-audio-start",
-                    daemon=True,
-                ).start()
+                if is_android():
+                    self._start_call_audio_engine()
+                else:
+                    threading.Thread(
+                        target=self._start_call_audio_engine,
+                        name="call-audio-start",
+                        daemon=True,
+                    ).start()
         elif event in ("ended", "rejected"):
             self._ws_call_audio_sent = 0
             self._call_stats_last_key = None
@@ -2708,9 +2743,7 @@ class ChatWebServer:
         if not (self.websockets and self._loop):
             return
         data = {"peer": peer_hash or "", **payload}
-        if event == "audio" and (
-            self.call_audio_engine or getattr(self, "_android_call_audio", False)
-        ):
+        if event == "audio" and self._native_playback_active():
             data["native_playback"] = True
         asyncio.run_coroutine_threadsafe(
             self._broadcast({"type": f"call_{event}", "data": data}),
@@ -4985,12 +5018,7 @@ class ChatWebServer:
             if self.call_audio_engine:
                 st.update(self.call_audio_engine.stats())
             if getattr(self, "_android_call_audio", False):
-                st.update({
-                    "engine": "native-opus",
-                    "native_android": True,
-                    "running": True,
-                    "codec": OPUS_CODEC,
-                })
+                st.update(self._android_call_stats())
             return web.json_response(st)
 
         if action == "invite":
@@ -5498,8 +5526,33 @@ class ChatWebServer:
                 last_snapshot = snapshot
                 await self._broadcast({"type": "peers", "data": peers})
 
-    async def handle_discover(self, request):
+    async def _refresh_discovery(self, *, force=False):
+        """Re-probe LAN, evict stale rows, and return the current scoped peer list."""
+        removed = 0
+        if self.discovery:
+            if force:
+                removed = self.discovery.refresh_stale_entries()
+            self.discovery.purge_misclassified_serial()
+            self.discovery.purge_ipless_non_serial()
+        settings = self.load_settings()
+        if self.lan_beacon and lan_discovery_configured(settings.get("rns_interfaces")):
+            try:
+                await asyncio.to_thread(self.lan_beacon.send, 1, is_android())
+            except Exception:
+                pass
+        await asyncio.to_thread(self._probe_discovered_peers)
         peers = self._scoped_peers()
+        if removed and self.websockets and self._loop:
+            await self._broadcast_peers(authoritative=True)
+        return peers, removed
+
+    async def handle_discover(self, request):
+        force = request.rel_url.query.get("refresh", "").lower() in ("1", "true", "yes")
+        authoritative = request.rel_url.query.get("authoritative", "").lower() in ("1", "true", "yes")
+        if force:
+            peers, _ = await self._refresh_discovery(force=True)
+        else:
+            peers = self._scoped_peers()
         if self.active_peer and not any(p.get("hash", "").replace(":", "") == self.active_peer for p in peers):
             peers.append({
                 "hash": self.active_peer,
@@ -5507,7 +5560,27 @@ class ChatWebServer:
                 "app": "chatxz",
                 "connected": True,
             })
-        return web.json_response({"peers": peers})
+        payload = {"peers": peers}
+        if authoritative or force:
+            payload["authoritative"] = True
+        return web.json_response(payload)
+
+    async def handle_discover_refresh(self, request):
+        peers, removed = await self._refresh_discovery(force=True)
+        if self.active_peer and not any(p.get("hash", "").replace(":", "") == self.active_peer for p in peers):
+            peers.append({
+                "hash": self.active_peer,
+                "name": self.active_peer[:8],
+                "app": "chatxz",
+                "connected": True,
+            })
+        return web.json_response({
+            "status": "ok",
+            "peers": peers,
+            "authoritative": True,
+            "removed": removed,
+            "discovered_count": len(peers),
+        })
 
     async def _handle_ws_message(self, ws, data):
         msg_type = data.get("type")
@@ -5901,12 +5974,7 @@ class ChatWebServer:
         if self.call_audio_engine:
             st.update(self.call_audio_engine.stats())
         if getattr(self, "_android_call_audio", False):
-            st.update({
-                "engine": "native-opus",
-                "native_android": True,
-                "running": True,
-                "codec": OPUS_CODEC,
-            })
+            st.update(self._android_call_stats())
         return st
 
     async def _broadcast_call_stats(self, force=False):
@@ -6042,6 +6110,7 @@ class ChatWebServer:
         app.router.add_post("/api/history/clear", self.handle_history_clear)
         app.router.add_delete("/api/history/{msg_id}", self.handle_delete_message)
         app.router.add_get("/api/discover", self.handle_discover)
+        app.router.add_post("/api/discover/refresh", self.handle_discover_refresh)
         app.router.add_get("/api/debug", self.handle_debug)
         app.router.add_post("/api/debug/export", self.handle_debug_export)
         app.router.add_get("/api/settings", self.handle_settings_get)

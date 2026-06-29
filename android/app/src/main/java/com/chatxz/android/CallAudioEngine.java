@@ -57,6 +57,8 @@ public final class CallAudioEngine {
     private boolean jitterPrimed;
     private short[] lastPcm = new short[FRAME_SAMPLES];
     private long encodePtsUs;
+    private int framesEncoded;
+    private int framesDecoded;
 
     public static synchronized CallAudioEngine getInstance() {
         if (instance == null) {
@@ -97,6 +99,8 @@ public final class CallAudioEngine {
             initTrack();
             running = true;
             encodePtsUs = 0;
+            framesEncoded = 0;
+            framesDecoded = 0;
             resetJitter();
             captureThread = new Thread(this::captureLoop, "chatxz-call-cap");
             playbackThread = new Thread(this::playbackLoop, "chatxz-call-play");
@@ -160,6 +164,14 @@ public final class CallAudioEngine {
         return speakerphone;
     }
 
+    public synchronized int getFramesEncoded() {
+        return framesEncoded;
+    }
+
+    public synchronized int getFramesDecoded() {
+        return framesDecoded;
+    }
+
     public void playOpus(int seq, String b64) {
         if (!running || b64 == null || b64.isEmpty() || decoder == null) {
             return;
@@ -220,6 +232,7 @@ public final class CallAudioEngine {
                 Integer queuedSeq = pendingInputSeqs.pollFirst();
                 int playSeq = queuedSeq != null ? queuedSeq : mappedSeq;
                 enqueueJitter(playSeq, pcm);
+                framesDecoded++;
             }
             decoder.releaseOutputBuffer(outIndex, false);
         }
@@ -349,6 +362,7 @@ public final class CallAudioEngine {
                 out.get(packet);
                 String b64 = Base64.encodeToString(packet, Base64.NO_WRAP);
                 deliverToPython(b64);
+                framesEncoded++;
             }
             encoder.releaseOutputBuffer(outIndex, false);
         }

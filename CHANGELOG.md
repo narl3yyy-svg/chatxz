@@ -2,6 +2,16 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.5] — 2026-06-29
+
+### Added
+- **Discovered refresh** — sidebar ↻ button and `POST /api/discover/refresh` re-probe LAN, evict stale peer rows, and replace the list authoritatively (also runs quietly when the app returns to foreground on Android).
+
+### Fixed
+- **Stale discovered peers** — authoritative polls no longer merge ghosts; empty polls drop old rows instead of keeping them forever.
+- **Voice calls silent** — flush early Opus frames to Android native playback after engine start; start Android audio synchronously on accept; browser Opus fallback when native stalls; `native_playback` only when engine is actually running.
+- **Android call stats** — native frame counters exposed for mic/playback watchdog.
+
 ## [0.9.4] — 2026-06-29
 
 ### Fixed
