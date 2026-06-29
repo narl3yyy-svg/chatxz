@@ -2,6 +2,12 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.10] — 2026-06-29
+
+### Fixed
+- **Call drop on TCP blip** — voice calls survive ~4s of link loss during RNS TCP reconnect (was 5 frames / ~100ms); call audio falls back across all ACTIVE peer links even when TCP interface is briefly unhealthy.
+- **Beacon noise** — suppress transient `Network is unreachable` broadcast errors during LAN flap.
+
 ## [0.9.9] — 2026-06-29
 
 ### Fixed

@@ -299,6 +299,10 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.9.10** — **Call stability:** voice calls survive TCP reconnect blips (~4s grace); auto-install libopus on Windows/Mac via `run.bat` / `./run.sh`
+- **v0.9.9** — **macOS libopus:** Homebrew auto-install + bundle into `chatxz/core/native/macos/`
+- **v0.9.8** — **Win↔Mac voice:** bidirectional Opus; browser mic when native receive-only; playback resampling
+- **v0.9.7** — **Auto voice deps:** `run.bat` / `./run.sh` install PyAudio + libopus; expanded uninstall scripts
 - **v0.9.6** — **Voice mic fix:** Mac/Windows libopus loading; LAN-IP mic banner (use localhost for calls); browser Opus fallback when native unavailable; macOS `brew install opus`
 - **v0.9.5** — **Discovered refresh:** sidebar ↻ re-probes LAN and drops stale peer hashes; authoritative list on Android foreground; voice call audio flush + browser Opus fallback when native stalls
 - **v0.9.4** — **Call reliability:** hang-up no longer deadlocks on ALSA init; invite blocked when link down; macOS `run.sh` empty-array fix

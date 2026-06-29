@@ -202,11 +202,48 @@ def test_call_send_audio_auto_ends_without_link():
     mb._call_link_for_peer = lambda *a, **k: None
     ended = []
     mb.call_end = lambda call_id=None: ended.append(True) or True
-    for _ in range(4):
+    for _ in range(20):
         assert mb.call_send_audio("AAAA", "audio/opus;rate=48000") is False
     assert len(ended) == 0
+    mb._call_link_fail_since = time.monotonic() - 5.0
     assert mb.call_send_audio("AAAA", "audio/opus;rate=48000") is False
     assert len(ended) == 1
+
+
+def test_call_link_prefers_healthy_but_allows_degraded_active():
+    from chatxz.core.messaging import MessagingBackend
+    from types import SimpleNamespace
+    import RNS
+
+    mb = MessagingBackend.__new__(MessagingBackend)
+    peer = "kk" * 16
+    mb.dest_hash_for = lambda h: h
+    mb.links = {}
+    mb.active_link = None
+    healthy = SimpleNamespace(
+        status=RNS.Link.ACTIVE,
+        link_id="healthy",
+        get_remote_identity=lambda: None,
+    )
+    degraded = SimpleNamespace(
+        status=RNS.Link.ACTIVE,
+        link_id="degraded",
+        get_remote_identity=lambda: None,
+    )
+    mb._link_for_peer = lambda *a, **k: degraded
+    mb._find_active_link_for_peer = lambda *a, **k: healthy
+    mb._peer_hash_from_link_identity = lambda link: peer
+    mb.hashes_equivalent = lambda a, b: a == b
+    mb._link_attached_interface = lambda link: link
+    mb._link_interface_healthy = lambda link: link is healthy
+    mb._interface_path_score = lambda iface: 95 if iface is healthy else 0
+    picked = mb._call_link_for_peer(peer, "lan")
+    assert picked is healthy
+    mb._link_for_peer = lambda *a, **k: None
+    mb._find_active_link_for_peer = lambda *a, **k: degraded
+    mb._link_interface_healthy = lambda link: False
+    picked = mb._call_link_for_peer(peer, "lan")
+    assert picked is degraded
 
 
 def test_call_audio_rejects_non_opus_codec():

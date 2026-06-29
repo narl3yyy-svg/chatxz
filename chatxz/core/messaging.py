@@ -5362,18 +5362,59 @@ class MessagingBackend:
                 self._current_transfer_id = None
         return callback
 
+    def _iter_call_links_for_peer(self, peer_hash, transport=None):
+        """All ACTIVE links to peer — includes paths with briefly unhealthy TCP."""
+        peer = self.dest_hash_for(peer_hash)
+        if not peer or peer == "unknown":
+            return []
+        seen = set()
+        ordered = []
+
+        def add(link):
+            if not link:
+                return
+            lid = getattr(link, "link_id", None) or id(link)
+            if lid in seen:
+                return
+            seen.add(lid)
+            ordered.append(link)
+
+        add(self._link_for_peer(peer, transport=transport))
+        add(self._find_active_link_for_peer(peer))
+        if self.active_link:
+            ap = self._peer_hash_from_link_identity(self.active_link)
+            if ap and self.hashes_equivalent(ap, peer):
+                add(self.active_link)
+        for link in list(self.links.values()):
+            try:
+                if link.status != RNS.Link.ACTIVE:
+                    continue
+            except Exception:
+                continue
+            lp = self._peer_hash_from_link_identity(link)
+            if lp and self.hashes_equivalent(lp, peer):
+                add(link)
+        return ordered
+
     def _call_link_for_peer(self, peer_hash, transport=None):
         peer = self.dest_hash_for(peer_hash)
         if not peer or peer == "unknown":
             return None
-        link = self._link_for_peer(peer, transport=transport)
-        if link and self._link_interface_healthy(link):
-            return link
-        if self._peer_link_active(peer):
-            active = self._link_for_peer(peer) or self.active_link
-            if active and self._link_interface_healthy(active):
-                return active
-        return None
+        best = None
+        best_score = -1
+        for link in self._iter_call_links_for_peer(peer, transport):
+            try:
+                if link.status != RNS.Link.ACTIVE:
+                    continue
+            except Exception:
+                continue
+            iface = self._link_attached_interface(link)
+            healthy = self._link_interface_healthy(link)
+            score = self._interface_path_score(iface) if healthy else 25
+            if score > best_score:
+                best_score = score
+                best = link
+        return best
 
     def _emit_call_event(self, event, peer_hash, payload=None):
         if not self.on_call_event:
@@ -5567,6 +5608,8 @@ class MessagingBackend:
     def _reset_call_audio_counters(self):
         self._call_audio_sent = 0
         self._call_audio_recv = 0
+        self._call_send_link_fails = 0
+        self._call_link_fail_since = None
 
     def call_invite(self, peer_hash, transport="lan"):
         peer = self.dest_hash_for(peer_hash)
@@ -5666,14 +5709,28 @@ class MessagingBackend:
         cid = call_id or self.voice_call.call_id
         link = self._call_link_for_peer(peer, self.voice_call.transport)
         if not link:
+            now = time.monotonic()
             fails = int(getattr(self, "_call_send_link_fails", 0) or 0) + 1
             self._call_send_link_fails = fails
-            if fails == 1:
-                print(f"[call] No link to {peer[:16] if peer else '?'}... — ending call")
-            if fails >= 5 and not getattr(self, "_call_ending", False):
+            fail_since = getattr(self, "_call_link_fail_since", None)
+            if fail_since is None:
+                self._call_link_fail_since = now
+                print(
+                    f"[call] No link to {peer[:16] if peer else '?'}... "
+                    f"(waiting for reconnect)"
+                )
+            elif (
+                (now - float(fail_since)) >= 4.0
+                and not getattr(self, "_call_ending", False)
+            ):
+                print(
+                    f"[call] No link to {peer[:16] if peer else '?'}... "
+                    f"— ending call after reconnect timeout"
+                )
                 self.call_end()
             return False
         self._call_send_link_fails = 0
+        self._call_link_fail_since = None
         link_mtu = int(getattr(link, "mtu", 1064) or 1064)
         chunks = split_call_audio_b64(
             audio_b64,
