@@ -392,11 +392,50 @@ def _probe_read(stream, frame_count: int, timeout: float = 1.5) -> Tuple[Optiona
     return result[0], int(result[1] or 0), None
 
 
-def probe_input_device(pa, fmt, rate: int, frame_count: int) -> Tuple[Optional[int], Optional[str], List[Tuple[int, str, int]]]:
+def pick_input_device(pa) -> Tuple[Optional[int], Optional[str], List[Tuple[int, str, int]]]:
+    """Rank-only mic pick (no stream open). Safe when ALSA/Pulse is flaky."""
+    ranked = rank_devices(pa, input_device=True)
+    if not ranked:
+        return None, None, []
+    idx, name, score = ranked[0]
+    print(f"[call-audio] Selected input [{idx}] score={score}: {name}")
+    return idx, name, ranked
+
+
+def _open_stream_with_timeout(pa, timeout: float = 3.0, **kwargs):
+    """Open a PyAudio stream in a helper thread so ALSA cannot block forever."""
+    result: List[object] = [None, None]
+
+    def _open():
+        try:
+            result[0] = pa.open(**kwargs)
+        except Exception as exc:
+            result[1] = exc
+
+    thread = threading.Thread(target=_open, name="call-audio-open", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise TimeoutError(f"PyAudio open timed out after {timeout}s")
+    if result[1]:
+        raise result[1]
+    return result[0]
+
+
+def probe_input_device(
+    pa,
+    fmt,
+    rate: int,
+    frame_count: int,
+    *,
+    skip_probe: bool = False,
+) -> Tuple[Optional[int], Optional[str], List[Tuple[int, str, int]]]:
     """Return (index, name, full_ranked_list). Picks best device even without probe signal."""
     ranked = rank_devices(pa, input_device=True)
     if not ranked:
         return None, None, []
+    if skip_probe or pulse_capture_bypass():
+        return pick_input_device(pa)
     bypass = pulse_capture_bypass()
     default_pick = None
     if not bypass:
@@ -405,10 +444,12 @@ def probe_input_device(pa, fmt, rate: int, frame_count: int) -> Tuple[Optional[i
             None,
         )
     best_silent = default_pick or ranked[0]
-    for idx, name, score in ranked[:6]:
+    for idx, name, score in ranked[:3]:
         stream = None
         try:
-            stream = pa.open(
+            stream = _open_stream_with_timeout(
+                pa,
+                timeout=2.0,
                 format=fmt,
                 channels=1,
                 rate=rate,

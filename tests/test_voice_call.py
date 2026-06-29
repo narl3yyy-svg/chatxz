@@ -148,6 +148,25 @@ def test_call_glare_we_win_lexicographic():
     assert mb._call_glare_we_win("00000000-000") is False
 
 
+def test_call_end_notifies_peer_when_already_idle():
+    from chatxz.core.messaging import MessagingBackend, CALL_END
+
+    mb = MessagingBackend.__new__(MessagingBackend)
+    mb.voice_call = VoiceCallSession()
+    peer = "ii" * 16
+    sent = []
+
+    def fake_send(peer_hash, msg_type, payload, transport=None):
+        sent.append((msg_type, payload.get("call_id")))
+        return True
+
+    mb._send_call_packet = fake_send
+    mb._emit_call_event = lambda *a, **k: None
+    assert mb.call_end(call_id="abc-123", peer_hash=peer, transport="lan")
+    assert mb.voice_call.state == STATE_IDLE
+    assert sent == [(CALL_END, "abc-123")]
+
+
 def test_call_end_sends_end_while_active_then_resets():
     from chatxz.core.messaging import MessagingBackend, CALL_END
 

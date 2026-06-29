@@ -181,6 +181,28 @@ def test_engine_stop_fast_does_not_block():
     assert not engine._recv_ready.is_set()
 
 
+def test_pick_input_device_no_probe():
+    from chatxz.core.audio import devices
+
+    class FakePa:
+        def get_device_count(self):
+            return 2
+
+        def get_device_info_by_index(self, i):
+            if i == 0:
+                return {"name": "HDA Analog (hw:0,0)", "maxInputChannels": 2, "maxOutputChannels": 2}
+            return {"name": "HDA Alt Analog (hw:0,2)", "maxInputChannels": 2, "maxOutputChannels": 0}
+
+    devices._PULSE_CAPTURE_BYPASS = True
+    try:
+        idx, name, ranked = devices.pick_input_device(FakePa())
+        assert idx == 1
+        assert "Alt Analog" in name
+        assert ranked
+    finally:
+        devices._PULSE_CAPTURE_BYPASS = False
+
+
 def test_prepare_linux_audio_no_crash():
     from chatxz.core.audio.devices import prepare_linux_audio
     prepare_linux_audio()

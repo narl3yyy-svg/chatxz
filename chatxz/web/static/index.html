@@ -7151,18 +7151,22 @@ async function endVoiceCall() {
     window.chatxzAndroid?.setCallActive?.(false);
     window.chatxzAndroid?.setSpeakerphone?.(false);
   }
-  resetCallUi();
+  closeCallAudioResources();
+  stopCallRingtone();
+  clearCallNativeWatchdog();
+  if (callStatsTimerId) { clearInterval(callStatsTimerId); callStatsTimerId = null; }
+  if (callTimerId) { clearInterval(callTimerId); callTimerId = null; }
+  callState = 'idle';
   await callApi({action: 'end', peer, via, call_id: id}).catch(() => {});
+  resetCallUi();
 }
 
 function beaconEndVoiceCall() {
   if (callState === 'idle') return;
-  const body = JSON.stringify({
-    action: 'end',
-    peer: callPeer,
-    via: callVia,
-    call_id: callId,
-  });
+  const peer = callPeer;
+  const via = callVia;
+  const id = callId;
+  const body = JSON.stringify({action: 'end', peer, via, call_id: id});
   try {
     navigator.sendBeacon('/api/call', new Blob([body], {type: 'application/json'}));
   } catch (_) {}

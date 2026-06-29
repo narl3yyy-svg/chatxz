@@ -485,6 +485,7 @@ class ChatWebServer:
         self.voice_recorder = None
         self.call_audio_engine = None
         self._android_call_audio = False
+        self._call_audio_gate = threading.RLock()
 
         self.websockets = set()
         self.message_history = self._load_history()
@@ -2577,58 +2578,65 @@ class ChatWebServer:
                 pass
 
     def _start_call_audio_engine(self):
-        if self.call_audio_engine or getattr(self, "_android_call_audio", False):
-            return
-        if not self.messaging:
-            return
-        if is_android():
-            self._start_android_call_audio()
-            return
-        if not call_audio_available():
-            print("[call-audio] Native unavailable — install libopus + pyaudio (./run.sh install)")
-            return
+        with self._call_audio_gate:
+            if getattr(self, "_android_call_audio", False):
+                return
+            engine = self.call_audio_engine
+            if engine and engine.is_running():
+                return
+            self._stop_call_audio_engine(blocking=True, timeout=2.5)
+            if not self.messaging:
+                return
+            if is_android():
+                self._start_android_call_audio()
+                return
+            if not call_audio_available():
+                print("[call-audio] Native unavailable — install libopus + pyaudio (./run.sh install)")
+                return
 
-        def send_audio(b64, codec):
-            try:
-                return bool(self.messaging.call_send_audio(b64, codec))
-            except Exception:
-                return False
+            def send_audio(b64, codec):
+                try:
+                    return bool(self.messaging.call_send_audio(b64, codec))
+                except Exception:
+                    return False
 
-        engine = CallAudioEngine(send_audio)
-        self.call_audio_engine = engine
-        if engine.start():
-            self._flush_pending_call_audio()
-        else:
+            engine = CallAudioEngine(send_audio)
+            self.call_audio_engine = engine
+            if engine.start():
+                self._flush_pending_call_audio()
+            else:
+                self.call_audio_engine = None
+                self._pending_call_audio.clear()
+                print("[call-audio] Native engine failed — browser Opus fallback")
+
+    def _stop_call_audio_engine(self, *, blocking: bool = False, timeout: float = 2.0):
+        with self._call_audio_gate:
+            if getattr(self, "_android_call_audio", False):
+                self._stop_android_call_audio()
+            engine = self.call_audio_engine
             self.call_audio_engine = None
-            self._pending_call_audio.clear()
-            print("[call-audio] Native engine failed — browser Opus fallback")
-
-    def _stop_call_audio_engine(self, *, blocking: bool = False):
-        if getattr(self, "_android_call_audio", False):
-            self._stop_android_call_audio()
-        engine = self.call_audio_engine
-        self.call_audio_engine = None
-        if engine:
-            try:
-                if blocking:
-                    engine.stop(blocking=True)
-                else:
+            if engine:
+                try:
                     engine.stop_fast()
-            except Exception:
-                pass
+                    if blocking:
+                        engine.wait_stopped(timeout=timeout)
+                except Exception:
+                    pass
 
-    def _hang_up_call(self, call_id=None):
+    def _hang_up_call(self, call_id=None, peer=None, via=None):
         """Stop native audio first, then signal hang-up over RNS."""
         self._pending_call_audio.clear()
         try:
-            self._stop_call_audio_engine(blocking=False)
+            self._stop_call_audio_engine(blocking=True, timeout=2.5)
         except Exception:
             pass
         if not self.messaging:
-            return False
-        if self.messaging.voice_call.state == STATE_IDLE:
             return True
-        return self.messaging.call_end(call_id)
+        return self.messaging.call_end(
+            call_id=call_id,
+            peer_hash=peer,
+            transport=via,
+        )
 
     def _deliver_call_audio_frame(self, seq, data, codec):
         codec = (codec or OPUS_CODEC).strip()
@@ -4984,7 +4992,9 @@ class ChatWebServer:
             return web.json_response({"status": "ok"})
 
         if action == "end":
-            ok = await asyncio.to_thread(self._hang_up_call, call_id)
+            ok = await asyncio.to_thread(
+                self._hang_up_call, call_id, peer or None, via or None,
+            )
             if not ok:
                 return web.json_response({"error": "end failed"}, status=400)
             return web.json_response({"status": "ok"})

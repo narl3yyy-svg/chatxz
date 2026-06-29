@@ -2,6 +2,13 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.3] — 2026-06-29
+
+### Fixed
+- **Call-after-hangup broken** — serialize audio engine start/stop with gate lock; wait for ALSA cleanup before reopening; abort start when hang-up races init.
+- **ALSA hang on call start** — skip blocking mic probe when Pulse has no mic; timeout on all `pa.open()` calls; rank-only device pick.
+- **Remote hang-up** — `call_end` always sends `CALL_END` to peer (even if local state already idle); hang-up API passes peer/via through.
+
 ## [0.9.2] — 2026-06-28
 
 ### Fixed

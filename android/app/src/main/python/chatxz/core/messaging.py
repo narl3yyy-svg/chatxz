@@ -5624,18 +5624,27 @@ class MessagingBackend:
         self._emit_call_event("rejected", peer, {"call_id": cid, "reason": reason})
         return True
 
-    def call_end(self, call_id=None):
-        if self.voice_call.state == STATE_IDLE:
-            return False
+    def call_end(self, call_id=None, peer_hash=None, transport=None):
+        """End local call and notify remote peer with CALL_END."""
         if getattr(self, "_call_ending", False):
+            return self.voice_call.state == STATE_IDLE
+        peer = (peer_hash or self.voice_call.peer_hash or "").strip()
+        cid = (call_id or self.voice_call.call_id or "").strip()
+        via = (transport or self.voice_call.transport or "lan").strip().lower() or "lan"
+        if self.voice_call.state == STATE_IDLE:
+            if peer:
+                self._send_call_packet(peer, CALL_END, {"call_id": cid}, via)
+                self._emit_call_event("ended", peer, {"call_id": cid})
+                print(f"[call] Ended remote notify ({cid or 'no-id'})")
+                return True
             return False
         self._call_ending = True
         try:
-            peer = self.voice_call.peer_hash
-            cid = call_id or self.voice_call.call_id
-            transport = self.voice_call.transport
+            peer = peer or self.voice_call.peer_hash
+            cid = cid or self.voice_call.call_id
+            via = via or self.voice_call.transport
             if peer:
-                self._send_call_packet(peer, CALL_END, {"call_id": cid}, transport)
+                self._send_call_packet(peer, CALL_END, {"call_id": cid}, via)
             self.voice_call.reset()
             self._reset_call_audio_counters()
             self._call_send_link_fails = 0

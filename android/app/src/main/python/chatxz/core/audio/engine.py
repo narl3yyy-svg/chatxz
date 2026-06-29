@@ -4,8 +4,8 @@ Pipeline (duplex):
   capture thread → Opus encode → send_fn → RNS CALL_AUDIO packets
   receive_frame → Opus decode → jitter buffer → playback thread → speaker
 
-Playback/decoding start immediately; mic capture opens in parallel so incoming
-audio is not blocked by slow ALSA device probing on Linux.
+Playback starts before mic capture; mic uses rank-only selection when Pulse
+has no real source (avoids blocking ALSA probe loops).
 """
 
 from __future__ import annotations
@@ -16,11 +16,13 @@ import time
 from typing import Callable, List, Optional, Tuple
 
 from chatxz.core.audio.devices import (
+    _open_stream_with_timeout,
     log_audio_devices,
     pcm_peak,
     pick_output_device,
     prepare_linux_audio,
     probe_input_device,
+    pulse_capture_bypass,
 )
 from chatxz.core.audio.jitter import SILENCE_PCM, VoiceJitterBuffer
 from chatxz.core.audio.opus import (
@@ -36,6 +38,7 @@ from chatxz.core.audio.opus import (
 SILENT_FRAMES_BEFORE_HOTSWAP = 250  # ~5 s
 MAX_HOTSWAPS = 2
 FRAME_INTERVAL_SEC = OPUS_FRAME_SAMPLES / OPUS_SAMPLE_RATE
+STREAM_OPEN_TIMEOUT = 3.0
 
 
 def call_audio_available() -> bool:
@@ -59,6 +62,7 @@ class CallAudioEngine:
         self._stop = threading.Event()
         self._active = threading.Event()
         self._recv_ready = threading.Event()
+        self._starting = threading.Event()
         self._pa = None
         self._in_stream = None
         self._out_stream = None
@@ -78,17 +82,42 @@ class CallAudioEngine:
         self._input_rank_pos = 0
         self._in_dev: Optional[int] = None
         self._in_name: Optional[str] = None
-        self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
 
     @staticmethod
     def available() -> bool:
         return call_audio_available()
 
+    def is_running(self) -> bool:
+        return self._recv_ready.is_set() and not self._stop.is_set()
+
+    def wait_stopped(self, timeout: float = 2.0) -> None:
+        """Wait until start/cleanup finish (used before opening a new engine)."""
+        deadline = time.monotonic() + max(0.1, timeout)
+        while self._starting.is_set() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        th = self._cleanup_thread
+        if th and th.is_alive():
+            th.join(timeout=max(0.0, deadline - time.monotonic()))
+
     def start(self) -> bool:
-        with self._lock:
+        if self._stop.is_set():
+            self._stop.clear()
+        if self._active.is_set() or self._recv_ready.is_set():
+            return True
+        if self._starting.is_set():
+            return False
+        with self._lifecycle_lock:
             if self._active.is_set() or self._recv_ready.is_set():
                 return True
-            return self._start_unlocked()
+            self._starting.set()
+            try:
+                return self._start_unlocked()
+            finally:
+                self._starting.clear()
+
+    def _aborted(self) -> bool:
+        return self._stop.is_set()
 
     def _start_unlocked(self) -> bool:
         if not self.available():
@@ -98,6 +127,9 @@ class CallAudioEngine:
         import pyaudio
 
         prepare_linux_audio()
+        if self._aborted():
+            print("[call-audio] Start aborted before Opus init")
+            return False
 
         try:
             self._encoder = OpusEncoder()
@@ -119,7 +151,16 @@ class CallAudioEngine:
         self._input_rank_pos = 0
         self._send_enabled = False
 
-        self._pa = pyaudio.PyAudio()
+        try:
+            self._pa = pyaudio.PyAudio()
+        except Exception as e:
+            print(f"[call-audio] PyAudio init failed: {e}")
+            return False
+        if self._aborted():
+            self._stop_unlocked(blocking=False)
+            print("[call-audio] Start aborted after PyAudio init")
+            return False
+
         log_audio_devices(self._pa)
 
         fmt = pyaudio.paInt16
@@ -138,10 +179,17 @@ class CallAudioEngine:
             )
             if out_dev is not None:
                 out_kw["output_device_index"] = out_dev
-            self._out_stream = self._pa.open(**out_kw)
+            self._out_stream = _open_stream_with_timeout(
+                self._pa, timeout=STREAM_OPEN_TIMEOUT, **out_kw
+            )
             if out_name:
                 print(f"[call-audio] Speaker: {out_name}")
             self._out_stream.start_stream()
+
+            if self._aborted():
+                self._stop_unlocked(blocking=False)
+                print("[call-audio] Start aborted after speaker open")
+                return False
 
             self._recv_ready.set()
             self._active.set()
@@ -152,11 +200,19 @@ class CallAudioEngine:
             )
             self._playback_thread.start()
 
+            skip_probe = pulse_capture_bypass()
             self._in_dev, self._in_name, self._input_ranked = probe_input_device(
-                self._pa, fmt, rate, frame_count
+                self._pa, fmt, rate, frame_count, skip_probe=skip_probe
             )
+            if self._aborted():
+                self._stop_unlocked(blocking=False)
+                print("[call-audio] Start aborted before mic open")
+                return False
+
             if self._in_dev is not None:
-                self._in_stream = self._pa.open(
+                self._in_stream = _open_stream_with_timeout(
+                    self._pa,
+                    timeout=STREAM_OPEN_TIMEOUT,
                     format=fmt,
                     channels=channels,
                     rate=rate,
@@ -188,7 +244,7 @@ class CallAudioEngine:
         """Thread-safe. Use blocking=False from signal handlers."""
         self.stop_fast()
         if blocking:
-            self._join_cleanup(timeout=1.0)
+            self.wait_stopped(timeout=2.0)
 
     def stop_fast(self) -> None:
         """Signal-safe: set flags immediately, cleanup in background."""
@@ -196,7 +252,7 @@ class CallAudioEngine:
         self._active.clear()
         self._recv_ready.clear()
         self._send_enabled = False
-        with self._lock:
+        with self._lifecycle_lock:
             if self._cleanup_thread and self._cleanup_thread.is_alive():
                 return
             self._cleanup_thread = threading.Thread(
@@ -206,11 +262,6 @@ class CallAudioEngine:
                 daemon=True,
             )
             self._cleanup_thread.start()
-
-    def _join_cleanup(self, timeout: float = 1.0) -> None:
-        th = self._cleanup_thread
-        if th and th.is_alive():
-            th.join(timeout=timeout)
 
     def _stop_unlocked(self, *, blocking: bool = True) -> None:
         self._stop.set()
@@ -332,7 +383,9 @@ class CallAudioEngine:
                 continue
             old = self._in_stream
             try:
-                new_stream = self._pa.open(
+                new_stream = _open_stream_with_timeout(
+                    self._pa,
+                    timeout=STREAM_OPEN_TIMEOUT,
                     format=pyaudio.paInt16,
                     channels=1,
                     rate=OPUS_SAMPLE_RATE,
@@ -401,7 +454,7 @@ class CallAudioEngine:
             "jitter_ms": jb.get("buffered_ms", 0),
             "playout_delay_ms": jb.get("playout_delay_ms", 0),
             "plc_frames": jb.get("plc_frames", 0),
-            "running": self._recv_ready.is_set() and not self._stop.is_set(),
+            "running": self.is_running(),
             "input_device": self._in_name or "",
         }
 
