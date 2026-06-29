@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.9.14": [
+        "Voice calls: single native audio owner — hang-up stops capture/playback immediately in the console.",
+        "Mac Ctrl+C uses signal wakeup fd; browser playback fallback until native speakers confirm output.",
+        "Virtual audio devices (e.g. AudioRelay) are no longer selected as call speakers.",
+    ],
     "0.9.13": [
         "Ctrl+C now stops the server reliably on Windows and Mac — even after voice calls.",
         "Shutdown uses a dedicated console/signal thread and forces exit within ~80ms.",

@@ -305,3 +305,78 @@ def test_call_audio_rejects_non_opus_codec():
     mb._handle_call_packet(msg, peer, None)
     assert events == []
     assert getattr(mb, "_call_audio_recv", 0) == 0
+
+
+def test_call_audio_manager_single_session():
+    from chatxz.core.audio.manager import CallAudioManager
+    from chatxz.core.audio.session import STATE_ACTIVE, STATE_IDLE
+
+    mgr = CallAudioManager()
+    sent = []
+
+    mgr.configure(
+        send_hook=lambda b64, codec: sent.append((b64, codec)) or True,
+        voice_state=lambda: STATE_ACTIVE,
+    )
+    mgr.begin_session("call-1")
+    assert mgr.is_active()
+    mgr.deliver_frame(1, "AAAA", "audio/opus;rate=48000")
+    assert len(mgr.drain_pending()) == 1
+    mgr.end_session()
+    assert not mgr.is_active()
+    assert mgr.engine is None
+
+
+def test_call_audio_manager_send_gated_when_idle():
+    from chatxz.core.audio.manager import CallAudioManager
+    from chatxz.core.audio.session import STATE_IDLE
+
+    mgr = CallAudioManager()
+    state = {"v": STATE_IDLE}
+    mgr.configure(
+        send_hook=lambda b64, codec: False,
+        voice_state=lambda: state["v"],
+    )
+    mgr.begin_session("call-2")
+    assert not mgr._send_audio("AAAA", "audio/opus;rate=48000")
+
+
+def test_call_audio_manager_abandon_clears_engine(monkeypatch):
+    from chatxz.core.audio.manager import CallAudioManager
+
+    class FakeEngine:
+        def __init__(self, send_fn):
+            self.started = False
+
+        def start(self):
+            self.started = True
+            return True
+
+        def is_running(self):
+            return self.started
+
+        def stop_fast(self):
+            self.started = False
+
+        def stop_abandon(self, timeout=0.3):
+            self.started = False
+
+        def wait_stopped(self, timeout=0.5):
+            pass
+
+    monkeypatch.setattr(
+        "chatxz.core.audio.manager.CallAudioEngine",
+        FakeEngine,
+    )
+    monkeypatch.setattr(
+        "chatxz.core.audio.manager.call_audio_available",
+        lambda: True,
+    )
+
+    mgr = CallAudioManager()
+    mgr.configure(send_hook=lambda b64, codec: True, voice_state=lambda: "active")
+    mgr.begin_session("call-3")
+    assert mgr.start() is True
+    assert mgr.engine is not None
+    mgr.abandon()
+    assert mgr.engine is None

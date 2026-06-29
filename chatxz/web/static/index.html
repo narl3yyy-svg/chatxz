@@ -6540,7 +6540,8 @@ function useNativeCallPlayback() {
   if (callForceBrowserPlayback) return false;
   if (!nativeEngineRunning()) return false;
   const inN = Number(callServerStats.frames_recv || callServerStats.audio_in || 0);
-  return inN > 0;
+  const played = Number(callServerStats.playback_frames || 0);
+  return inN > 0 && played > 3;
 }
 
 function useNativeCallAudio() {

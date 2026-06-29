@@ -16,6 +16,7 @@ from chatxz.core.audio.android import (
     register_handlers,
 )
 from chatxz.core.audio.engine import CallAudioEngine, VoiceCallAudio, call_audio_available
+from chatxz.core.audio.manager import CallAudioManager
 from chatxz.core.audio.jitter import SILENCE_PCM, VoiceJitterBuffer
 from chatxz.core.audio.opus import (
     OPUS_CODEC,
@@ -55,6 +56,7 @@ __all__ = [
     "CALL_REJECT",
     "CALL_TYPES",
     "CallAudioEngine",
+    "CallAudioManager",
     "OPUS_CODEC",
     "OPUS_FRAME_SAMPLES",
     "OPUS_SAMPLE_RATE",

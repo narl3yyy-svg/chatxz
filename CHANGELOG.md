@@ -2,6 +2,13 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.14] — 2026-06-29
+
+### Fixed
+- **Zombie call audio** — `CallAudioManager` owns a single native engine per call; duplicate starts removed; hang-up and remote end call `end_session()` synchronously so `[call] Audio out` stops immediately in the console.
+- **No audible call audio** — browser Opus playback stays active until native playback confirms frames written; virtual output devices (AudioRelay, VB-Audio, etc.) are excluded from speaker selection.
+- **Mac Ctrl+C** — `signal.set_wakeup_fd` wakes the asyncio loop when SIGINT is delivered; macOS no longer blocks SIGINT in the main thread via `pthread_sigmask`.
+
 ## [0.9.13] — 2026-06-29
 
 ### Fixed

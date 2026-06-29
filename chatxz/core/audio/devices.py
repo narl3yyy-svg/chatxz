@@ -325,6 +325,10 @@ def score_device(
         return -1000
     if any(x in low for x in ("monitor", "loopback", "null", "dummy")):
         return -1000
+    if not input_device and any(
+        x in low for x in ("virtual", "relay", "vb-audio", "cable", "voicemeeter")
+    ):
+        return -1000
     bypass = pulse_bypass or pulse_capture_bypass()
     if input_device and bypass:
         if "alt analog" in low:

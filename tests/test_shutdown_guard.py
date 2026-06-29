@@ -16,4 +16,4 @@ def test_shutdown_guard_arm_darwin(monkeypatch):
 
     guard = ShutdownGuard(lambda sig: seen.append(sig))
     guard.arm()
-    assert guard._sigwait_thread is not None
+    assert guard._sigwait_thread is None

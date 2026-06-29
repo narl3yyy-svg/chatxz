@@ -27,6 +27,9 @@ class ShutdownGuard:
         with self._lock:
             if sys.platform == "win32":
                 self._arm_windows()
+            elif sys.platform == "darwin":
+                # macOS: use signal.set_wakeup_fd + asyncio pipe (see server.py).
+                pass
             elif sys.platform not in ("linux", "linux2"):
                 try:
                     signal.pthread_sigmask(
@@ -39,7 +42,7 @@ class ShutdownGuard:
             self._armed = True
 
     def refresh(self) -> None:
-        """Re-register after RNS or other libs replace handlers (Windows)."""
+        """Re-register after RNS or other libs replace handlers."""
         if sys.platform == "win32":
             self._arm_windows()
 
