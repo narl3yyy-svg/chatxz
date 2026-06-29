@@ -21,6 +21,7 @@ from chatxz.core.audio import (
     OPUS_CODEC,
     STATE_ACTIVE,
     STATE_IDLE,
+    STATE_INCOMING,
     STATE_OUTGOING,
     call_audio_available,
 )
@@ -2378,17 +2379,13 @@ class ChatWebServer:
             vc = self.messaging.voice_call
             if vc.state in (STATE_ACTIVE, STATE_OUTGOING, STATE_INCOMING):
                 if self.messaging._call_peer_matches(peer):
-                    try:
-                        self._hang_up_call(vc.call_id, peer, vc.transport)
-                    except Exception:
-                        try:
-                            self.messaging.call_end(
-                                call_id=vc.call_id,
-                                peer_hash=peer,
-                                transport=vc.transport,
-                            )
-                        except Exception:
-                            pass
+                    threading.Thread(
+                        target=lambda: self._hang_up_call(
+                            vc.call_id, peer, vc.transport,
+                        ),
+                        name="call-link-hangup",
+                        daemon=True,
+                    ).start()
         if still_linked:
             return
         removed = 0
@@ -2632,6 +2629,49 @@ class ChatWebServer:
         played = int(getattr(engine, "playback_frames", 0) or 0)
         return recv > 0 and played > 3
 
+    def _browser_needs_call_audio_ws(self) -> bool:
+        """Browser Opus fallback only — native duplex must not flood the event loop."""
+        if getattr(self, "_android_call_audio", False):
+            return False
+        engine = self.call_audio.engine
+        if not engine or not engine.is_running():
+            return True
+        if getattr(engine, "send_enabled", False):
+            return False
+        if self._native_playback_active():
+            return False
+        return True
+
+    def _schedule_call_audio_stop(self) -> None:
+        threading.Thread(
+            target=self._end_call_audio,
+            name="call-audio-stop",
+            daemon=True,
+        ).start()
+
+    def _schedule_call_audio_start(self, call_id=None) -> None:
+        threading.Thread(
+            target=lambda: self._begin_call_audio(call_id),
+            name="call-audio-start",
+            daemon=True,
+        ).start()
+
+    def _schedule_call_ws(self, event: str, peer_hash, payload: dict) -> None:
+        if not (self.websockets and self._loop):
+            return
+        data = {"peer": peer_hash or "", **(payload or {})}
+        if event == "audio" and self._native_playback_active():
+            data["native_playback"] = True
+        asyncio.run_coroutine_threadsafe(
+            self._broadcast({"type": f"call_{event}", "data": data}),
+            self._loop,
+        )
+        if event in ("accepted", "ended"):
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast_call_stats(force=(event == "accepted")),
+                self._loop,
+            )
+
     def _android_call_stats(self):
         stats = {
             "engine": "native-opus",
@@ -2673,15 +2713,17 @@ class ChatWebServer:
             self.call_audio.end_session()
 
     def _hang_up_call(self, call_id=None, peer=None, via=None):
-        """Stop native audio first, then signal hang-up over RNS."""
-        self._end_call_audio()
+        """Signal hang-up immediately; stop native audio in a side thread."""
         if not self.messaging:
+            self._schedule_call_audio_stop()
             return True
-        return self.messaging.call_end(
+        ok = self.messaging.call_end(
             call_id=call_id,
             peer_hash=peer,
             transport=via,
         )
+        self._schedule_call_audio_stop()
+        return ok
 
     def _deliver_call_audio_frame(self, seq, data, codec):
         codec = (codec or OPUS_CODEC).strip()
@@ -2697,39 +2739,31 @@ class ChatWebServer:
             self._ws_call_audio_sent = 0
             self._call_stats_last_key = None
             engine = self.call_audio.engine
-            if getattr(self, "_android_call_audio", False):
-                pass
-            elif engine and engine.is_running():
-                pass
-            else:
-                self._begin_call_audio(payload.get("call_id"))
-        elif event in ("ended", "rejected"):
+            if not getattr(self, "_android_call_audio", False):
+                if not (engine and engine.is_running()):
+                    self._schedule_call_audio_start(payload.get("call_id"))
+            self._schedule_call_ws(event, peer_hash, payload)
+            return
+        if event in ("ended", "rejected"):
             self._ws_call_audio_sent = 0
             self._call_stats_last_key = None
-            self._end_call_audio()
             self._post_call_audio = True
             self._shutdown_fast = False
-        elif event == "audio":
+            self._schedule_call_ws(event, peer_hash, payload)
+            self._schedule_call_audio_stop()
+            return
+        if event == "audio":
             seq = int(payload.get("seq") or 0)
             data = payload.get("data") or ""
             codec = (payload.get("codec") or OPUS_CODEC).strip()
-            if "opus" in codec.lower():
-                self._deliver_call_audio_frame(seq, data, codec)
-
-        if not (self.websockets and self._loop):
+            if "opus" not in codec.lower():
+                return
+            self._deliver_call_audio_frame(seq, data, codec)
+            if not self._browser_needs_call_audio_ws():
+                return
+            self._schedule_call_ws(event, peer_hash, payload)
             return
-        data = {"peer": peer_hash or "", **payload}
-        if event == "audio" and self._native_playback_active():
-            data["native_playback"] = True
-        asyncio.run_coroutine_threadsafe(
-            self._broadcast({"type": f"call_{event}", "data": data}),
-            self._loop,
-        )
-        if event in ("accepted", "audio", "ended") and self._loop:
-            asyncio.run_coroutine_threadsafe(
-                self._broadcast_call_stats(force=(event == "accepted")),
-                self._loop,
-            )
+        self._schedule_call_ws(event, peer_hash, payload)
 
     def _on_transfer_progress(self, data):
         status = data.get("status", "active")

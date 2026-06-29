@@ -2,6 +2,11 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.15] — 2026-06-29
+
+### Fixed
+- **Web UI frozen after call** — missing `STATE_INCOMING` import crashed `_on_link_closed` so link/call cleanup never reached the browser; per-frame `call_audio` WebSocket broadcasts (~100/sec) no longer flood the asyncio loop when native audio is active; `call_ended` is broadcast before PyAudio teardown; hang-up resets UI immediately client-side.
+
 ## [0.9.14] — 2026-06-29
 
 ### Fixed

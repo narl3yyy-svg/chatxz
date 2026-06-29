@@ -6225,6 +6225,7 @@ function closeCallAudioResources() {
 function resetCallUi(opts) {
   stopCallRingtone();
   clearCallNativeWatchdog();
+  document.body.classList.remove('modal-open');
   const prevState = callState;
   const prevPeer = callPeer;
   const prevVia = callVia;
@@ -7361,6 +7362,7 @@ async function endVoiceCall() {
   const peer = callPeer;
   const via = callVia;
   const id = callId;
+  resetCallUi();
   if (isAndroidShell()) {
     window.chatxzAndroid?.setCallActive?.(false);
     window.chatxzAndroid?.setSpeakerphone?.(false);
@@ -7378,7 +7380,6 @@ async function endVoiceCall() {
     });
   } catch (_) {}
   clearTimeout(timer);
-  resetCallUi();
 }
 
 function beaconEndVoiceCall() {

@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.9.15": [
+        "Web UI no longer freezes after voice calls — fixed link-closed crash and stopped flooding the server with per-frame audio WebSocket messages.",
+        "Hang-up unlocks the UI immediately; server notifies the browser before stopping native audio.",
+    ],
     "0.9.14": [
         "Voice calls: single native audio owner — hang-up stops capture/playback immediately in the console.",
         "Mac Ctrl+C uses signal wakeup fd; browser playback fallback until native speakers confirm output.",
