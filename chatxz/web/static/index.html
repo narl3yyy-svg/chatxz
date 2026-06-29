@@ -748,6 +748,12 @@ body::before {
   color: var(--text2); cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 500;
 }
 .call-minimize-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.call-speaker-btn {
+  padding: 13px 16px; border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong); background: rgba(255,255,255,0.04);
+  color: var(--text2); cursor: pointer; font-family: inherit; font-size: 16px;
+}
+.call-speaker-btn.active { color: var(--primary); border-color: rgba(99,179,237,0.5); background: rgba(99,179,237,0.12); }
 #call-bar { display: none !important; }
 .dock-status #disconnect-btn { margin-right: 4px; }
 
@@ -2025,6 +2031,7 @@ body.android-shell.sidebar-open #sidebar-backdrop {
       <div class="call-audio-hint" id="call-audio-hint" style="display:none"></div>
     </div>
     <div class="call-dash-actions">
+      <button type="button" class="call-speaker-btn" id="call-speaker-btn" onclick="toggleCallSpeaker()" title="Speakerphone" style="display:none">🔈</button>
       <button type="button" class="call-minimize-btn" onclick="minimizeCallDashboard()">Minimize</button>
       <button type="button" class="call-hangup-btn" onclick="endVoiceCall()">Hang up</button>
     </div>
@@ -3301,7 +3308,7 @@ function handleWSMessage(msg) {
       const stillLinked = ['lan', 'serial'].some(v =>
         isPeerLinked(callPeer, v) || (viewingPeer && peersMatch(viewingPeer, callPeer) && isPeerLinked(viewingPeer, v))
       );
-      if (!stillLinked) resetCallUi();
+      if (!stillLinked) resetCallUi({notifyServer: callState === 'active' || callState === 'outgoing'});
     }
     updatePeerHeader();
     if (!viewingStillLinked && !linkedPeers.size) {
@@ -5492,6 +5499,11 @@ function sendMessage() {
   input.value = '';
   autoResize(input);
   document.getElementById('emoji-picker')?.classList.remove('open');
+  if (isAndroidShell()) {
+    requestAnimationFrame(() => {
+      try { input.focus({preventScroll: true}); } catch (_) { input.focus(); }
+    });
+  }
   const isHubChat = viewingPeer === HUB_GROUP_PEER;
   const hubActive = window._hubRole && window._hubRole !== 'off';
   if (!linked && !(isHubChat && hubActive)) {
@@ -5950,6 +5962,12 @@ let callOpusEncodeTs = 0;
 let callBrowserOpusOk = null;
 let callOpusRecvPrimed = false;
 let callNativeWatchId = null;
+let callDecodeSeqByTs = new Map();
+let callSeqJitter = new Map();
+let callSeqNext = null;
+let callSeqPrimed = false;
+let callSeqPlcGain = 1.0;
+let callSeqLast = null;
 let ringtoneTimer = null;
 const CALL_OPUS_CODEC = 'audio/opus;rate=48000;frame=20';
 let sharedMicStream = null;
@@ -5972,16 +5990,21 @@ function clearCallNativeWatchdog() {
   }
 }
 
-function resetCallUi() {
+function resetCallUi(opts) {
   stopCallRingtone();
   clearCallNativeWatchdog();
+  const prevState = callState;
+  const prevPeer = callPeer;
+  const prevVia = callVia;
+  const prevId = callId;
+  const notifyServer = !!(opts && opts.notifyServer);
   callState = 'idle';
   callPeer = null;
   callId = null;
   callVia = null;
   stopCallCapturePipeline();
   stopCallPlaybackNode();
-  releaseSharedMic();
+  releaseSharedMic(true);
   resetCallRingBuffer();
   callJitterPrimed = false;
   if (callTimerId) { clearInterval(callTimerId); callTimerId = null; }
@@ -5993,12 +6016,27 @@ function resetCallUi() {
   callBrowserOpusOk = null;
   callOpusRecvPrimed = false;
   callServerStats = {};
+  if (isAndroidShell()) {
+    window.chatxzAndroid?.setCallActive?.(false);
+    window.chatxzAndroid?.setSpeakerphone?.(false);
+    window.chatxzAndroid?.cancelIncomingCallNotification?.();
+    window.chatxzAndroid?.stopCallVibrate?.();
+  }
+  const speakerBtn = document.getElementById('call-speaker-btn');
+  if (speakerBtn) {
+    speakerBtn.classList.remove('active');
+    speakerBtn.style.display = 'none';
+    speakerBtn.textContent = '🔈';
+  }
   document.getElementById('call-incoming-overlay')?.classList.remove('open');
   document.getElementById('call-active-overlay')?.classList.remove('open');
   const timer = document.getElementById('call-timer');
   if (timer) timer.textContent = '00:00';
   updatePeerHeader();
   updateCallDashboard();
+  if (notifyServer && prevState !== 'idle' && prevPeer) {
+    callApi({action: 'end', peer: prevPeer, via: prevVia, call_id: prevId}).catch(() => {});
+  }
 }
 
 function showIncomingCall(peer, data) {
@@ -6158,6 +6196,9 @@ function updateCallDashboard() {
       } else if (outN === 0 && !cfg.native && !useNativeCallAudio()) {
         hintEl.style.display = 'block';
         hintEl.textContent = 'Not sending audio — allow microphone access for this site';
+      } else if (outN > 30 && (callServerStats.mic_peak_max || 0) === 0 && useNativeCallAudio()) {
+        hintEl.style.display = 'block';
+        hintEl.textContent = 'Mic capturing silence — check system input device (browser fallback may help)';
       } else {
         hintEl.style.display = 'none';
         hintEl.textContent = '';
@@ -6217,6 +6258,7 @@ function showActiveCall(peer, label) {
   callState = 'active';
   callPeer = peerKey(peer) || peer;
   void primeCallOpusReceive();
+  updateCallSpeakerUi();
   document.getElementById('call-incoming-overlay')?.classList.remove('open');
   if (!callTimerId) {
     callStartedAt = Date.now();
@@ -6307,17 +6349,19 @@ async function ensureCallOpusDecoder(cfg) {
         const buf = new Float32Array(n);
         frame.copyTo(buf, {planeIndex: 0, format: 'f32'});
         ensureCallPlaybackNode();
-        ringWriteSamples(buf);
-        const c = callAudioConfig();
-        const minKeep = c.jitterMin || c.jitterTarget;
-        if (callRingCount > c.jitterMax) {
-          ringDropSamples(Math.max(0, callRingCount - c.jitterMax));
+        const seq = callDecodeSeqByTs.get(frame.timestamp);
+        callDecodeSeqByTs.delete(frame.timestamp);
+        if (seq !== undefined) {
+          pushBrowserSeqFrame(seq, buf);
+        } else {
+          ringWriteSamples(buf);
+          const c = callAudioConfig();
+          if (!callJitterPrimed && callRingCount >= (c.jitterTarget || c.jitterMin)) {
+            callJitterPrimed = true;
+          }
+          callLocalFramesIn++;
+          updateCallDashboard();
         }
-        if (!callJitterPrimed && callRingCount >= (c.jitterTarget || minKeep)) {
-          callJitterPrimed = true;
-        }
-        callLocalFramesIn++;
-        updateCallDashboard();
       } finally {
         frame.close();
       }
@@ -6357,14 +6401,18 @@ async function ensureCallOpusEncoder(cfg) {
   }
 }
 
-function decodeOpusB64(b64, cfg) {
+function decodeOpusB64(b64, cfg, seq) {
   if (!callOpusDecoder || callOpusDecoder.state !== 'configured') return;
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const ts = callOpusDecodeTs;
+  if (seq !== undefined && seq !== null) {
+    callDecodeSeqByTs.set(ts, Number(seq) || 0);
+  }
   const chunk = new EncodedAudioChunk({
     type: 'key',
-    timestamp: callOpusDecodeTs,
+    timestamp: ts,
     data: bytes,
   });
   callOpusDecodeTs += 20000;
@@ -6378,6 +6426,76 @@ function resetCallRingBuffer() {
   callRingWrite = 0;
   callRingRead = 0;
   callRingCount = 0;
+  resetCallSeqJitter();
+}
+
+function resetCallSeqJitter() {
+  callDecodeSeqByTs = new Map();
+  callSeqJitter = new Map();
+  callSeqNext = null;
+  callSeqPrimed = false;
+  callSeqPlcGain = 1.0;
+  callSeqLast = null;
+}
+
+function attenuateFloats(samples, gain) {
+  const out = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) out[i] = samples[i] * gain;
+  return out;
+}
+
+function pushBrowserSeqFrame(seq, samples) {
+  const s = Number(seq) || 0;
+  if (callSeqNext !== null && s < callSeqNext) return;
+  callSeqJitter.set(s, samples);
+  while (callSeqJitter.size > 48) {
+    const min = Math.min(...callSeqJitter.keys());
+    callSeqJitter.delete(min);
+    if (callSeqNext !== null && callSeqNext <= min) callSeqNext = min + 1;
+  }
+  if (callSeqNext === null) {
+    callSeqNext = Math.min(...callSeqJitter.keys());
+  }
+  let ahead = 0;
+  for (const k of callSeqJitter.keys()) {
+    if (k >= callSeqNext) ahead++;
+  }
+  if (!callSeqPrimed && ahead >= 4) callSeqPrimed = true;
+  flushBrowserSeqToRing();
+}
+
+function flushBrowserSeqToRing() {
+  if (!callSeqPrimed || callSeqNext === null) return;
+  const cfg = callAudioConfig();
+  const minKeep = cfg.jitterMin || cfg.jitterTarget;
+  while (callSeqPrimed) {
+    if (callSeqJitter.has(callSeqNext)) {
+      const samples = callSeqJitter.get(callSeqNext);
+      callSeqJitter.delete(callSeqNext);
+      callSeqLast = samples;
+      callSeqPlcGain = 1.0;
+      ringWriteSamples(samples);
+      callSeqNext++;
+    } else if (callSeqJitter.size > 0 && Math.min(...callSeqJitter.keys()) > callSeqNext) {
+      const frameSamples = cfg.frameSamples || 960;
+      const plc = callSeqLast
+        ? attenuateFloats(callSeqLast, callSeqPlcGain)
+        : new Float32Array(frameSamples);
+      callSeqPlcGain *= 0.92;
+      ringWriteSamples(plc);
+      callSeqNext++;
+    } else {
+      break;
+    }
+    if (callRingCount > cfg.jitterMax) {
+      ringDropSamples(Math.max(0, callRingCount - cfg.jitterMax));
+    }
+    if (!callJitterPrimed && callRingCount >= (cfg.jitterTarget || minKeep)) {
+      callJitterPrimed = true;
+    }
+    callLocalFramesIn++;
+    updateCallDashboard();
+  }
 }
 
 function ringWriteSamples(samples) {
@@ -6586,11 +6704,33 @@ function scheduleCallNativeFallbackWatchdog() {
       if (st && !st.error) callServerStats = st;
     } catch (_) {}
     const sent = Number(callServerStats.frames_sent || callServerStats.audio_out || 0);
-    if (useNativeCallAudio() && sent === 0) {
-      toast('Native mic unavailable — switching to browser Opus');
+    const peak = Number(callServerStats.mic_peak_max || 0);
+    if (useNativeCallAudio() && (sent === 0 || (sent > 30 && peak === 0))) {
+      toast('Native mic silent — switching to browser Opus');
       await startCallCapture({forceBrowser: true});
     }
   }, 4000);
+}
+
+function updateCallSpeakerUi() {
+  const btn = document.getElementById('call-speaker-btn');
+  if (!btn) return;
+  if (!isAndroidShell() || callState !== 'active') {
+    btn.style.display = 'none';
+    return;
+  }
+  btn.style.display = '';
+  const on = !!window.chatxzAndroid?.isSpeakerphone?.();
+  btn.classList.toggle('active', on);
+  btn.textContent = on ? '🔊' : '🔈';
+}
+
+function toggleCallSpeaker() {
+  if (!isAndroidShell() || callState !== 'active') return;
+  const next = !window.chatxzAndroid?.isSpeakerphone?.();
+  window.chatxzAndroid?.setSpeakerphone?.(next);
+  updateCallSpeakerUi();
+  toast(next ? 'Speakerphone on' : 'Earpiece');
 }
 
 async function startCallCapture(opts) {
@@ -6685,16 +6825,17 @@ function enqueueCallAudio(b64, codec, opts) {
   if (!(codec || '').includes('opus') || b64.length <= 8) return;
   const rate = parseCallAudioRate(codec) || 48000;
   const decCfg = { useOpus: true, rate };
+  const seq = opts && opts.seq !== undefined ? opts.seq : undefined;
   if (!callOpusDecoder || callOpusDecoder.state !== 'configured') {
     void ensureCallOpusDecoder(decCfg).then(ok => {
       if (ok) {
         callOpusRecvPrimed = true;
-        if (callState === 'active') decodeOpusB64(b64, decCfg);
+        if (callState === 'active') decodeOpusB64(b64, decCfg, seq);
       }
     });
     return;
   }
-  decodeOpusB64(b64, decCfg);
+  decodeOpusB64(b64, decCfg, seq);
 }
 
 function handleCallWS(event, data) {
@@ -6805,6 +6946,11 @@ async function rejectVoiceCall() {
 
 async function endVoiceCall() {
   if (callState === 'idle') return;
+  stopCallCapturePipeline();
+  if (isAndroidShell()) {
+    window.chatxzAndroid?.setCallActive?.(false);
+    window.chatxzAndroid?.setSpeakerphone?.(false);
+  }
   await callApi({action: 'end', peer: callPeer, via: callVia, call_id: callId}).catch(() => {});
   resetCallUi();
 }

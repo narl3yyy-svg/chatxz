@@ -2,6 +2,21 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.8.3] — 2026-06-28
+
+### Fixed
+- **Jitter buffer** — playout starts at lowest received seq (out-of-order safe); PLC uses attenuated frame repeat.
+- **Android MediaCodec** — synchronized decode with input-seq queue; gap PLC on playback thread.
+- **Browser fallback** — seq-ordered jitter before ring buffer (matches native/desktop path).
+
+## [0.8.2] — 2026-06-28
+
+### Fixed
+- **Desktop mic capture** — PulseAudio-aware input/output device scoring; logs devices; detects silent capture and falls back to browser Opus.
+- **Android Opus playback** — MediaCodec decoder CSD, proper buffer dequeue loops, sequence jitter buffer; fixes silent Android receive path.
+- **Call hang-up** — local state resets before signaling; Android audio focus/speakerphone cleared on end.
+- **Android UX** — keyboard stays open after send; speakerphone toggle on call dashboard.
+
 ## [0.8.1] — 2026-06-28
 
 ### Changed

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import struct
-from typing import Callable, Optional
+import subprocess
+import sys
+from typing import Callable, List, Optional, Tuple
 
 from chatxz.core.opus_native import (
     OPUS_CODEC,
@@ -44,6 +46,8 @@ class VoiceCallAudio:
         self.frames_sent = 0
         self.frames_recv = 0
         self._mic_diag = 0
+        self._peak_max = 0
+        self._recv_log = 3
 
     @staticmethod
     def available() -> bool:
@@ -69,8 +73,13 @@ class VoiceCallAudio:
         self.frames_sent = 0
         self.frames_recv = 0
         self._mic_diag = 8
+        self._peak_max = 0
+        self._recv_log = 3
         self._pa = pyaudio.PyAudio()
+        self._log_audio_devices(self._pa)
+
         in_dev, in_name = self._pick_input_device(self._pa)
+        out_dev, out_name = self._pick_output_device(self._pa)
         fmt = pyaudio.paInt16
         channels = 1
         rate = OPUS_SAMPLE_RATE
@@ -79,9 +88,11 @@ class VoiceCallAudio:
         def input_cb(in_data, _frame_count, _time_info, _status):
             if not self._running or not self._send_enabled or not self._encoder:
                 return (None, pyaudio.paComplete)
+            peak = self._pcm_peak(in_data)
+            self._peak_max = max(self._peak_max, peak)
             if self._mic_diag > 0:
                 self._mic_diag -= 1
-                print(f"[call-audio] mic peak {self._pcm_peak(in_data)}")
+                print(f"[call-audio] mic peak {peak}")
             opus = self._encoder.encode(in_data)
             if opus:
                 b64 = base64.b64encode(opus).decode("ascii")
@@ -119,7 +130,7 @@ class VoiceCallAudio:
             except Exception as mic_err:
                 print(f"[call-audio] No capture ({mic_err}) — receive-only")
                 self._in_stream = None
-            self._out_stream = self._pa.open(
+            out_kw = dict(
                 format=fmt,
                 channels=channels,
                 rate=rate,
@@ -127,6 +138,11 @@ class VoiceCallAudio:
                 frames_per_buffer=frame_count,
                 stream_callback=output_cb,
             )
+            if out_dev is not None:
+                out_kw["output_device_index"] = out_dev
+            self._out_stream = self._pa.open(**out_kw)
+            if out_name:
+                print(f"[call-audio] Speaker: {out_name}")
             self._running = True
             if self._in_stream:
                 self._in_stream.start_stream()
@@ -180,29 +196,119 @@ class VoiceCallAudio:
         if pcm:
             self._jitter.push(int(seq or 0), pcm)
             self.frames_recv += 1
+            if self._recv_log > 0:
+                self._recv_log -= 1
+                print(
+                    f"[call-audio] Opus in #{self.frames_recv} "
+                    f"(seq={seq}, {len(audio_b64)} b64, jb={self._jitter.buffered_ms} ms)"
+                )
 
     @staticmethod
-    def _pick_input_device(pa):
+    def _pulse_default_source() -> Optional[str]:
+        if sys.platform not in ("linux", "linux2"):
+            return None
         try:
-            info = pa.get_default_input_device_info()
-            name = str(info.get("name") or "")
-            low = name.lower()
-            if "monitor" not in low and "loopback" not in low and "null" not in low:
-                return int(info["index"]), name or "default"
+            proc = subprocess.run(
+                ["pactl", "get-default-source"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if proc.returncode == 0:
+                name = (proc.stdout or "").strip()
+                return name or None
         except Exception:
             pass
+        return None
+
+    @staticmethod
+    def _score_device(name: str, *, input_device: bool, pulse_name: Optional[str]) -> int:
+        low = (name or "").lower()
+        if not low:
+            return -1000
+        if any(x in low for x in ("monitor", "loopback", "null", "dummy")):
+            return -1000
+        if low in ("default", "sysdefault"):
+            return 1
+        score = 20
+        if pulse_name:
+            pulse_low = pulse_name.lower()
+            if pulse_low in low or low in pulse_low:
+                score += 120
+            pulse_base = pulse_low.split(".monitor")[0]
+            if pulse_base and pulse_base in low:
+                score += 80
+        if input_device:
+            for kw in ("microphone", "mic", "headset", "headphone", "webcam", "usb",
+                       "built-in", "internal", "audio-in", "capture"):
+                if kw in low:
+                    score += 25
+            for kw in ("hdmi", "spdif", "speaker", "output", "sink"):
+                if kw in low:
+                    score -= 40
+        else:
+            for kw in ("speaker", "headphone", "headset", "analog", "usb", "built-in",
+                       "internal", "audio-out"):
+                if kw in low:
+                    score += 20
+            for kw in ("hdmi", "spdif", "monitor"):
+                if kw in low:
+                    score -= 30
+        return score
+
+    @classmethod
+    def _rank_devices(cls, pa, *, input_device: bool) -> List[Tuple[int, str, int]]:
+        pulse = cls._pulse_default_source() if input_device else None
+        ranked: List[Tuple[int, str, int]] = []
         try:
             for i in range(pa.get_device_count()):
                 info = pa.get_device_info_by_index(i)
-                if int(info.get("maxInputChannels", 0) or 0) < 1:
+                ch_key = "maxInputChannels" if input_device else "maxOutputChannels"
+                if int(info.get(ch_key, 0) or 0) < 1:
                     continue
-                name = str(info.get("name") or "").lower()
-                if "monitor" in name or "loopback" in name or "null" in name:
-                    continue
-                return i, str(info.get("name") or f"device {i}")
+                name = str(info.get("name") or f"device {i}")
+                score = cls._score_device(name, input_device=input_device, pulse_name=pulse)
+                if score > -1000:
+                    ranked.append((score, i, name))
         except Exception:
             pass
+        ranked.sort(key=lambda t: t[0], reverse=True)
+        return [(idx, name, score) for score, idx, name in ranked]
+
+    @classmethod
+    def _pick_input_device(cls, pa) -> Tuple[Optional[int], Optional[str]]:
+        ranked = cls._rank_devices(pa, input_device=True)
+        if ranked:
+            idx, name, score = ranked[0]
+            print(f"[call-audio] Selected input [{idx}] score={score}: {name}")
+            return idx, name
         return None, None
+
+    @classmethod
+    def _pick_output_device(cls, pa) -> Tuple[Optional[int], Optional[str]]:
+        ranked = cls._rank_devices(pa, input_device=False)
+        if ranked:
+            idx, name, score = ranked[0]
+            print(f"[call-audio] Selected output [{idx}] score={score}: {name}")
+            return idx, name
+        return None, None
+
+    @staticmethod
+    def _log_audio_devices(pa) -> None:
+        try:
+            pulse = VoiceCallAudio._pulse_default_source()
+            if pulse:
+                print(f"[call-audio] PulseAudio default source: {pulse}")
+            for i in range(min(pa.get_device_count(), 16)):
+                info = pa.get_device_info_by_index(i)
+                name = str(info.get("name") or "")
+                ins = int(info.get("maxInputChannels", 0) or 0)
+                outs = int(info.get("maxOutputChannels", 0) or 0)
+                if ins or outs:
+                    print(f"[call-audio] Device {i}: in={ins} out={outs} — {name[:72]}")
+        except Exception:
+            pass
 
     @staticmethod
     def _pcm_peak(pcm_s16: bytes) -> int:
@@ -220,6 +326,7 @@ class VoiceCallAudio:
             "mode": "duplex" if self._send_enabled else "receive-only",
             "frames_sent": self.frames_sent,
             "frames_recv": self.frames_recv,
+            "mic_peak_max": self._peak_max,
             "jitter_ms": jb.get("buffered_ms", 0),
             "playout_delay_ms": jb.get("playout_delay_ms", 0),
             "plc_frames": jb.get("plc_frames", 0),

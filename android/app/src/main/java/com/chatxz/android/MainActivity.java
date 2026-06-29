@@ -62,6 +62,12 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 public class MainActivity extends AppCompatActivity {
+    private static MainActivity appInstance;
+
+    public static Context appContext() {
+        return appInstance != null ? appInstance.getApplicationContext() : null;
+    }
+
     private static final int PERM_REQUEST = 1001;
     private static final int REQ_AUDIO = 1002;
     private static final int REQ_FOLDER = 1003;
@@ -86,6 +92,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        appInstance = this;
 
         Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
             try {

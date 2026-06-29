@@ -3,6 +3,16 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.8.3": [
+        "Jitter buffer: out-of-order packet handling and attenuated PLC (Discord-style concealment).",
+        "Android decode: synchronized MediaCodec with per-packet seq queue — fixes mis-ordered playback.",
+        "Browser fallback: seq-ordered jitter buffer instead of arrival-order decode.",
+    ],
+    "0.8.2": [
+        "Voice calls: fixed Arch/Linux mic selection (PulseAudio-aware), Android MediaCodec Opus decode, and silent-mic browser fallback.",
+        "Android: speakerphone toggle during calls; keyboard stays open after sending chat.",
+        "Call hang-up clears audio engine and Android audio focus reliably.",
+    ],
     "0.8.1": [
         "Voice codebase cleanup: μ-law and dead call-audio code removed; Opus-only path throughout.",
         "New docs/VOICE.md explains architecture, dependencies, and troubleshooting.",

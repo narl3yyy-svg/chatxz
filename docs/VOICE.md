@@ -57,7 +57,7 @@ Voice **notes** (🎤) are separate one-shot recordings and do not use this pipe
 
 ### Jitter buffer
 
-The receive path buffers 2–12 frames (40–240 ms) before playout. Delay adapts to inter-arrival jitter. Missing frames use packet-loss concealment (repeat last good frame).
+The receive path buffers 2–12 frames (40–240 ms) before playout. Delay adapts to inter-arrival jitter. Out-of-order packets are reordered by sequence number before playout. Missing frames use packet-loss concealment (attenuated repeat of the last good frame — similar in spirit to Discord’s concealment, without their full NetEQ stack).
 
 ## Platform setup
 
@@ -92,17 +92,19 @@ brew install opus portaudio
 
 ### Android
 
-Rebuild/install the APK (API 29+). On call accept, `CallAudioEngine.java` captures and plays Opus natively — the WebView mic is not used for calls.
+Rebuild/install the APK (API 29+). On call accept, `CallAudioEngine.java` captures and plays Opus natively — the WebView mic is not used for calls. Tap **🔈/🔊** on the call dashboard for speakerphone.
 
 ## Troubleshooting
 
 | Symptom | Check |
 |---------|-------|
 | No audio either direction | Server logs for `[call] Opus out` / `[call] Audio in` |
+| `mic peak 0` on Linux | Check `[call-audio] Selected input` line; allow browser fallback or pick correct Pulse source |
 | `Native unavailable` on desktop | `libopus` installed? `./run.sh install` for PyAudio |
-| Garbled audio | Confirm logs show `Opus` not `pcmulaw` (old client) |
+| Garbled audio | Confirm logs show `Opus` not `pcmulaw` (old client); update both peers to v0.8.3+ |
 | Jitter stuck at 0–20 ms | Update to v0.8.0+; buffer should hold 40–120 ms |
-| Android silent | Microphone permission; API 29+ for MediaCodec Opus |
+| Android silent (receive) | Rebuild APK v0.8.3+ (Opus CSD + MediaCodec fix); API 29+ |
+| Android silent (send) | Microphone permission; check logcat `CallAudioEngine` |
 
 ## Logs to expect (healthy call)
 

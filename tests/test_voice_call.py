@@ -141,3 +141,48 @@ def test_call_glare_we_win_lexicographic():
     mb.voice_call.begin_outgoing("gg" * 16)
     assert mb._call_glare_we_win("zzzzzzzz-zzz") is True
     assert mb._call_glare_we_win("00000000-000") is False
+
+
+def test_call_end_resets_state_before_signaling():
+    from chatxz.core.messaging import MessagingBackend, CALL_END
+
+    mb = MessagingBackend.__new__(MessagingBackend)
+    mb.voice_call = VoiceCallSession()
+    peer = "hh" * 16
+    mb.voice_call.begin_outgoing(peer, "lan")
+    mb.voice_call.activate()
+    sent = []
+
+    def fake_send(peer_hash, msg_type, payload, transport=None):
+        sent.append((msg_type, mb.voice_call.state, payload.get("call_id")))
+        return True
+
+    mb._send_call_packet = fake_send
+    mb._emit_call_event = lambda *a, **k: None
+    mb.call_end()
+    assert mb.voice_call.state == STATE_IDLE
+    assert len(sent) == 1
+    assert sent[0][0] == CALL_END
+    assert sent[0][1] == STATE_IDLE
+
+
+def test_call_audio_rejects_non_opus_codec():
+    from chatxz.core.messaging import MessagingBackend, CALL_AUDIO
+    from types import SimpleNamespace
+
+    mb = MessagingBackend.__new__(MessagingBackend)
+    mb.voice_call = VoiceCallSession()
+    peer = "ii" * 16
+    mb.voice_call.begin_incoming("cid-1", peer, "lan")
+    mb.voice_call.activate("cid-1")
+    mb.dest_hash_for = lambda h: h
+    events = []
+    mb._emit_call_event = lambda ev, p, payload: events.append((ev, payload))
+
+    msg = SimpleNamespace(
+        msg_type=CALL_AUDIO,
+        content='{"call_id":"cid-1","seq":1,"codec":"audio/pcmu","data":"AA=="}',
+    )
+    mb._handle_call_packet(msg, peer, None)
+    assert events == []
+    assert getattr(mb, "_call_audio_recv", 0) == 0

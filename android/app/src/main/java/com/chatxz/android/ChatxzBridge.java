@@ -70,6 +70,16 @@ public class ChatxzBridge {
     }
 
     @JavascriptInterface
+    public void setSpeakerphone(boolean on) {
+        activity.runOnUiThread(() -> CallAudioEngine.getInstance().setSpeakerphone(on));
+    }
+
+    @JavascriptInterface
+    public boolean isSpeakerphone() {
+        return CallAudioEngine.getInstance().isSpeakerphone();
+    }
+
+    @JavascriptInterface
     public void vibrateIncomingCall() {
         activity.runOnUiThread(activity::vibrateIncomingCall);
     }

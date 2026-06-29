@@ -83,7 +83,7 @@ class OpusEncoder:
         self._sample_rate = sample_rate
         self._channels = channels
         self._set_int_ctl(4002, OPUS_BITRATE)  # OPUS_SET_BITRATE
-        self._set_int_ctl(4010, 1)  # OPUS_SET_DTX
+        self._set_int_ctl(4010, 0)  # OPUS_SET_DTX — off so silence is audible for debugging/PLC
         self._set_int_ctl(4008, 1)  # OPUS_SET_VBR
 
     def _set_int_ctl(self, req: int, value: int) -> None:

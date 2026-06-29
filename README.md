@@ -55,8 +55,8 @@ Regenerate identities under **Settings → Profile** (**Regenerate LAN** / **Reg
 
 | Platform | Audio path |
 |----------|------------|
-| Linux / Windows / macOS | libopus + PyAudio (native), or WebCodecs Opus in browser |
-| Android | Native `CallAudioEngine` (AudioRecord + MediaCodec Opus) |
+| Linux / Windows / macOS | libopus + PyAudio (native), or WebCodecs Opus in browser if native mic is silent |
+| Android | Native `CallAudioEngine` (AudioRecord + MediaCodec Opus + speakerphone toggle) |
 
 **Desktop deps:** `./run.sh web` installs PyAudio; system **libopus** is required (`pacman -S opus` / `apt install libopus0`).
 
@@ -125,8 +125,11 @@ uninstall.bat
 1. Download the **`.apk`** from [Releases](https://github.com/narl3yyy-svg/chatxz/releases).
 2. Install and open chatxz.
 3. Grant notification permission when asked. Microphone is requested when you tap 🎤 to record a voice note, or tap **Microphone** in the sidebar **Network** panel.
+4. During a call, use **🔈/🔊** on the call dashboard for speakerphone (earpiece vs loudspeaker).
 
 Reinstalling the app creates a **new identity** — update saved contacts after reinstall.
+
+**Update:** install the latest APK from [Releases](https://github.com/narl3yyy-svg/chatxz/releases) or build locally (see Development).
 
 ---
 
@@ -294,6 +297,10 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.8.3** — **Voice calls fixed:** seq-ordered jitter + PLC on all platforms; Android MediaCodec decode fix; Linux PulseAudio mic selection; speakerphone; keyboard stays open after send
+- **v0.8.2** — **Voice reliability:** PulseAudio-aware mic/output pick; silent-mic browser fallback; call hang-up cleanup
+- **v0.8.1** — **Opus cleanup:** removed μ-law call paths; `docs/VOICE.md` architecture guide
+- **v0.8.0** — **Opus-only calls:** custom libopus + PyAudio on desktop; native Android `CallAudioEngine`; adaptive jitter buffer
 - **v0.6.3** — **Call audio quality:** linear resampling (16 kHz LAN), batched playback, low-latency queue cap
 - **v0.6.2** — **Calls polish:** incoming ringtone + Android vibration; shared mic fixes “busy”; WS audio frames
 - **v0.6.1** — **Call + contact fixes:** PCM call audio (audible duplex); contact delete blocklist; names persist offline

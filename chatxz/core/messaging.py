@@ -5618,9 +5618,10 @@ class MessagingBackend:
             return False
         peer = self.voice_call.peer_hash
         cid = call_id or self.voice_call.call_id
-        if peer:
-            self._send_call_packet(peer, CALL_END, {"call_id": cid}, self.voice_call.transport)
+        transport = self.voice_call.transport
         self.voice_call.reset()
+        if peer:
+            self._send_call_packet(peer, CALL_END, {"call_id": cid}, transport)
         self._emit_call_event("ended", peer, {"call_id": cid})
         print(f"[call] Ended ({cid})")
         return True

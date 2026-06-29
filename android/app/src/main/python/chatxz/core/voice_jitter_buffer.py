@@ -53,7 +53,7 @@ class VoiceJitterBuffer:
     @property
     def buffered_ms(self) -> int:
         with self._lock:
-            if not self._next_seq:
+            if self._next_seq is None:
                 return int(len(self._frames) * self.frame_ms)
             ahead = sum(1 for s in self._frames if s >= self._next_seq)
             return int(ahead * self.frame_ms)
@@ -77,8 +77,6 @@ class VoiceJitterBuffer:
             want = self.target_frames + int(jitter / self.frame_ms)
             self._playout_frames = max(self.min_frames, min(self.max_frames, want))
         self._last_arrival = now
-        if self._next_seq is None:
-            self._next_seq = int(seq)
 
     def push(self, seq: int, pcm_s16: bytes) -> None:
         if not pcm_s16:
@@ -86,16 +84,20 @@ class VoiceJitterBuffer:
         seq = int(seq)
         with self._lock:
             self._update_arrival_stats(seq)
-            if self._next_seq is not None and seq < self._next_seq:
+            if self._primed and self._next_seq is not None and seq < self._next_seq:
                 self._late_count += 1
                 return
             self._frames[seq] = pcm_s16
             while len(self._frames) > self.max_frames:
                 oldest = min(self._frames)
                 del self._frames[oldest]
-                if self._next_seq is not None and self._next_seq <= oldest:
+                if self._primed and self._next_seq is not None and self._next_seq <= oldest:
                     self._next_seq = oldest + 1
-            if not self._primed and self._next_seq is not None:
+                elif not self._primed and self._frames:
+                    self._next_seq = min(self._frames)
+            if not self._primed and self._frames:
+                # Start playout at the lowest seq seen (handles out-of-order first packet).
+                self._next_seq = min(self._frames)
                 ahead = sum(1 for s in self._frames if s >= self._next_seq)
                 if ahead >= self._playout_frames:
                     self._primed = True
@@ -111,7 +113,18 @@ class VoiceJitterBuffer:
                 self._last_pcm = pcm
                 return pcm
             self._plc_count += 1
-            return self._last_pcm
+            # Discord-style PLC lite: repeat last frame with gentle decay to avoid clicks.
+            return self._attenuate_pcm(self._last_pcm, 0.92)
+
+    @staticmethod
+    def _attenuate_pcm(pcm_s16: bytes, gain: float) -> bytes:
+        if not pcm_s16 or gain >= 0.999:
+            return pcm_s16
+        import struct
+        count = len(pcm_s16) // 2
+        samples = struct.unpack(f"<{count}h", pcm_s16[: count * 2])
+        out = tuple(max(-32768, min(32767, int(round(s * gain)))) for s in samples)
+        return struct.pack(f"<{count}h", *out)
 
     def stats(self) -> dict:
         with self._lock:
