@@ -49,14 +49,14 @@ from chatxz.core.lan_rns import (
 )
 from chatxz.utils.platform import is_android, lan_ip, physical_lan_reachable
 from chatxz.core.lan_transfer import register_offer, remove_offer
-from chatxz.core.opus_native import OPUS_CODEC
-from chatxz.core.voice_call import (
+from chatxz.core.audio import (
     CALL_ACCEPT,
     CALL_AUDIO,
     CALL_END,
     CALL_INVITE,
     CALL_REJECT,
     CALL_TYPES,
+    OPUS_CODEC,
     STATE_ACTIVE,
     STATE_IDLE,
     STATE_INCOMING,

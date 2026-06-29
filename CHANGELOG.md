@@ -2,6 +2,17 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.0] — 2026-06-28
+
+### Changed
+- **Voice system rewrite** — deleted legacy `call_audio_engine.py`, `voice_call.py`, `voice_jitter_buffer.py`, `android_call_audio.py`; all implementations now live under `chatxz/core/audio/` (`session`, `opus`, `jitter`, `devices`, `engine`, `android`).
+- **Desktop engine** — dedicated capture and playback threads (not PortAudio callbacks) for reliable stop, hang-up, and Ctrl+C during active calls.
+
+### Fixed
+- **Linux microphone** — `pactl` fixes monitor-default sources; prefers Alt Analog; hot-swaps ranked devices after ~3 s silent capture.
+- **Ctrl+C during calls** — stops audio, sends `CALL_END`, fast `os._exit` instead of hanging in `runner.cleanup()`.
+- **Bidirectional hang-up** — engine stopped before `CALL_END`; remote receives `call_ended` WebSocket event.
+
 ## [0.8.7] — 2026-06-28
 
 ### Fixed

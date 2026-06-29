@@ -2,7 +2,7 @@ import json
 import time
 
 from chatxz.core.opus_native import OPUS_CODEC
-from chatxz.core.voice_call import (
+from chatxz.core.audio import (
     CALL_ACCEPT,
     CALL_AUDIO,
     CALL_AUDIO_MAX_OPUS_BYTES,

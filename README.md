@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — each transport uses its own RNS identity, and messages travel over encrypted links on your LAN (Wi‑Fi, Ethernet, USB serial).
 
-**Current version:** 0.8.7
+**Current version:** 0.9.0
 
 ## How chatxz works (v0.5+)
 
@@ -51,14 +51,14 @@ Regenerate identities under **Settings → Profile** (**Regenerate LAN** / **Reg
 - **Android sleep** — tap the contact to wake and reconnect (LAN wake is automatic).
 - **Cross-subnet LAN** — pick matching pinned IPv4 on both devices.
 
-**Voice calls:** when connected to a peer, tap **📞** in the chat header for a live duplex **Opus** call over RNS (LAN or USB). All platforms use Opus 48 kHz / 20 ms frames end-to-end. See **[docs/VOICE.md](docs/VOICE.md)** for architecture, dependencies, and troubleshooting.
+**Voice calls:** when connected to a peer, tap **📞** in the chat header for a live duplex **Opus** call over RNS (LAN or USB). All voice code is under `chatxz/core/audio/` — Opus 48 kHz / 20 ms frames, adaptive jitter buffer, threaded capture/playback on desktop. See **[docs/VOICE.md](docs/VOICE.md)**.
 
 | Platform | Audio path |
 |----------|------------|
-| Linux / Windows / macOS | libopus + PyAudio (native), or WebCodecs Opus in browser if native mic is silent |
-| Android | Native `CallAudioEngine` (AudioRecord + MediaCodec Opus + speakerphone toggle) |
+| Linux / Windows / macOS | `core/audio/engine.py` — libopus + PyAudio; browser WebCodecs fallback if native unavailable |
+| Android | `core/audio/android.py` + Java `CallAudioEngine` (MediaCodec Opus, speakerphone toggle) |
 
-**Desktop deps:** `./run.sh web` installs PyAudio; system **libopus** is required (`pacman -S opus` / `apt install libopus0`).
+**Desktop deps:** `./run.sh web` installs PyAudio; system **libopus** required (`pacman -S opus` / `apt install libopus0`). Linux also needs `pactl` (PulseAudio/PipeWire) for reliable mic selection.
 
 ## Download
 

@@ -4,7 +4,7 @@ from chatxz.core.opus_native import (
     OpusEncoder,
     opus_available,
 )
-from chatxz.core.voice_jitter_buffer import VoiceJitterBuffer, SILENCE_PCM
+from chatxz.core.audio import VoiceJitterBuffer, SILENCE_PCM
 
 
 def test_opus_roundtrip():

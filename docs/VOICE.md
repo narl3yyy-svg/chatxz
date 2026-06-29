@@ -25,18 +25,26 @@ Voice **notes** (🎤) are separate one-shot recordings and do not use this pipe
 
 ## Architecture
 
+All voice call code lives under **`chatxz/core/audio/`**:
+
+```
+capture thread → Opus encode → CALL_AUDIO (messaging.py) → RNS link
+RNS receive → Opus decode → jitter buffer → playback thread → speaker
+```
+
+Signaling: `INVITE → ACCEPT → ACTIVE → CALL_AUDIO frames → END`
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Signaling (voice_call.py)                                  │
-│  INVITE → ACCEPT → ACTIVE → CALL_AUDIO frames → END         │
+│  session.py — call state machine + MTU-safe frame splitting   │
 └─────────────────────────────────────────────────────────────┘
                               │
         ┌─────────────────────┼─────────────────────┐
         ▼                     ▼                     ▼
-  Desktop native        Browser WebCodecs      Android Java
-  VoiceCallAudio        (fallback)             CallAudioEngine
-  PyAudio + libopus     AudioEncoder/Decoder   AudioRecord +
-  VoiceJitterBuffer                           MediaCodec Opus
+  engine.py (desktop)   Browser WebCodecs      android.py + Java
+  PyAudio + libopus     (fallback)             CallAudioEngine
+  devices.py +          AudioEncoder/Decoder   AudioRecord +
+  jitter.py                                       MediaCodec Opus
         │                     │                     │
         └─────────────────────┴─────────────────────┘
                               │
@@ -44,20 +52,30 @@ Voice **notes** (🎤) are separate one-shot recordings and do not use this pipe
                     (__call_audio + seq + b64)
 ```
 
-### Modules
+### Modules (`chatxz/core/audio/`)
 
 | Module | Role |
 |--------|------|
-| `voice_call.py` | Call state machine, signaling packet types, MTU-safe frame splitting |
-| `opus_native.py` | ctypes bindings to system libopus (encode/decode) |
-| `voice_jitter_buffer.py` | Adaptive playout buffer with PLC |
-| `call_audio_engine.py` | Desktop `VoiceCallAudio` — PyAudio capture/playback |
-| `android_call_audio.py` | Python ↔ Java bridge on Android |
+| `session.py` | Call state machine, signaling packet types, MTU-safe frame splitting |
+| `opus.py` | ctypes bindings to system libopus (encode/decode) |
+| `jitter.py` | Adaptive playout buffer with PLC |
+| `devices.py` | Linux PulseAudio/ALSA mic and speaker selection |
+| `engine.py` | Desktop `CallAudioEngine` — threaded capture/playback (not PortAudio callbacks) |
+| `android.py` | Python ↔ Java bridge on Android |
 | `messaging.py` | Routes `CALL_*` packets and assigns audio sequence numbers |
 
 ### Jitter buffer
 
-The receive path buffers 2–12 frames (40–240 ms) before playout. Delay adapts to inter-arrival jitter. Out-of-order packets are reordered by sequence number before playout. Missing frames use packet-loss concealment (attenuated repeat of the last good frame — similar in spirit to Discord’s concealment, without their full NetEQ stack).
+The receive path buffers 2–12 frames (40–240 ms) before playout. Delay adapts to inter-arrival jitter. Out-of-order packets are reordered by sequence number. Missing frames use packet-loss concealment (attenuated repeat of the last good frame).
+
+### Linux microphone selection
+
+On Arch and Ubuntu, `devices.py`:
+
+1. Uses `pactl` to reject `.monitor` (HDMI loopback) sources.
+2. Sets Pulse default source to a real `alsa_input` device when needed.
+3. Ranks PyAudio devices (prefers Alt Analog, pipewire, default).
+4. Hot-swaps to the next ranked device if capture stays silent for ~3 seconds.
 
 ## Platform setup
 
@@ -65,10 +83,10 @@ The receive path buffers 2–12 frames (40–240 ms) before playout. Delay adapt
 
 ```bash
 # Arch
-sudo pacman -S opus portaudio python-pyaudio
+sudo pacman -S opus portaudio python-pyaudio pulseaudio
 
 # Ubuntu / Debian
-sudo apt install libopus0 portaudio19-dev python3-pyaudio
+sudo apt install libopus0 portaudio19-dev python3-pyaudio pulseaudio-utils
 
 ./run.sh web --share
 ```
@@ -98,22 +116,22 @@ Rebuild/install the APK (API 29+). On call accept, `CallAudioEngine.java` captur
 
 | Symptom | Check |
 |---------|-------|
-| No audio either direction | Server logs for `[call] Opus out` / `[call] Audio in` |
-| `mic peak 0` on Linux | v0.8.4+ skips Pulse `.monitor` defaults; check `[call-audio] PulseAudio default source` is `alsa_input…` not `alsa_output…monitor` |
-| Ctrl+C ignored during call | Update to v0.8.6+; Linux `signalfd` thread + forced exit after 0.8s |
-| Dashboard shows 0 audio sent/received | v0.8.4+ pushes `call_stats` over WebSocket; confirm WS connected |
+| No audio either direction | Server logs for `[call] Opus out` / `[call] Audio in` and `[call-audio] Opus out` |
+| `mic peak 0` on Linux | Logs should show `alsa_input…` not `…monitor`; hot-swap tries alternate devices after ~3 s silence |
+| Ctrl+C ignored during call | v0.9.0+ stops audio, sends CALL_END, then `os._exit` — no hung PortAudio cleanup |
+| Hang-up one-sided | v0.9.0+ stops engine before CALL_END; remote gets `call_ended` WebSocket event |
+| Dashboard shows 0 audio sent/received | `call_stats` WebSocket push; native stats come from server engine |
 | `Native unavailable` on desktop | `libopus` installed? `./run.sh install` for PyAudio |
-| Garbled audio | Confirm logs show `Opus` not `pcmulaw` (old client); update both peers to v0.8.3+ |
-| Jitter stuck at 0–20 ms | Update to v0.8.0+; buffer should hold 40–120 ms |
-| Android silent (receive) | Rebuild APK v0.8.3+ (Opus CSD + MediaCodec fix); API 29+ |
-| Android silent (send) | Microphone permission; check logcat `CallAudioEngine` |
+| Garbled audio | Confirm logs show `Opus` not `pcmulaw`; update both peers to v0.8.3+ |
+| Android silent | Rebuild APK; API 29+; check logcat `CallAudioEngine` |
 
 ## Logs to expect (healthy call)
 
 ```
 [call] Outgoing to abc123... (call-id)
 [call] Accepted by abc123...
-[call-audio] Voice engine started (duplex, Opus 48 kHz, 20 ms)
+[call-audio] Engine started (duplex, Opus 48 kHz, 20 ms)
 [call-audio] Opus out #1 (… b64, … B)
 [call] Audio in #1 (…) ← abc123...
+[call-audio] Opus in #1 (seq=1, … b64, jb=40 ms)
 ```

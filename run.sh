@@ -31,7 +31,7 @@ deps_core_ok() {
 }
 
 deps_voice_ok() {
-    "$1" -c "from chatxz.core.call_audio_engine import call_audio_available; import sys; sys.exit(0 if call_audio_available() else 1)" 2>/dev/null
+    "$1" -c "from chatxz.core.audio import call_audio_available; import sys; sys.exit(0 if call_audio_available() else 1)" 2>/dev/null
 }
 
 recreate_venv_with_system_packages() {

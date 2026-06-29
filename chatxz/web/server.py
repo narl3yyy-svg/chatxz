@@ -16,9 +16,12 @@ if getattr(sys, "frozen", False):
 from chatxz.core.identity import IdentityManager
 from chatxz.core.messaging import HUB_GROUP_PEER, MessagingBackend, is_hub_peer_hash
 from chatxz.core.voice import VoiceRecorder, VoicePlayer
-from chatxz.core.call_audio_engine import (
+from chatxz.core.audio import (
     CallAudioEngine,
     OPUS_CODEC,
+    STATE_ACTIVE,
+    STATE_IDLE,
+    STATE_OUTGOING,
     call_audio_available,
 )
 from chatxz.core.discovery import PeerDiscovery
@@ -504,6 +507,7 @@ class ChatWebServer:
         self._shutdown_pipe_r = None
         self._shutdown_pipe_w = None
         self._shutdown_forced = False
+        self._shutdown_fast = False
         self._shutdown_force_timer = None
         self._linux_signal_shutdown = None
         self._call_stats_last_key = None
@@ -2518,7 +2522,7 @@ class ChatWebServer:
         return call_audio_available()
 
     def _start_android_call_audio(self):
-        from chatxz.core import android_call_audio
+        from chatxz.core.audio import android as android_call_audio
 
         def send_audio(b64, codec):
             try:
@@ -2549,7 +2553,7 @@ class ChatWebServer:
             print("[call-audio] Android native engine unavailable — browser Opus fallback")
 
     def _stop_android_call_audio(self):
-        from chatxz.core import android_call_audio
+        from chatxz.core.audio import android as android_call_audio
         try:
             from java import jclass
             jclass("com.chatxz.android.CallAudioEngine").getInstance().stop()
@@ -2600,7 +2604,6 @@ class ChatWebServer:
             pass
         if not self.messaging:
             return False
-        from chatxz.core.voice_call import STATE_IDLE
         if self.messaging.voice_call.state == STATE_IDLE:
             return True
         return self.messaging.call_end(call_id)
@@ -2608,7 +2611,7 @@ class ChatWebServer:
     def _deliver_call_audio_frame(self, seq, data, codec):
         codec = (codec or OPUS_CODEC).strip()
         if getattr(self, "_android_call_audio", False):
-            from chatxz.core import android_call_audio
+            from chatxz.core.audio import android as android_call_audio
             android_call_audio.play_incoming_opus(seq, data)
             return
         if self.call_audio_engine:
@@ -5681,12 +5684,18 @@ class ChatWebServer:
             self._schedule_forced_exit(signum, delay=0.05)
             return
         self._shutting_down = True
+        self._shutdown_fast = True
         print("\n[shutdown] Stopping...", flush=True)
         try:
             self._stop_call_audio_engine()
         except Exception:
             pass
         if self.messaging:
+            try:
+                if self.messaging.voice_call.state != STATE_IDLE:
+                    self.messaging.call_end()
+            except Exception:
+                pass
             self.messaging.shutdown_requested = True
         loop = self._loop
         if loop and not loop.is_closed() and loop.is_running():
@@ -5803,7 +5812,6 @@ class ChatWebServer:
         return st
 
     async def _broadcast_call_stats(self, force=False):
-        from chatxz.core.voice_call import STATE_ACTIVE, STATE_OUTGOING
         if not self.messaging:
             return
         state = self.messaging.voice_call.state
@@ -5838,7 +5846,6 @@ class ChatWebServer:
                 await self._broadcast_call_stats()
             except Exception:
                 pass
-            from chatxz.core.voice_call import STATE_ACTIVE
             if self.messaging and self.messaging.voice_call.state == STATE_ACTIVE:
                 self._install_shutdown_signals()
 
@@ -6071,6 +6078,7 @@ class ChatWebServer:
             nonlocal stopping
             if stopping:
                 self._shutdown_forced = True
+                self._shutdown_fast = True
                 try:
                     self._stop_call_audio_engine()
                 except Exception:
@@ -6081,6 +6089,7 @@ class ChatWebServer:
                     pass
                 os._exit(130 if signum == signal.SIGINT else 0)
             stopping = True
+            self._shutdown_fast = True
             self._request_shutdown(signum or signal.SIGINT)
 
         self._shutdown_handler = _stop_loop
@@ -6118,6 +6127,17 @@ class ChatWebServer:
                 except Exception:
                     pass
             self._close_shutdown_pipe()
+            # PortAudio/RNS cleanup can hang during active calls — fast-exit instead.
+            if getattr(self, "_shutdown_fast", False) or self._shutdown_forced:
+                try:
+                    self._teardown_network_stack()
+                except Exception:
+                    pass
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+                os._exit(130)
             try:
                 loop.run_until_complete(runner.cleanup())
             except Exception:

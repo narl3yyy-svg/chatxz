@@ -1,6 +1,12 @@
-from chatxz.core.call_audio_engine import VoiceCallAudio, call_audio_available
-from chatxz.core.opus_native import OpusDecoder, OpusEncoder, opus_available
-from chatxz.core.voice_jitter_buffer import SILENCE_PCM, VoiceJitterBuffer
+from chatxz.core.audio import VoiceCallAudio, call_audio_available
+from chatxz.core.audio.devices import (
+    pcm_peak,
+    pulse_best_capture_source,
+    score_device,
+)
+from chatxz.core.audio.engine import CallAudioEngine
+from chatxz.core.audio.jitter import SILENCE_PCM, VoiceJitterBuffer
+from chatxz.core.audio.opus import OpusDecoder, OpusEncoder, opus_available
 
 
 def test_call_jitter_buffer_plc():
@@ -44,6 +50,7 @@ def test_opus_roundtrip_via_engine_codecs():
 
 def test_voice_call_audio_class_exists():
     assert VoiceCallAudio.available() == call_audio_available()
+    assert CallAudioEngine is VoiceCallAudio
 
 
 def test_pulse_best_capture_source_skips_monitor(monkeypatch):
@@ -53,73 +60,67 @@ def test_pulse_best_capture_source_skips_monitor(monkeypatch):
             "alsa_input.pci.analog-stereo",
             "alsa_output.pci.analog-stereo.monitor",
         ]
-    monkeypatch.setattr(VoiceCallAudio, "_pulse_list_sources", staticmethod(fake_list))
-    assert VoiceCallAudio._pulse_best_capture_source() == "alsa_input.pci.analog-stereo"
+
+    from chatxz.core.audio import devices
+
+    monkeypatch.setattr(devices, "pulse_list_sources", fake_list)
+    assert pulse_best_capture_source() == "alsa_input.pci.analog-stereo"
 
 
 def test_score_device_ignores_monitor_pulse_default():
     pulse = "alsa_output.pci.hdmi-stereo.monitor"
-    mic = VoiceCallAudio._score_device(
+    mic = score_device(
         "HDA Intel PCH: ALC897 Analog (hw:0,0)", input_device=True, pulse_name=pulse
     )
-    hdmi = VoiceCallAudio._score_device(
+    hdmi = score_device(
         "HDA Intel PCH: HDMI (hw:0,7)", input_device=True, pulse_name=pulse
     )
     assert mic > hdmi
 
 
 def test_score_device_rejects_monitor_loopback():
-    score = VoiceCallAudio._score_device("alsa_output.monitor", input_device=True, pulse_name=None)
-    assert score == -1000
-    score = VoiceCallAudio._score_device("Null Audio Device", input_device=True, pulse_name=None)
-    assert score == -1000
+    assert score_device("alsa_output.monitor", input_device=True, pulse_name=None) == -1000
+    assert score_device("Null Audio Device", input_device=True, pulse_name=None) == -1000
 
 
 def test_score_device_prefers_pulse_default_source():
     pulse = "alsa_input.usb_mic"
-    monitor = VoiceCallAudio._score_device(
-        "alsa_output.usb_mic.monitor", input_device=True, pulse_name=pulse
-    )
-    mic = VoiceCallAudio._score_device(
-        "alsa_input.usb_mic", input_device=True, pulse_name=pulse
-    )
-    hdmi = VoiceCallAudio._score_device(
-        "HDA Intel HDMI", input_device=True, pulse_name=pulse
-    )
+    assert score_device("alsa_output.usb_mic.monitor", input_device=True, pulse_name=pulse) == -1000
+    mic = score_device("alsa_input.usb_mic", input_device=True, pulse_name=pulse)
+    hdmi = score_device("HDA Intel HDMI", input_device=True, pulse_name=pulse)
     assert mic > hdmi
-    assert monitor == -1000
 
 
 def test_score_device_prefers_alt_analog_on_alsa():
-    alt = VoiceCallAudio._score_device(
+    alt = score_device(
         "HDA Intel PCH: ALC897 Alt Analog (hw:0,2)", input_device=True, pulse_name=None
     )
-    sysdef = VoiceCallAudio._score_device("sysdefault", input_device=True, pulse_name=None)
-    hw = VoiceCallAudio._score_device(
+    sysdef = score_device("sysdefault", input_device=True, pulse_name=None)
+    hw = score_device(
         "HDA Intel PCH: ALC897 Analog (hw:0,0)", input_device=True, pulse_name=None
     )
     assert alt > sysdef > hw
 
 
 def test_score_device_prefers_default_input_over_raw_hw():
-    default = VoiceCallAudio._score_device("default", input_device=True, pulse_name=None)
-    hw = VoiceCallAudio._score_device(
+    default = score_device("default", input_device=True, pulse_name=None)
+    hw = score_device(
         "HDA Intel PCH: ALC897 Analog (hw:0,0)", input_device=True, pulse_name=None
     )
     assert default > hw
 
 
 def test_score_device_prefers_pipewire_input():
-    pipe = VoiceCallAudio._score_device("pipewire", input_device=True, pulse_name=None)
-    hw = VoiceCallAudio._score_device(
+    pipe = score_device("pipewire", input_device=True, pulse_name=None)
+    hw = score_device(
         "HDA Intel PCH: ALC897 Analog (hw:0,0)", input_device=True, pulse_name=None
     )
     assert pipe > hw
 
 
 def test_score_device_output_penalizes_hdmi():
-    speaker = VoiceCallAudio._score_device("Built-in Analog Output", input_device=False, pulse_name=None)
-    hdmi = VoiceCallAudio._score_device("HDA Intel HDMI 7.1", input_device=False, pulse_name=None)
+    speaker = score_device("Built-in Analog Output", input_device=False, pulse_name=None)
+    hdmi = score_device("HDA Intel HDMI 7.1", input_device=False, pulse_name=None)
     assert speaker > hdmi
 
 
@@ -128,7 +129,6 @@ def test_jitter_buffer_seq_zero_buffered_ms():
     frame = b"\x00\x01" * 960
     jb.push(0, frame)
     jb.push(1, frame)
-    # seq 0 is valid; buffered_ms must reflect 2 frames ahead of playout (40 ms)
     assert jb.buffered_ms == 40
 
 
@@ -138,7 +138,7 @@ def test_jitter_buffer_out_of_order_reorder():
     f2 = b"\x02\x00" * 960
     f3 = b"\x03\x00" * 960
     jb.push(3, f3)
-    assert jb.read() == SILENCE_PCM  # not primed yet
+    assert jb.read() == SILENCE_PCM
     jb.push(1, f1)
     jb.push(2, f2)
     assert jb.read() == f1
@@ -150,6 +150,7 @@ def test_opus_encode_send_receive_pipeline():
     if not opus_available():
         return
     import base64
+
     sent = []
     engine = VoiceCallAudio(lambda b64, codec: sent.append((b64, codec)) or True)
     enc = OpusEncoder()
@@ -158,7 +159,6 @@ def test_opus_encode_send_receive_pipeline():
     tone = b"\x00\x10" * 960
     pkt = enc.encode(tone)
     assert pkt
-    b64 = base64.b64encode(pkt).decode("ascii")
     pcm = dec.decode(pkt)
     assert pcm
     jb.push(1, pcm)
@@ -168,3 +168,8 @@ def test_opus_encode_send_receive_pipeline():
     assert out and len(out) == len(pcm)
     assert jb.read() == pcm
     assert sent == []
+
+
+def test_pcm_peak():
+    assert pcm_peak(SILENCE_PCM) == 0
+    assert pcm_peak(b"\xff\x7f" + b"\x00\x00" * 959) > 0

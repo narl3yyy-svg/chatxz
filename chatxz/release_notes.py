@@ -3,6 +3,12 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.9.0": [
+        "Voice system rewritten: all call audio code consolidated under chatxz/core/audio/.",
+        "Desktop engine uses dedicated capture/playback threads (reliable stop and Ctrl+C during calls).",
+        "Linux mic: PulseAudio source fix, Alt Analog preference, automatic hot-swap on silent capture.",
+        "Hang-up stops native audio before CALL_END; remote UI resets via call_ended WebSocket event.",
+    ],
     "0.8.3": [
         "Jitter buffer: out-of-order packet handling and attenuated PLC (Discord-style concealment).",
         "Android decode: synchronized MediaCodec with per-packet seq queue — fixes mis-ordered playback.",
