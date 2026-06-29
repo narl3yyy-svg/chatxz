@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import os
 import struct
-from typing import Optional
+import sys
+from typing import List, Optional
 
 OPUS_OK = 0
 OPUS_APPLICATION_VOIP = 2048
@@ -20,19 +22,75 @@ _lib: Optional[ctypes.CDLL] = None
 _lib_error: Optional[str] = None
 
 
+def _opus_library_candidates() -> List[str]:
+    """Platform-specific libopus paths (Windows .dll, macOS .dylib, Linux .so)."""
+    candidates: List[str] = []
+    found = ctypes.util.find_library("opus")
+    if found:
+        candidates.append(found)
+
+    if sys.platform == "win32":
+        candidates.extend(("opus", "opus.dll", "libopus-0.dll", "libopus.dll"))
+    elif sys.platform == "darwin":
+        candidates.extend((
+            "libopus.0.dylib",
+            "libopus.dylib",
+            "opus",
+            "/opt/homebrew/lib/libopus.0.dylib",
+            "/opt/homebrew/lib/libopus.dylib",
+            "/usr/local/lib/libopus.0.dylib",
+            "/usr/local/lib/libopus.dylib",
+        ))
+    else:
+        candidates.extend(("libopus.so.0", "libopus.so", "opus"))
+
+    roots = [
+        os.path.dirname(__file__),
+        os.path.join(os.path.dirname(__file__), "..", "native"),
+        os.path.join(os.path.dirname(__file__), "..", "native", "windows"),
+        os.path.join(os.path.dirname(__file__), "..", "native", "macos"),
+        os.path.join(os.path.dirname(__file__), "..", "native", "linux"),
+    ]
+    if hasattr(sys, "prefix"):
+        roots.append(os.path.join(sys.prefix, "DLLs"))
+        roots.append(os.path.join(sys.prefix, "lib"))
+    for env_key in ("CHATXZ_ROOT", "VIRTUAL_ENV"):
+        root = os.environ.get(env_key, "").strip()
+        if root:
+            roots.append(root)
+            if sys.platform == "win32":
+                roots.append(os.path.join(root, "Scripts"))
+            else:
+                roots.append(os.path.join(root, "lib"))
+
+    seen = set()
+    ordered: List[str] = []
+    for item in candidates:
+        if item and item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    for root in roots:
+        if not root:
+            continue
+        root = os.path.abspath(root)
+        for name in ("opus.dll", "libopus-0.dll", "libopus.dll",
+                     "libopus.0.dylib", "libopus.dylib",
+                     "libopus.so.0", "libopus.so"):
+            path = os.path.join(root, name)
+            if path not in seen and os.path.isfile(path):
+                seen.add(path)
+                ordered.append(path)
+    return ordered
+
+
 def _load_libopus() -> Optional[ctypes.CDLL]:
     global _lib, _lib_error
     if _lib is not None:
         return _lib
     if _lib_error:
         return None
-    names = []
-    found = ctypes.util.find_library("opus")
-    if found:
-        names.append(found)
-    names.extend(("libopus.so.0", "libopus.so", "opus"))
     last_err = None
-    for name in names:
+    for name in _opus_library_candidates():
         try:
             _lib = ctypes.CDLL(name)
             return _lib

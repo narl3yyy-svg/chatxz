@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — each transport uses its own RNS identity, and messages travel over encrypted links on your LAN (Wi‑Fi, Ethernet, USB serial).
 
-**Current version:** 0.9.5
+**Current version:** 0.9.6
 
 ## How chatxz works (v0.5+)
 
@@ -90,7 +90,7 @@ run.bat web --share
 
 Open **http://127.0.0.1:8742**. Logs stay in that cmd window.
 
-**Voice notes:** use `http://127.0.0.1:8742` (Windows) or `http://localhost:8742` (macOS/Linux). **Firefox on Mac:** Settings → Privacy & Security → Permissions → Microphone → allow `localhost`. Also enable Firefox under **macOS → Privacy & Security → Microphone**.
+**Voice calls & mic:** always open the UI on **this machine** at `http://127.0.0.1:8742` (Windows) or `http://localhost:8742` (macOS/Linux). Browser microphone access is **blocked** on raw LAN IPs like `http://10.0.x.x:8742` even with `--share`. **macOS native voice:** `brew install opus portaudio` then restart `./run.sh web --share`. **Firefox on Mac:** allow `localhost` under Firefox Settings → Privacy → Microphone and macOS System Settings → Privacy → Microphone.
 
 **Stop:** **Ctrl+C** — server exits and **all ports close** (8742, 4242, 8743). Nothing keeps listening after `run.bat` ends.
 
@@ -299,6 +299,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v0.9.6** — **Voice mic fix:** Mac/Windows libopus loading; LAN-IP mic banner (use localhost for calls); browser Opus fallback when native unavailable; macOS `brew install opus`
 - **v0.9.5** — **Discovered refresh:** sidebar ↻ re-probes LAN and drops stale peer hashes; authoritative list on Android foreground; voice call audio flush + browser Opus fallback when native stalls
 - **v0.9.4** — **Call reliability:** hang-up no longer deadlocks on ALSA init; invite blocked when link down; macOS `run.sh` empty-array fix
 - **v0.8.3** — **Voice calls fixed:** seq-ordered jitter + PLC on all platforms; Android MediaCodec decode fix; Linux PulseAudio mic selection; speakerphone; keyboard stays open after send

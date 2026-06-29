@@ -195,6 +195,12 @@ body::before {
 }
 .section-refresh-btn:hover { color: var(--text); border-color: var(--primary); }
 .section-refresh-btn:disabled { opacity: 0.45; cursor: wait; }
+.call-mic-banner {
+  margin-top: 8px; padding: 8px 10px; border-radius: var(--radius-md);
+  background: rgba(255, 180, 0, 0.12); border: 1px solid rgba(255, 180, 0, 0.35);
+  color: var(--warning); font-size: 11px; line-height: 1.45;
+}
+.call-mic-banner a { color: var(--primary); text-decoration: underline; }
 .search-box {
   position: relative; margin-bottom: 12px;
 }
@@ -1644,6 +1650,7 @@ body.android-shell.sidebar-open #sidebar-backdrop {
       <div class="brand-text">
         <h1><span id="brand-title">chatxz</span> <span id="header-version" style="font-size:12px;color:var(--text3);font-weight:500"></span></h1>
         <div class="brand-sub">Encrypted mesh messaging</div>
+        <div id="call-mic-banner" class="call-mic-banner" style="display:none" role="status"></div>
         <div id="identity-box" onclick="openIdentityModal()" title="Your identity — click to manage">Loading...</div>
       </div>
       <button id="settings-btn" onclick="toggleSettings()" title="Settings">⚙</button>
@@ -3193,6 +3200,8 @@ function fetchIdentity() {
         if (hv) hv.textContent = 'v' + d.app_version;
       }
       nativeCallAudioEnabled = !!d.native_call_audio;
+      window._callAudioHint = d.call_audio_hint || '';
+      updateCallMicBanner(d);
       window._callCodecPref = d.call_codec || 'audio/opus;rate=48000;frame=20';
       appPlatform = d.platform || (window.chatxzAndroid?.isAndroid?.() ? 'android' : 'desktop');
       updatePlatformHints();
@@ -4459,6 +4468,50 @@ function netClass(ok) {
 
 const SERIAL_BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 const SERIAL_DEFAULT_BAUD = 57600;
+
+function callMicSecureContext() {
+  if (isAndroidShell()) return true;
+  if (window.isSecureContext) return true;
+  const h = (location.hostname || '').toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+}
+
+function preferredLocalCallUrl() {
+  const port = location.port || '8742';
+  const host = detectClientPlatform() === 'darwin' ? 'localhost' : '127.0.0.1';
+  return `http://${host}:${port}`;
+}
+
+function updateCallMicBanner(data) {
+  const el = document.getElementById('call-mic-banner');
+  if (!el || isAndroidShell()) return;
+  if (!callMicSecureContext()) {
+    const local = preferredLocalCallUrl();
+    el.style.display = 'block';
+    el.innerHTML = `Voice calls on this machine need <a href="${local}">${local}</a> — browser mic is blocked on raw LAN IPs.`;
+    return;
+  }
+  const hint = (data && data.call_audio_hint) || window._callAudioHint || '';
+  if (hint && !(data && data.native_call_audio)) {
+    el.style.display = 'block';
+    el.textContent = hint;
+    return;
+  }
+  el.style.display = 'none';
+  el.textContent = '';
+}
+
+async function preflightCallMic() {
+  if (!callMicSecureContext() || !navigator.mediaDevices?.getUserMedia) return false;
+  if (callCaptureNode || sharedMicActive()) return true;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio: true, video: false});
+    stream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 function updatePlatformHints() {
   const os = detectClientPlatform();
@@ -6248,6 +6301,7 @@ function showIncomingCall(peer, data) {
     document.getElementById('call-incoming-overlay')?.classList.add('open');
   }
   startCallRingtone();
+  if (callMicSecureContext()) void preflightCallMic();
   if (window.chatxzAndroid?.showIncomingCallNotification) {
     window.chatxzAndroid.showIncomingCallNotification(name, `${peerInterfaceLabel(callVia)} call`, callPeer);
   }
@@ -6433,8 +6487,8 @@ function updateCallDashboard() {
       );
       if (outN === 0 && inN === 0 && !serverActive) {
         hintEl.style.display = 'block';
-        hintEl.textContent = !window.isSecureContext && !isAndroidShell()
-          ? 'No audio — open http://127.0.0.1:8742 (mic needs secure context on desktop)'
+        hintEl.textContent = !callMicSecureContext() && !isAndroidShell()
+          ? `No audio — open ${preferredLocalCallUrl()} (mic needs secure context on desktop)`
           : 'No audio detected — check microphone permission and speak into the mic';
       } else if (outN === 0 && !cfg.native && !useNativeCallAudio()) {
         hintEl.style.display = 'block';
@@ -7026,7 +7080,8 @@ async function startCallCapture(opts) {
   if (forceBrowser) callForceBrowserPlayback = true;
   if (callCaptureNode) return true;
   stopCallRingtone();
-  if (!isAndroidShell() && !window.isSecureContext) {
+  if (!isAndroidShell() && !callMicSecureContext()) {
+    updateCallMicBanner();
     toast(micAccessHint({name: 'SecurityError'}));
     return false;
   }
@@ -7034,9 +7089,13 @@ async function startCallCapture(opts) {
     await new Promise(r => setTimeout(r, 350));
     try {
       const st = await callApi({action: 'status'});
-      if (st && !st.error) callServerStats = st;
+      if (st && !st.error) {
+        callServerStats = st;
+        if (st.call_audio_hint) window._callAudioHint = st.call_audio_hint;
+        if (st.native_call_audio === false) nativeCallAudioEnabled = false;
+      }
     } catch (_) {}
-    if (useNativeCallAudio() && !forceBrowser) {
+    if (useNativeCallAudio() && !forceBrowser && nativeCallAudioEnabled) {
       primeCallPlayback();
       scheduleCallNativeFallbackWatchdog();
       updateCallDashboard();
@@ -7327,8 +7386,8 @@ function micAccessHint(err) {
   const os = detectClientPlatform();
   const browser = micBrowserLabel();
   const localUrl = os === 'darwin' ? 'http://localhost:8742' : 'http://127.0.0.1:8742';
-  if (!window.isSecureContext) {
-    return `Microphone needs a secure page — open ${localUrl} (not a raw LAN IP in ${browser})`;
+  if (!callMicSecureContext()) {
+    return `Microphone needs a secure page — open ${localUrl} on this machine (not a raw LAN IP in ${browser})`;
   }
   const name = err?.name || '';
   if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
@@ -7386,7 +7445,8 @@ async function startVoice(skipPermissionCheck) {
     toast('Voice recording not supported in this browser');
     return;
   }
-  if (!window.isSecureContext) {
+  if (!callMicSecureContext()) {
+    updateCallMicBanner();
     toast(micAccessHint({name: 'SecurityError'}));
     return;
   }

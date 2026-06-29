@@ -1,3 +1,5 @@
+import sys
+
 from chatxz.core.opus_native import (
     OPUS_FRAME_SAMPLES,
     OpusDecoder,
@@ -5,6 +7,7 @@ from chatxz.core.opus_native import (
     opus_available,
 )
 from chatxz.core.audio import VoiceJitterBuffer, SILENCE_PCM
+from chatxz.core.audio.opus import _opus_library_candidates
 
 
 def test_opus_roundtrip():
@@ -17,6 +20,15 @@ def test_opus_roundtrip():
     assert pkt and len(pkt) > 0
     out = dec.decode(pkt)
     assert out and len(out) == OPUS_FRAME_SAMPLES * 2
+
+
+def test_opus_library_candidates_include_platform_names():
+    names = _opus_library_candidates()
+    assert names
+    if sys.platform == "win32":
+        assert any("opus.dll" in n.lower() or n.lower() == "opus" for n in names)
+    elif sys.platform == "darwin":
+        assert any("dylib" in n or n.endswith("opus") for n in names)
 
 
 def test_voice_jitter_adaptive_delay():

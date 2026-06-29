@@ -82,6 +82,9 @@ install_voice_deps() {
     fi
     echo "  Ubuntu/Debian: sudo apt install libopus0 portaudio19-dev python3-dev python3-pyaudio"
     echo "  Arch: sudo pacman -S opus portaudio python-pyaudio"
+    if [ "$(uname -s 2>/dev/null || echo)" = "Darwin" ]; then
+        echo "  macOS: brew install opus portaudio"
+    fi
     echo "  Then re-run: ./run.sh web"
     return 1
 }

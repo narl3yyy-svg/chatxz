@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.9.6": [
+        "Voice calls: open http://localhost:8742 (Mac) or http://127.0.0.1:8742 (Windows) — browser mic is blocked on LAN IPs.",
+        "macOS native voice: brew install opus portaudio, then restart chatxz.",
+        "Browser Opus fallback when native libopus is missing; mic preflight on incoming calls.",
+    ],
     "0.9.5": [
         "Discovered list refresh: tap ↻ beside Discovered to re-probe LAN and drop stale peer hashes.",
         "Android foreground refresh updates the discovered list automatically when you return to the app.",

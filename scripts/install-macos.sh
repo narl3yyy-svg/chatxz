@@ -30,7 +30,7 @@ read -p "Install voice support (pyaudio)? [y/N]: " voice_opt
 EXTRA=""
 if [[ "$voice_opt" =~ ^[Yy]$ ]]; then
     if command -v brew >/dev/null 2>&1; then
-        brew install portaudio || true
+        brew install opus portaudio || true
     fi
     EXTRA="[voice]"
 fi

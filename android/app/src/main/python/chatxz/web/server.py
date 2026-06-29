@@ -2523,6 +2523,25 @@ class ChatWebServer:
             return True
         return call_audio_available()
 
+    def _call_audio_setup_hint(self):
+        if is_android() or call_audio_available():
+            return ""
+        from chatxz.core.audio.opus import opus_unavailable_reason
+        import sys as _sys
+
+        reason = (opus_unavailable_reason() or "libopus or pyaudio not installed").strip()
+        if _sys.platform == "darwin":
+            return (
+                f"Native voice off ({reason}). Run: brew install opus portaudio, "
+                "then restart. Or open http://localhost:8742 for browser mic."
+            )
+        if _sys.platform == "win32":
+            return (
+                f"Native voice off ({reason}). Use http://127.0.0.1:8742 for browser mic "
+                "or install libopus (opus.dll on PATH)."
+            )
+        return f"Native voice off ({reason}). Browser Opus works at http://localhost:8742."
+
     def _start_android_call_audio(self):
         from chatxz.core.audio import android as android_call_audio
 
@@ -2895,6 +2914,8 @@ class ChatWebServer:
             "serial_configured": serial_configured,
             "serial_in_rns": serial_in_rns,
             "native_call_audio": self._native_call_audio_ready(),
+            "browser_call_audio": not self._native_call_audio_ready(),
+            "call_audio_hint": self._call_audio_setup_hint(),
             "call_codec": OPUS_CODEC,
         })
 
@@ -5019,6 +5040,13 @@ class ChatWebServer:
                 st.update(self.call_audio_engine.stats())
             if getattr(self, "_android_call_audio", False):
                 st.update(self._android_call_stats())
+            st["native_call_audio"] = self._native_call_audio_ready()
+            st["browser_call_audio"] = not (
+                self.call_audio_engine
+                or getattr(self, "_android_call_audio", False)
+            )
+            if st.get("browser_call_audio"):
+                st["call_audio_hint"] = self._call_audio_setup_hint()
             return web.json_response(st)
 
         if action == "invite":

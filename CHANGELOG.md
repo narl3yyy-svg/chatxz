@@ -2,6 +2,14 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.6] — 2026-06-29
+
+### Fixed
+- **Mac/Windows native voice** — libopus loader now finds `opus.dll` (Windows) and Homebrew `libopus.dylib` (macOS); `install-macos.sh` installs `brew install opus portaudio`.
+- **Mac browser mic “permission not available”** — sidebar banner when UI is opened via LAN IP; voice calls require `http://localhost:8742` (Mac) or `http://127.0.0.1:8742` (Windows) for browser microphone access.
+- **Browser fallback** — when native voice is unavailable, call capture skips the native path immediately and uses browser Opus; mic preflight on incoming ring.
+- **Windows run.bat** — fixed outdated voice-deps import; clearer libopus setup message.
+
 ## [0.9.5] — 2026-06-29
 
 ### Added

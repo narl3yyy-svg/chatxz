@@ -94,10 +94,13 @@ if errorlevel 1 (
 exit /b 0
 
 :ensure_voice_deps
-"%VENV_PY%" -c "from chatxz.core.call_audio_engine import call_audio_available; import sys; sys.exit(0 if call_audio_available() else 1)" >nul 2>&1
+"%VENV_PY%" -c "from chatxz.core.audio import call_audio_available; import sys; sys.exit(0 if call_audio_available() else 1)" >nul 2>&1
 if not errorlevel 1 exit /b 0
 echo Installing voice dependencies (pyaudio)...
 "%VENV_PY%" -m pip install -q pyaudio 2>nul
+"%VENV_PY%" -c "from chatxz.core.audio import call_audio_available; import sys; sys.exit(0 if call_audio_available() else 1)" >nul 2>&1
+if not errorlevel 1 exit /b 0
+echo [setup] Native call audio needs libopus (opus.dll on PATH). Browser Opus works at http://127.0.0.1:8742
 exit /b 0
 
 :ensure_deps
