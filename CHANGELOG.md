@@ -2,6 +2,11 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.13] — 2026-06-29
+
+### Fixed
+- **Ctrl+C on Windows and Mac** — `SetConsoleCtrlHandler` on Windows and `sigwait` thread on macOS deliver shutdown even when `signal.signal` is clobbered or the asyncio loop is blocked; first Ctrl+C schedules `os._exit` in 80ms without blocking on RNS/PortAudio teardown; server always fast-exits from `finally`.
+
 ## [0.9.12] — 2026-06-29
 
 ### Fixed

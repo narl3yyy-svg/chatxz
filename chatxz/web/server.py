@@ -94,6 +94,7 @@ from chatxz.utils.debug_log import (
 )
 from chatxz.utils.android_notify import show_message_notification
 from chatxz.utils.linux_signals import LinuxSignalfdShutdown
+from chatxz.utils.shutdown_guard import ShutdownGuard
 from chatxz.utils.platform import (
     effective_display_name,
     host_platform,
@@ -512,6 +513,7 @@ class ChatWebServer:
         self._post_call_audio = False
         self._shutdown_force_timer = None
         self._linux_signal_shutdown = None
+        self._shutdown_guard = None
         self._call_stats_last_key = None
         self._pending_call_audio = []
         self._progress_last = {}
@@ -5919,7 +5921,7 @@ class ChatWebServer:
             except Exception:
                 pass
 
-    def _schedule_forced_exit(self, signum, delay=0.35):
+    def _schedule_forced_exit(self, signum, delay=0.08):
         self._cancel_shutdown_force_timer()
 
         def _force():
@@ -5930,64 +5932,50 @@ class ChatWebServer:
         self._shutdown_force_timer.daemon = True
         self._shutdown_force_timer.start()
 
-    def _handle_os_signal(self, signum=signal.SIGINT):
-        """May run on signalfd thread — must not assume event-loop context."""
+    def _shutdown_minimal(self):
+        """Non-blocking cleanup — never call PortAudio/RNS teardown here."""
+        try:
+            self._stop_call_audio_engine(blocking=False, timeout=0.3)
+        except Exception:
+            pass
+        if self.messaging:
+            self.messaging.shutdown_requested = True
+            try:
+                if self.messaging.voice_call.state != STATE_IDLE:
+                    self.messaging.call_end()
+            except Exception:
+                pass
+
+    def _begin_shutdown(self, signum=signal.SIGINT):
+        """Signal-safe: schedule os._exit; do not block on RNS/PortAudio."""
         if self._shutdown_forced:
             os._exit(130 if signum == signal.SIGINT else 0)
         if self._shutting_down:
+            self._shutdown_forced = True
             os._exit(130 if signum == signal.SIGINT else 0)
         self._shutting_down = True
         self._shutdown_fast = True
         print("\n[shutdown] Stopping...", flush=True)
-        # Schedule forced exit BEFORE any blocking ALSA/PortAudio cleanup.
-        self._schedule_forced_exit(signum, delay=0.12)
-        try:
-            self._stop_call_audio_engine(blocking=False)
-        except Exception:
-            pass
-        if self.messaging:
-            self.messaging.shutdown_requested = True
-            try:
-                if self.messaging.voice_call.state != STATE_IDLE:
-                    self.messaging.call_end()
-            except Exception:
-                pass
+        self._schedule_forced_exit(signum, delay=0.08)
+        threading.Thread(
+            target=self._shutdown_minimal,
+            name="chatxz-shutdown-min",
+            daemon=True,
+        ).start()
         loop = self._loop
         if loop and not loop.is_closed() and loop.is_running():
             try:
-                loop.call_soon_threadsafe(lambda: self._request_shutdown(signum))
+                loop.call_soon_threadsafe(loop.stop)
             except Exception:
                 pass
 
+    def _handle_os_signal(self, signum=signal.SIGINT):
+        """May run on signalfd/sigwait/console-handler thread."""
+        self._begin_shutdown(signum)
+
     def _request_shutdown(self, signum=signal.SIGINT):
-        """Run on the event-loop thread (woken by self-pipe or signalfd)."""
-        if self._shutdown_forced:
-            return
-        self._shutting_down = True
-        self._shutdown_fast = True
-        self._schedule_forced_exit(signum, delay=0.12)
-        try:
-            self._stop_call_audio_engine(blocking=False)
-        except Exception:
-            pass
-        if self.messaging:
-            self.messaging.shutdown_requested = True
-            try:
-                if self.messaging.voice_call.state != STATE_IDLE:
-                    self.messaging.call_end()
-            except Exception:
-                pass
-        try:
-            self._teardown_network_stack()
-        except Exception:
-            pass
-        loop = self._loop
-        if loop and not loop.is_closed() and loop.is_running():
-            try:
-                loop.stop()
-            except Exception:
-                pass
-        # Forced exit already scheduled in _handle_os_signal.
+        """Run on the event-loop thread (woken by self-pipe)."""
+        self._begin_shutdown(signum)
 
     def _start_linux_signalfd(self):
         if sys.platform not in ("linux", "linux2"):
@@ -6006,6 +5994,8 @@ class ChatWebServer:
                     signal.signal(signal.SIGTERM, handler)
                 except (ValueError, OSError, RuntimeError):
                     pass
+            if self._shutdown_guard:
+                self._shutdown_guard.refresh()
             return
         self._start_linux_signalfd()
         loop = self._loop
@@ -6053,7 +6043,7 @@ class ChatWebServer:
                 except Exception:
                     pass
             try:
-                handler(signum, frame)
+                self._begin_shutdown(signum)
             except Exception:
                 os._exit(130 if signum == signal.SIGINT else 0)
 
@@ -6062,6 +6052,8 @@ class ChatWebServer:
             signal.signal(signal.SIGTERM, _sig_notify)
         except (ValueError, OSError, RuntimeError):
             pass
+        if self._shutdown_guard:
+            self._shutdown_guard.refresh()
 
     def _call_stats_snapshot(self):
         if not self.messaging:
@@ -6108,8 +6100,9 @@ class ChatWebServer:
                 await self._broadcast_call_stats()
             except Exception:
                 pass
-            if self.messaging and self.messaging.voice_call.state == STATE_ACTIVE:
-                self._install_shutdown_signals()
+            if self._shutdown_guard:
+                self._shutdown_guard.refresh()
+            self._install_shutdown_signals()
 
     async def _init_rns_background(self):
         try:
@@ -6339,25 +6332,12 @@ class ChatWebServer:
 
         def _stop_loop(signum=None, frame=None):
             nonlocal stopping
-            if stopping:
-                self._shutdown_forced = True
-                self._shutdown_fast = True
-                self._schedule_forced_exit(signum or signal.SIGINT, delay=0.05)
-                try:
-                    self._stop_call_audio_engine(blocking=False)
-                except Exception:
-                    pass
-                try:
-                    self._teardown_network_stack()
-                except Exception:
-                    pass
-                os._exit(130 if signum == signal.SIGINT else 0)
             stopping = True
-            self._shutdown_fast = True
-            self._schedule_forced_exit(signum or signal.SIGINT, delay=0.25)
-            self._request_shutdown(signum or signal.SIGINT)
+            self._begin_shutdown(signum or signal.SIGINT)
 
         self._shutdown_handler = _stop_loop
+        self._shutdown_guard = ShutdownGuard(self._begin_shutdown)
+        self._shutdown_guard.arm()
         self._install_shutdown_signals()
 
         if sys.platform != "win32":
@@ -6392,33 +6372,13 @@ class ChatWebServer:
                 except Exception:
                     pass
             self._close_shutdown_pipe()
-            # PortAudio/RNS cleanup can hang after voice calls — fast-exit instead.
-            if (
-                getattr(self, "_shutdown_fast", False)
-                or self._shutdown_forced
-                or getattr(self, "_post_call_audio", False)
-            ):
-                try:
-                    self._teardown_network_stack()
-                except Exception:
-                    pass
-                try:
-                    loop.close()
-                except Exception:
-                    pass
-                os._exit(130)
+            # Never block on aiohttp/RNS/PortAudio teardown — os._exit releases ports.
             try:
-                loop.run_until_complete(runner.cleanup())
-            except Exception:
-                try:
-                    self._teardown_network_stack()
-                except Exception:
-                    pass
-            try:
-                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
             except Exception:
                 pass
-            loop.close()
+            code = 130 if (stopping or self._shutdown_fast) else 0
+            os._exit(code)
 
 
 def main():

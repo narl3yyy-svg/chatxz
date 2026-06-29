@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.9.13": [
+        "Ctrl+C now stops the server reliably on Windows and Mac — even after voice calls.",
+        "Shutdown uses a dedicated console/signal thread and forces exit within ~80ms.",
+    ],
     "0.9.12": [
         "Voice calls now end symmetrically — hanging up on either side stops audio on both; remote disconnect is detected within ~2s.",
         "Fixed zombie call audio continuing after the UI showed the call ended.",
