@@ -2,6 +2,14 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.8.6] — 2026-06-28
+
+### Fixed
+- **Ctrl+C during calls (Linux)** — `signalfd` dedicated thread captures SIGINT even when PortAudio/RNS worker threads are active; fixes v0.8.5 self-pipe missing signals on Arch.
+- **Hang up button** — header call button always hangs up (was opening dashboard when minimized).
+- **False “no audio” warning** — dashboard respects native server `call_stats` over WebSocket.
+- **Arch mic capture** — prefer `Alt Analog` ALSA input; probe top devices at call start.
+
 ## [0.8.5] — 2026-06-28
 
 ### Fixed

@@ -90,6 +90,7 @@ from chatxz.utils.debug_log import (
     list_debug_log_files,
 )
 from chatxz.utils.android_notify import show_message_notification
+from chatxz.utils.linux_signals import LinuxSignalfdShutdown
 from chatxz.utils.platform import (
     effective_display_name,
     host_platform,
@@ -504,6 +505,7 @@ class ChatWebServer:
         self._shutdown_pipe_w = None
         self._shutdown_forced = False
         self._shutdown_force_timer = None
+        self._linux_signal_shutdown = None
         self._call_stats_last_key = None
         self._progress_last = {}
         self._progress_throttle_ms = 250
@@ -5664,15 +5666,35 @@ class ChatWebServer:
         self._shutdown_force_timer.daemon = True
         self._shutdown_force_timer.start()
 
-    def _request_shutdown(self, signum=signal.SIGINT):
-        """Run on the event-loop thread (woken by self-pipe SIGINT delivery)."""
+    def _handle_os_signal(self, signum=signal.SIGINT):
+        """May run on signalfd thread — must not assume event-loop context."""
         if self._shutdown_forced:
-            return
+            os._exit(130 if signum == signal.SIGINT else 0)
         if self._shutting_down:
             self._schedule_forced_exit(signum, delay=0.05)
             return
         self._shutting_down = True
         print("\n[shutdown] Stopping...", flush=True)
+        try:
+            self._stop_call_audio_engine()
+        except Exception:
+            pass
+        if self.messaging:
+            self.messaging.shutdown_requested = True
+        loop = self._loop
+        if loop and not loop.is_closed() and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(lambda: self._request_shutdown(signum))
+            except Exception:
+                self._schedule_forced_exit(signum, delay=0.2)
+        else:
+            self._schedule_forced_exit(signum, delay=0.2)
+
+    def _request_shutdown(self, signum=signal.SIGINT):
+        """Run on the event-loop thread (woken by self-pipe or signalfd)."""
+        if self._shutdown_forced:
+            return
+        self._shutting_down = True
         try:
             self._stop_call_audio_engine()
         except Exception:
@@ -5691,10 +5713,18 @@ class ChatWebServer:
                 pass
         self._schedule_forced_exit(signum)
 
+    def _start_linux_signalfd(self):
+        if sys.platform not in ("linux", "linux2"):
+            return
+        if self._linux_signal_shutdown is None:
+            self._linux_signal_shutdown = LinuxSignalfdShutdown(self._handle_os_signal)
+        self._linux_signal_shutdown.start()
+
     def _install_shutdown_signals(self):
-        """Self-pipe SIGINT — works when asyncio add_signal_handler is starved."""
+        """Self-pipe + signalfd — SIGINT during PortAudio calls (non-main-thread delivery)."""
         if sys.platform == "win32":
             return
+        self._start_linux_signalfd()
         loop = self._loop
         if not loop or loop.is_closed():
             return
@@ -6071,6 +6101,11 @@ class ChatWebServer:
                 stopping = True
             self._shutting_down = True
             self._cancel_shutdown_force_timer()
+            if self._linux_signal_shutdown:
+                try:
+                    self._linux_signal_shutdown.stop()
+                except Exception:
+                    pass
             if self._shutdown_pipe_r is not None and loop and not loop.is_closed():
                 try:
                     loop.remove_reader(self._shutdown_pipe_r)

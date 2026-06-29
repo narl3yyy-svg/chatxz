@@ -6,6 +6,7 @@ import base64
 import struct
 import subprocess
 import sys
+import threading
 from typing import Callable, List, Optional, Tuple
 
 from chatxz.core.opus_native import (
@@ -48,12 +49,17 @@ class VoiceCallAudio:
         self._mic_diag = 0
         self._peak_max = 0
         self._recv_log = 3
+        self._lock = threading.Lock()
 
     @staticmethod
     def available() -> bool:
         return call_audio_available()
 
     def start(self) -> bool:
+        with self._lock:
+            return self._start_unlocked()
+
+    def _start_unlocked(self) -> bool:
         if self._running:
             return True
         if not self.available():
@@ -78,7 +84,7 @@ class VoiceCallAudio:
         self._pa = pyaudio.PyAudio()
         self._log_audio_devices(self._pa)
 
-        in_dev, in_name = self._pick_input_device(self._pa)
+        in_dev, in_name = self._probe_input_device(self._pa)
         out_dev, out_name = self._pick_output_device(self._pa)
         fmt = pyaudio.paInt16
         channels = 1
@@ -152,10 +158,14 @@ class VoiceCallAudio:
             return True
         except Exception as e:
             print(f"[call-audio] Engine start failed: {e}")
-            self.stop()
+            self._stop_unlocked()
             return False
 
     def stop(self) -> None:
+        with self._lock:
+            self._stop_unlocked()
+
+    def _stop_unlocked(self) -> None:
         self._running = False
         self._send_enabled = False
         for stream in (self._in_stream, self._out_stream):
@@ -280,14 +290,14 @@ class VoiceCallAudio:
             return -1000
         if any(x in low for x in ("monitor", "loopback", "null", "dummy")):
             return -1000
+        if input_device and "alt analog" in low:
+            return 92
         if low in ("default", "sysdefault"):
             return 85 if input_device else 25
         score = 20
         if input_device:
             if "pipewire" in low:
                 score += 75
-            if "alt analog" in low:
-                score += 35
         if pulse_name and ".monitor" not in pulse_name.lower():
             pulse_low = pulse_name.lower()
             if pulse_low in low or low in pulse_low:
@@ -333,13 +343,55 @@ class VoiceCallAudio:
         return [(idx, name, score) for score, idx, name in ranked]
 
     @classmethod
-    def _pick_input_device(cls, pa) -> Tuple[Optional[int], Optional[str]]:
+    def _probe_input_device(cls, pa) -> Tuple[Optional[int], Optional[str]]:
+        import pyaudio
+
         ranked = cls._rank_devices(pa, input_device=True)
-        if ranked:
-            idx, name, score = ranked[0]
-            print(f"[call-audio] Selected input [{idx}] score={score}: {name}")
-            return idx, name
-        return None, None
+        if not ranked:
+            return None, None
+        fmt = pyaudio.paInt16
+        rate = OPUS_SAMPLE_RATE
+        frame_count = OPUS_FRAME_SAMPLES
+        best_silent = ranked[0]
+        for idx, name, score in ranked[:5]:
+            stream = None
+            try:
+                stream = pa.open(
+                    format=fmt,
+                    channels=1,
+                    rate=rate,
+                    input=True,
+                    frames_per_buffer=frame_count,
+                    input_device_index=idx,
+                )
+                stream.start_stream()
+                peak = 0
+                for _ in range(3):
+                    data = stream.read(frame_count, exception_on_overflow=False)
+                    peak = max(peak, cls._pcm_peak(data))
+                print(f"[call-audio] Probe [{idx}] peak={peak}: {name[:72]}")
+                if peak > 80:
+                    print(f"[call-audio] Selected input [{idx}] score={score}: {name}")
+                    return idx, name
+            except Exception as exc:
+                print(f"[call-audio] Probe [{idx}] failed: {exc}")
+            finally:
+                if stream:
+                    try:
+                        stream.stop_stream()
+                        stream.close()
+                    except Exception:
+                        pass
+        idx, name, score = best_silent
+        print(
+            f"[call-audio] Selected input [{idx}] score={score}: {name} "
+            "(no probe signal — speak to verify)"
+        )
+        return idx, name
+
+    @classmethod
+    def _pick_input_device(cls, pa) -> Tuple[Optional[int], Optional[str]]:
+        return cls._probe_input_device(pa)
 
     @classmethod
     def _pick_output_device(cls, pa) -> Tuple[Optional[int], Optional[str]]:

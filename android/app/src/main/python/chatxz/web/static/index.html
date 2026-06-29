@@ -2979,8 +2979,7 @@ function updatePeerHeader() {
     const lbl = callBtn.querySelector('.call-btn-label');
     if (icon) icon.textContent = onCall ? '✕' : '📞';
     if (lbl) lbl.textContent = onCall ? 'Hang up' : 'Call';
-    if (onCall && callDashMinimized) callBtn.onclick = () => openCallDashboard(true);
-    else callBtn.onclick = toggleVoiceCall;
+    callBtn.onclick = toggleVoiceCall;
   }
   setLinkStatus(linked ? 'connected' : 'disconnected', linked ? 'Active' : 'Inactive');
   document.getElementById('input-area').style.display = 'block';
@@ -6292,7 +6291,11 @@ function updateCallDashboard() {
   if (hintEl) {
     const elapsed = callStartedAt ? Date.now() - callStartedAt : 0;
     if (callState === 'active' && elapsed > 2800) {
-      if (outN === 0 && inN === 0) {
+      const serverActive = useNativeCallAudio() && (
+        (callServerStats.frames_sent || callServerStats.audio_out || 0) > 0
+        || (callServerStats.frames_recv || callServerStats.audio_in || 0) > 0
+      );
+      if (outN === 0 && inN === 0 && !serverActive) {
         hintEl.style.display = 'block';
         hintEl.textContent = !window.isSecureContext && !isAndroidShell()
           ? 'No audio — open http://127.0.0.1:8742 (mic needs secure context on desktop)'
@@ -7062,13 +7065,16 @@ async function rejectVoiceCall() {
 
 async function endVoiceCall() {
   if (callState === 'idle') return;
+  const peer = callPeer;
+  const via = callVia;
+  const id = callId;
   stopCallCapturePipeline();
   if (isAndroidShell()) {
     window.chatxzAndroid?.setCallActive?.(false);
     window.chatxzAndroid?.setSpeakerphone?.(false);
   }
-  await callApi({action: 'end', peer: callPeer, via: callVia, call_id: callId}).catch(() => {});
   resetCallUi();
+  await callApi({action: 'end', peer, via, call_id: id}).catch(() => {});
 }
 
 let voiceChunks = [];

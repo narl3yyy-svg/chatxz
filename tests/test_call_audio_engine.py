@@ -90,6 +90,17 @@ def test_score_device_prefers_pulse_default_source():
     assert monitor == -1000
 
 
+def test_score_device_prefers_alt_analog_on_alsa():
+    alt = VoiceCallAudio._score_device(
+        "HDA Intel PCH: ALC897 Alt Analog (hw:0,2)", input_device=True, pulse_name=None
+    )
+    sysdef = VoiceCallAudio._score_device("sysdefault", input_device=True, pulse_name=None)
+    hw = VoiceCallAudio._score_device(
+        "HDA Intel PCH: ALC897 Analog (hw:0,0)", input_device=True, pulse_name=None
+    )
+    assert alt > sysdef > hw
+
+
 def test_score_device_prefers_default_input_over_raw_hw():
     default = VoiceCallAudio._score_device("default", input_device=True, pulse_name=None)
     hw = VoiceCallAudio._score_device(
