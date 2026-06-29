@@ -70,22 +70,11 @@ install_voice_deps() {
             return 0
         fi
     fi
-    echo "Installing voice dependencies (pyaudio)..."
-    local log="$DIR/.voice-install.log"
-    if "$py" -m pip install -q pyaudio 2>"$log"; then
-        rm -f "$log"
+    CHATXZ_ROOT="$DIR" PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        "$py" "$DIR/scripts/ensure_voice_native.py" || true
+    if deps_voice_ok "$py"; then
         return 0
     fi
-    echo "[setup] Native call audio unavailable (libopus and/or pyaudio). Browser Opus fallback still works."
-    if [ -s "$log" ]; then
-        tail -n 2 "$log" | sed 's/^/[setup] /'
-    fi
-    echo "  Ubuntu/Debian: sudo apt install libopus0 portaudio19-dev python3-dev python3-pyaudio"
-    echo "  Arch: sudo pacman -S opus portaudio python-pyaudio"
-    if [ "$(uname -s 2>/dev/null || echo)" = "Darwin" ]; then
-        echo "  macOS: brew install opus portaudio"
-    fi
-    echo "  Then re-run: ./run.sh web"
     return 1
 }
 

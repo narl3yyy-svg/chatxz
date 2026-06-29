@@ -2,6 +2,14 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.7] — 2026-06-29
+
+### Added
+- **Auto voice deps** — `run.bat` / `./run.sh` call `scripts/ensure_voice_native.py` to pip-install PyAudio and fetch **libopus** (Windows: NuGet `libopus.dll` into `chatxz/core/native/windows/`; macOS: `brew install opus portaudio` when needed).
+
+### Changed
+- **Uninstall** — `uninstall.bat` / `uninstall.sh` remove `.venv`, `chatxz/core/native`, root DLL copies, `.voice-install.log`, and (Unix) pipx / `~/.local/share/chatxz/venv`.
+
 ## [0.9.6] — 2026-06-29
 
 ### Fixed

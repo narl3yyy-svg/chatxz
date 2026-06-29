@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# chatxz uninstaller — removes app data chatxz creates (with prompts).
+# chatxz uninstaller — removes venv, bundled natives, pipx install, and app data.
 set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$DIR"
 
 echo "=== chatxz Uninstaller ==="
 echo
@@ -8,6 +11,7 @@ echo
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/chatxz"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/chatxz"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/chatxz"
+PIP_VENV="$DATA_DIR/venv"
 PORTABLE_DATA=""
 
 if [ -n "${CHATXZ_PORTABLE:-}" ]; then
@@ -17,7 +21,7 @@ elif [ -d "./chatxz-data" ]; then
 fi
 
 stop_chatxz_processes() {
-    echo "[1/5] Stopping running chatxz / RNS processes..."
+    echo "[1/6] Stopping running chatxz / RNS processes..."
     local stopped=0
     for pattern in "chatxz.web.server" "chatxz.app" "run.sh web"; do
         if pgrep -f "$pattern" >/dev/null 2>&1; then
@@ -53,8 +57,36 @@ remove_dir_prompt() {
     fi
 }
 
+remove_checkout_artifacts() {
+    echo "[2/6] Removing checkout environment and bundled voice libraries..."
+    local removed=0
+    if [ -d "$DIR/.venv" ]; then
+        rm -rf "$DIR/.venv"
+        echo "  Removed $DIR/.venv"
+        removed=1
+    fi
+    if [ -d "$DIR/chatxz.egg-info" ]; then
+        rm -rf "$DIR/chatxz.egg-info"
+        echo "  Removed $DIR/chatxz.egg-info"
+        removed=1
+    fi
+    if [ -d "$DIR/chatxz/core/native" ]; then
+        rm -rf "$DIR/chatxz/core/native"
+        echo "  Removed $DIR/chatxz/core/native (downloaded libopus)"
+        removed=1
+    fi
+    if [ -f "$DIR/.voice-install.log" ]; then
+        rm -f "$DIR/.voice-install.log"
+        echo "  Removed .voice-install.log"
+        removed=1
+    fi
+    if [ "$removed" -eq 0 ]; then
+        echo "  No checkout artifacts found"
+    fi
+}
+
 cleanup_rns_sockets() {
-    echo "[4/5] Cleaning stale RNS sockets in /tmp/rns ..."
+    echo "[5/6] Cleaning stale RNS sockets in /tmp/rns ..."
     local count=0
     if [ -d /tmp/rns ]; then
         while IFS= read -r -d '' sock; do
@@ -66,29 +98,33 @@ cleanup_rns_sockets() {
 }
 
 stop_chatxz_processes
+remove_checkout_artifacts
 
 if command -v pipx &>/dev/null; then
-    echo "[2/5] Removing pipx package..."
+    echo "[3/6] Removing pipx package..."
     if pipx uninstall chatxz 2>/dev/null; then
         echo "  Removed chatxz from pipx"
     else
         echo "  chatxz not found in pipx (already removed)"
     fi
 else
-    echo "[2/5] pipx not found, skipping package removal"
+    echo "[3/6] pipx not found, skipping package removal"
 fi
 
-echo "[3/5] Application data (identity, settings, chat history, RNS config):"
+echo "[4/6] Application data (identity, settings, chat history, RNS config):"
 remove_dir_prompt "Config" "$CONFIG_DIR"
 remove_dir_prompt "Data" "$DATA_DIR"
 remove_dir_prompt "Cache" "$CACHE_DIR"
+if [ -d "$PIP_VENV" ]; then
+    remove_dir_prompt "Arch/pipx-style venv" "$PIP_VENV"
+fi
 if [ -n "$PORTABLE_DATA" ]; then
     remove_dir_prompt "Portable data" "$PORTABLE_DATA"
 fi
 
 cleanup_rns_sockets
 
-echo "[5/5] Checking for leftover binaries..."
+echo "[6/6] Checking for leftover binaries..."
 LEFTOVER=0
 for bin in chatxz chatxz-web; do
     if command -v "$bin" &>/dev/null; then

@@ -9,6 +9,11 @@ build/
 .env
 venv/
 .venv/
+chatxz/core/native/
+.voice-install.log
+/libopus.dll
+/opus.dll
+/libopus-0.dll
 *.swp
 *.swo
 .DS_Store

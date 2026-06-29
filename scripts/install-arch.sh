@@ -13,9 +13,9 @@ fi
 echo "Installing system dependencies..."
 sudo pacman -S --needed --noconfirm python python-pip python-setuptools base-devel
 
-read -p "Install voice support (pyaudio)? [y/N]: " voice_opt
+read -p "Install voice support (libopus + pyaudio)? [y/N]: " voice_opt
 if [[ "$voice_opt" =~ ^[Yy]$ ]]; then
-    sudo pacman -S --needed --noconfirm portaudio
+    sudo pacman -S --needed --noconfirm opus portaudio
 fi
 
 read -p "Install terminal image viewer (chafa) for screenshot preview? [y/N]: " img_opt
