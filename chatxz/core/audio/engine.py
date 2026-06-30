@@ -18,6 +18,7 @@ from typing import Callable, List, Optional, Tuple
 from chatxz.core.audio.devices import (
     _open_stream_with_timeout,
     create_pyaudio,
+    hotswap_skip_device,
     log_audio_devices,
     pcm_peak,
     pick_output_device,
@@ -77,7 +78,9 @@ class CallAudioEngine:
         self.frames_recv = 0
         self.playback_frames = 0
         self._mic_diag = 0
+        self._play_diag = 0
         self._peak_max = 0
+        self._play_peak_max = 0
         self._silent_frames = 0
         self._hotswap_count = 0
         self._send_fail_streak = 0
@@ -156,7 +159,9 @@ class CallAudioEngine:
         self.frames_recv = 0
         self.playback_frames = 0
         self._mic_diag = 8
+        self._play_diag = 8
         self._peak_max = 0
+        self._play_peak_max = 0
         self._silent_frames = 0
         self._hotswap_count = 0
         self._recv_log = 5
@@ -406,6 +411,11 @@ class CallAudioEngine:
             pcm = self._jitter.read() or SILENCE_PCM
             if self._out_rate != OPUS_SAMPLE_RATE:
                 pcm = resample_pcm_s16(pcm, OPUS_SAMPLE_RATE, self._out_rate)
+            peak = pcm_peak(pcm)
+            self._play_peak_max = max(self._play_peak_max, peak)
+            if self._play_diag > 0:
+                self._play_diag -= 1
+                print(f"[call-audio] speaker peak {peak}")
             try:
                 stream.write(pcm, exception_on_underflow=False)
                 self.playback_frames += 1
@@ -430,6 +440,8 @@ class CallAudioEngine:
             self._input_rank_pos = (self._input_rank_pos + 1) % len(self._input_ranked)
             idx, name, score = self._input_ranked[self._input_rank_pos]
             if idx == self._in_dev:
+                continue
+            if pulse_capture_bypass() and hotswap_skip_device(name):
                 continue
             old = self._in_stream
             try:
@@ -504,6 +516,7 @@ class CallAudioEngine:
             "frames_recv": self.frames_recv,
             "playback_frames": self.playback_frames,
             "mic_peak_max": self._peak_max,
+            "speaker_peak_max": self._play_peak_max,
             "jitter_ms": jb.get("buffered_ms", 0),
             "playout_delay_ms": jb.get("playout_delay_ms", 0),
             "plc_frames": jb.get("plc_frames", 0),

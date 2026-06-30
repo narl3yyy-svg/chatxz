@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.9.16": [
+        "Voice calls on Arch/Linux with HDMI-only Pulse: incoming audio now plays through your HDMI monitor instead of silent analog output.",
+        "Microphone: loads Pulse ALSA capture when no mic source exists; unmutes ALSA Input Source before capture.",
+        "Mic hot-swap no longer tries broken dsnoop/dmix devices.",
+    ],
     "0.9.15": [
         "Web UI no longer freezes after voice calls — fixed link-closed crash and stopped flooding the server with per-frame audio WebSocket messages.",
         "Hang-up unlocks the UI immediately; server notifies the browser before stopping native audio.",

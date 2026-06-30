@@ -2,6 +2,14 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.16] — 2026-06-29
+
+### Fixed
+- **No audible incoming call audio on HDMI-only Pulse setups** — when Pulse default sink is HDMI, PyAudio playback now routes through the Pulse `default` device instead of direct ALSA analog (`hw:0,0`), so audio reaches the monitor/speakers you are actually using.
+- **Silent microphone on Arch (ALC897 / no Pulse capture source)** — loads `module-alsa-source` when Pulse has only monitor sources; unmutes ALSA capture and sets `Input Source` via `amixer` before opening the mic.
+- **Hot-swap mic failures** — skips `default`, `sysdefault`, `dmix`, `dsnoop`, and surround virtual devices during ALSA bypass hot-swap (fixes `pcm_dsnoop.c unable to open slave` spam).
+- **Playback diagnostics** — logs `speaker peak` for the first frames so you can confirm decoded audio is reaching the output buffer.
+
 ## [0.9.15] — 2026-06-29
 
 ### Fixed

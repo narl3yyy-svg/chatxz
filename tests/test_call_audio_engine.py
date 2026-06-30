@@ -246,3 +246,64 @@ def test_pulse_best_capture_source_skips_monitor_only(monkeypatch):
         lambda: ["alsa_output.pci.hdmi-stereo.monitor"],
     )
     assert devices.pulse_best_capture_source() is None
+
+
+def test_score_device_prefers_default_output_when_pulse_hdmi():
+    from chatxz.core.audio import devices
+
+    default = score_device("default", input_device=False, pulse_name=None, pulse_hdmi=True)
+    analog = score_device(
+        "HDA Intel PCH: ALC897 Analog (hw:0,0)",
+        input_device=False,
+        pulse_name=None,
+        pulse_hdmi=True,
+    )
+    dmix = score_device("dmix", input_device=False, pulse_name=None, pulse_hdmi=True)
+    assert default > analog
+    assert dmix == -1000
+
+
+def test_hotswap_skip_device_rejects_dsnoop_and_default():
+    from chatxz.core.audio.devices import hotswap_skip_device
+
+    assert hotswap_skip_device("default")
+    assert hotswap_skip_device("sysdefault")
+    assert hotswap_skip_device("dmix")
+    assert hotswap_skip_device("surround51")
+    assert not hotswap_skip_device("HDA Intel PCH: ALC897 Alt Analog (hw:0,2)")
+
+
+def test_pulse_load_alsa_capture_sets_default(monkeypatch):
+    from chatxz.core.audio import devices
+
+    calls = []
+
+    monkeypatch.setattr(devices, "pulse_available", lambda: True)
+    monkeypatch.setattr(devices, "pulse_best_capture_source", lambda: None)
+
+    def fake_load(cmd, **kwargs):
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            stdout = "42\n"
+        return R()
+
+    monkeypatch.setattr(devices.subprocess, "run", fake_load)
+    monkeypatch.setattr(devices.time, "sleep", lambda *_: None)
+
+    def after_load(cmd, **kwargs):
+        if cmd[:2] == ["pactl", "load-module"]:
+            monkeypatch.setattr(
+                devices,
+                "pulse_best_capture_source",
+                lambda: "alsa_input.hw_0_2",
+            )
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            stdout = ""
+        return R()
+
+    monkeypatch.setattr(devices.subprocess, "run", after_load)
+    assert devices.pulse_load_alsa_capture() == "alsa_input.hw_0_2"
+    assert any(c[:3] == ["pactl", "set-default-source", "alsa_input.hw_0_2"] for c in calls)

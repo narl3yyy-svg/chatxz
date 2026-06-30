@@ -18,12 +18,15 @@ from typing import Callable, List, Optional, Tuple
 from chatxz.core.audio.devices import (
     _open_stream_with_timeout,
     create_pyaudio,
+    hotswap_skip_device,
     log_audio_devices,
     pcm_peak,
     pick_output_device,
     prepare_linux_audio,
     probe_input_device,
     pulse_capture_bypass,
+    resample_pcm_s16,
+    stream_sample_rate,
 )
 from chatxz.core.audio.jitter import SILENCE_PCM, VoiceJitterBuffer
 from chatxz.core.audio.opus import (
@@ -73,17 +76,26 @@ class CallAudioEngine:
         self._send_enabled = False
         self.frames_sent = 0
         self.frames_recv = 0
+        self.playback_frames = 0
         self._mic_diag = 0
+        self._play_diag = 0
         self._peak_max = 0
+        self._play_peak_max = 0
         self._silent_frames = 0
         self._hotswap_count = 0
+        self._send_fail_streak = 0
         self._recv_log = 5
         self._decode_fail_log = 5
         self._input_ranked: List[Tuple[int, str, int]] = []
         self._input_rank_pos = 0
         self._in_dev: Optional[int] = None
         self._in_name: Optional[str] = None
+        self._out_rate = OPUS_SAMPLE_RATE
         self._lifecycle_lock = threading.Lock()
+
+    @property
+    def send_enabled(self) -> bool:
+        return self._send_enabled
 
     @staticmethod
     def available() -> bool:
@@ -145,8 +157,11 @@ class CallAudioEngine:
         self._jitter.reset()
         self.frames_sent = 0
         self.frames_recv = 0
+        self.playback_frames = 0
         self._mic_diag = 8
+        self._play_diag = 8
         self._peak_max = 0
+        self._play_peak_max = 0
         self._silent_frames = 0
         self._hotswap_count = 0
         self._recv_log = 5
@@ -189,6 +204,12 @@ class CallAudioEngine:
             if out_name:
                 print(f"[call-audio] Speaker: {out_name}")
             self._out_stream.start_stream()
+            self._out_rate = stream_sample_rate(self._out_stream, OPUS_SAMPLE_RATE)
+            if self._out_rate != OPUS_SAMPLE_RATE:
+                print(
+                    f"[call-audio] Speaker opened at {self._out_rate} Hz "
+                    f"(resampling from {OPUS_SAMPLE_RATE} Hz)"
+                )
 
             if self._aborted():
                 self._stop_unlocked(blocking=False)
@@ -234,7 +255,7 @@ class CallAudioEngine:
                 )
                 self._capture_thread.start()
             else:
-                print("[call-audio] No capture device — receive-only")
+                print("[call-audio] No capture device — receive-only (browser mic can send)")
 
             mode = "duplex" if self._send_enabled else "receive-only"
             print(f"[call-audio] Engine started ({mode}, Opus 48 kHz, 20 ms)")
@@ -257,7 +278,8 @@ class CallAudioEngine:
         self._recv_ready.clear()
         self._send_enabled = False
         with self._lifecycle_lock:
-            if self._cleanup_thread and self._cleanup_thread.is_alive():
+            th = self._cleanup_thread
+            if th and th.is_alive():
                 return
             self._cleanup_thread = threading.Thread(
                 target=self._stop_unlocked,
@@ -266,6 +288,18 @@ class CallAudioEngine:
                 daemon=True,
             )
             self._cleanup_thread.start()
+
+    def stop_abandon(self, timeout: float = 0.8) -> None:
+        """Stop without blocking shutdown — abandon PyAudio if terminate hangs."""
+        self.stop_fast()
+        th = self._cleanup_thread
+        if th and th.is_alive():
+            th.join(timeout=max(0.1, timeout))
+        if th and th.is_alive():
+            self._in_stream = None
+            self._out_stream = None
+            self._pa = None
+            print("[call-audio] Engine abandoned (PyAudio cleanup timed out)")
 
     def _stop_unlocked(self, *, blocking: bool = True) -> None:
         self._stop.set()
@@ -291,11 +325,20 @@ class CallAudioEngine:
         self._in_stream = None
         self._out_stream = None
         if self._pa:
-            try:
-                self._pa.terminate()
-            except Exception:
-                pass
+            pa = self._pa
             self._pa = None
+
+            def _terminate() -> None:
+                try:
+                    pa.terminate()
+                except Exception:
+                    pass
+
+            term = threading.Thread(target=_terminate, name="call-audio-pa-term", daemon=True)
+            term.start()
+            term.join(timeout=1.0)
+            if term.is_alive():
+                print("[call-audio] PyAudio terminate timed out — continuing")
         for codec in (self._encoder, self._decoder):
             if codec:
                 try:
@@ -305,7 +348,6 @@ class CallAudioEngine:
         self._encoder = None
         self._decoder = None
         self._jitter.reset()
-        print("[call-audio] Engine stopped")
 
     def _capture_loop(self) -> None:
         frame_count = OPUS_FRAME_SAMPLES
@@ -341,12 +383,18 @@ class CallAudioEngine:
             if opus and self._send_fn and not self._stop.is_set():
                 b64 = base64.b64encode(opus).decode("ascii")
                 if self._send_fn(b64, OPUS_CODEC):
+                    self._send_fail_streak = 0
                     self.frames_sent += 1
                     if self.frames_sent <= 3 or self.frames_sent % 50 == 0:
                         print(
                             f"[call-audio] Opus out #{self.frames_sent} "
                             f"({len(b64)} b64, {len(opus)} B)"
                         )
+                else:
+                    self._send_fail_streak += 1
+                    if self._send_fail_streak >= 8:
+                        print("[call-audio] Capture stopping — call no longer active")
+                        break
             next_tick += FRAME_INTERVAL_SEC
             sleep_for = next_tick - time.monotonic()
             if sleep_for > 0:
@@ -360,9 +408,17 @@ class CallAudioEngine:
             stream = self._out_stream
             if not stream:
                 break
-            pcm = self._jitter.read()
+            pcm = self._jitter.read() or SILENCE_PCM
+            if self._out_rate != OPUS_SAMPLE_RATE:
+                pcm = resample_pcm_s16(pcm, OPUS_SAMPLE_RATE, self._out_rate)
+            peak = pcm_peak(pcm)
+            self._play_peak_max = max(self._play_peak_max, peak)
+            if self._play_diag > 0:
+                self._play_diag -= 1
+                print(f"[call-audio] speaker peak {peak}")
             try:
-                stream.write(pcm or SILENCE_PCM, exception_on_underflow=False)
+                stream.write(pcm, exception_on_underflow=False)
+                self.playback_frames += 1
             except Exception as exc:
                 if self._recv_log > 0:
                     print(f"[call-audio] Playback write failed: {exc}")
@@ -384,6 +440,8 @@ class CallAudioEngine:
             self._input_rank_pos = (self._input_rank_pos + 1) % len(self._input_ranked)
             idx, name, score = self._input_ranked[self._input_rank_pos]
             if idx == self._in_dev:
+                continue
+            if pulse_capture_bypass() and hotswap_skip_device(name):
                 continue
             old = self._in_stream
             try:
@@ -452,9 +510,13 @@ class CallAudioEngine:
             "engine": "native-opus",
             "codec": OPUS_CODEC,
             "mode": "duplex" if self._send_enabled else "receive-only",
+            "send_enabled": self._send_enabled,
+            "output_rate_hz": self._out_rate,
             "frames_sent": self.frames_sent,
             "frames_recv": self.frames_recv,
+            "playback_frames": self.playback_frames,
             "mic_peak_max": self._peak_max,
+            "speaker_peak_max": self._play_peak_max,
             "jitter_ms": jb.get("buffered_ms", 0),
             "playout_delay_ms": jb.get("playout_delay_ms", 0),
             "plc_frames": jb.get("plc_frames", 0),
