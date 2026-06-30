@@ -1897,6 +1897,9 @@ body.android-shell.sidebar-open #sidebar-backdrop {
       <button type="button" class="settings-nav-item" data-section="storage" onclick="showSettingsSection('storage')">
         <span class="nav-icon">💾</span> Storage
       </button>
+      <button type="button" class="settings-nav-item" data-section="audio" onclick="showSettingsSection('audio')">
+        <span class="nav-icon">🎙</span> Audio
+      </button>
       <button type="button" class="settings-nav-item" data-section="network" onclick="showSettingsSection('network')">
         <span class="nav-icon">📡</span> Network
       </button>
@@ -1965,6 +1968,61 @@ body.android-shell.sidebar-open #sidebar-backdrop {
             <p class="field-hint" id="settings-received-hint">Opens your system folder picker. Click Save to apply.</p>
             <input type="file" id="dir-picker-fallback" style="display:none" webkitdirectory onchange="pickReceivedDirFallback(this)">
           </div>
+        </div>
+      </section>
+
+      <section id="settings-section-audio" class="settings-pane">
+        <div class="settings-block">
+          <h3>Voice call devices</h3>
+          <p class="block-lead">Choose microphone and speaker for native voice calls (like Stoat/Discord device prefs). Saved here and applied on the next call.</p>
+          <div class="network-status-actions" style="margin-bottom:14px">
+            <button type="button" class="btn-block" id="audio-devices-refresh-btn" onclick="refreshAudioDevices(true)">↻ Refresh devices</button>
+          </div>
+          <div class="settings-section">
+            <label for="settings-audio-input">Microphone (native)</label>
+            <select id="settings-audio-input" onchange="onAudioDeviceChange('input')">
+              <option value="-1">System default (auto)</option>
+            </select>
+            <p class="field-hint" id="settings-audio-input-hint">Auto-selects the best mic; pin a device if auto picks the wrong one.</p>
+          </div>
+          <div class="settings-section">
+            <label for="settings-audio-output">Speaker (native)</label>
+            <select id="settings-audio-output" onchange="onAudioDeviceChange('output')">
+              <option value="-1">System default (auto)</option>
+            </select>
+            <p class="field-hint" id="settings-audio-output-hint">On HDMI-only setups, pick <strong>default</strong> to hear calls on your monitor.</p>
+          </div>
+          <div class="settings-section" id="settings-pulse-source-section" style="display:none">
+            <label for="settings-pulse-source">PulseAudio / PipeWire source</label>
+            <select id="settings-pulse-source" onchange="saveAudioDevicesOnly()">
+              <option value="">(none — use PyAudio device above)</option>
+            </select>
+          </div>
+          <div class="settings-section" id="settings-pulse-sink-section" style="display:none">
+            <label for="settings-pulse-sink">PulseAudio / PipeWire sink</label>
+            <select id="settings-pulse-sink" onchange="saveAudioDevicesOnly()">
+              <option value="">(none — use PyAudio device above)</option>
+            </select>
+          </div>
+          <div class="settings-section">
+            <label for="settings-browser-audio-input">Browser microphone (fallback)</label>
+            <select id="settings-browser-audio-input" onchange="saveAudioDevicesOnly()">
+              <option value="">System default</option>
+            </select>
+            <p class="field-hint">Used when native audio is unavailable. Open <code>http://localhost:8742</code> on desktop for mic permission.</p>
+          </div>
+          <div class="settings-section" id="settings-android-speaker-section" style="display:none">
+            <label class="settings-toggle-card">
+              <div class="toggle-text">
+                <strong>Default to speakerphone</strong>
+                <span>Start calls on loudspeaker instead of earpiece (Android).</span>
+              </div>
+              <div class="toggle-switch">
+                <input type="checkbox" id="settings-android-speakerphone" onchange="saveAudioDevicesOnly()">
+              </div>
+            </label>
+          </div>
+          <p class="field-hint" id="settings-audio-native-status" style="margin-top:8px"></p>
         </div>
       </section>
 
@@ -2564,6 +2622,165 @@ function applySettingsToForm(s, ifaces) {
   }
   onHubRoleChange();
   updateHubUi();
+  applyAudioSettingsToForm(s);
+}
+
+function audioDevicePayloadFromForm() {
+  const inSel = document.getElementById('settings-audio-input');
+  const outSel = document.getElementById('settings-audio-output');
+  const pulseSrc = document.getElementById('settings-pulse-source');
+  const pulseSnk = document.getElementById('settings-pulse-sink');
+  const browserIn = document.getElementById('settings-browser-audio-input');
+  const androidSpk = document.getElementById('settings-android-speakerphone');
+  const inIdx = parseInt(inSel?.value, 10);
+  const outIdx = parseInt(outSel?.value, 10);
+  const inOpt = inSel?.selectedOptions?.[0];
+  const outOpt = outSel?.selectedOptions?.[0];
+  return {
+    audio_input_device: Number.isFinite(inIdx) ? inIdx : -1,
+    audio_output_device: Number.isFinite(outIdx) ? outIdx : -1,
+    audio_input_name: (inOpt?.dataset?.name || '').trim(),
+    audio_output_name: (outOpt?.dataset?.name || '').trim(),
+    audio_pulse_source: (pulseSrc?.value || '').trim(),
+    audio_pulse_sink: (pulseSnk?.value || '').trim(),
+    browser_audio_input_id: (browserIn?.value || '').trim(),
+    android_default_speakerphone: !!androidSpk?.checked,
+  };
+}
+
+function populateNativeAudioSelect(sel, devices, savedIndex, savedName) {
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '<option value="-1">System default (auto)</option>';
+  (devices || []).forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = String(d.index);
+    opt.textContent = d.name;
+    opt.dataset.name = d.name;
+    sel.appendChild(opt);
+  });
+  let pick = '-1';
+  if (savedIndex != null && savedIndex >= 0) {
+    const hit = [...sel.options].find(o => o.value === String(savedIndex));
+    if (hit) pick = hit.value;
+  }
+  if (pick === '-1' && savedName) {
+    const hit = [...sel.options].find(o => (o.dataset.name || '').includes(savedName));
+    if (hit) pick = hit.value;
+  }
+  sel.value = pick;
+}
+
+function populatePulseSelect(sel, items, saved) {
+  if (!sel) return;
+  sel.innerHTML = '<option value="">(none — use PyAudio device above)</option>';
+  (items || []).forEach(item => {
+    const opt = document.createElement('option');
+    opt.value = item.name;
+    opt.textContent = item.is_default ? `${item.name} (system default)` : item.name;
+    sel.appendChild(opt);
+  });
+  sel.value = saved || '';
+}
+
+async function refreshBrowserAudioInputs() {
+  const sel = document.getElementById('settings-browser-audio-input');
+  if (!sel || !navigator.mediaDevices?.enumerateDevices) return;
+  try {
+    if (!sharedMicActive()) {
+      try {
+        await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      } catch (_) {}
+    }
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    const saved = (window._appSettings?.browser_audio_input_id || '').trim();
+    sel.innerHTML = '<option value="">System default</option>';
+    devs.filter(d => d.kind === 'audioinput').forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `Microphone ${d.deviceId.slice(0, 8)}…`;
+      sel.appendChild(opt);
+    });
+    if (saved) sel.value = saved;
+  } catch (_) {}
+}
+
+function applyAudioSettingsToForm(s) {
+  if (!s) return;
+  const androidSec = document.getElementById('settings-android-speaker-section');
+  if (androidSec) androidSec.style.display = isAndroidShell() ? '' : 'none';
+  const spk = document.getElementById('settings-android-speakerphone');
+  if (spk) spk.checked = s.android_default_speakerphone !== false;
+  const data = window._audioDevicesCache;
+  if (data) {
+    populateNativeAudioSelect(
+      document.getElementById('settings-audio-input'),
+      data.inputs,
+      s.audio_input_device,
+      s.audio_input_name
+    );
+    populateNativeAudioSelect(
+      document.getElementById('settings-audio-output'),
+      data.outputs,
+      s.audio_output_device,
+      s.audio_output_name
+    );
+    const pulseSrcSec = document.getElementById('settings-pulse-source-section');
+    const pulseSnkSec = document.getElementById('settings-pulse-sink-section');
+    const hasPulse = (data.pulse_sources?.length || data.pulse_sinks?.length);
+    if (pulseSrcSec) pulseSrcSec.style.display = data.pulse_sources?.length ? '' : 'none';
+    if (pulseSnkSec) pulseSnkSec.style.display = data.pulse_sinks?.length ? '' : 'none';
+    populatePulseSelect(document.getElementById('settings-pulse-source'), data.pulse_sources, s.audio_pulse_source);
+    populatePulseSelect(document.getElementById('settings-pulse-sink'), data.pulse_sinks, s.audio_pulse_sink);
+    const st = document.getElementById('settings-audio-native-status');
+    if (st) {
+      st.textContent = data.native_available
+        ? 'Native Opus voice is available on this device.'
+        : 'Native voice unavailable — browser microphone fallback will be used.';
+    }
+  }
+  refreshBrowserAudioInputs();
+}
+
+function refreshAudioDevices(showToast) {
+  const btn = document.getElementById('audio-devices-refresh-btn');
+  if (btn) { btn.disabled = true; btn.classList.add('spinning'); }
+  return fetch('/api/audio-devices')
+    .then(r => r.json())
+    .then(d => {
+      window._audioDevicesCache = d;
+      applyAudioSettingsToForm(window._appSettings || d.saved || {});
+      if (showToast) toast('Audio devices refreshed');
+      return d;
+    })
+    .catch(() => { if (showToast) toast('Failed to refresh audio devices'); })
+    .finally(() => {
+      if (btn) { btn.disabled = false; btn.classList.remove('spinning'); }
+    });
+}
+
+function onAudioDeviceChange(kind) {
+  const sel = document.getElementById(kind === 'input' ? 'settings-audio-input' : 'settings-audio-output');
+  const opt = sel?.selectedOptions?.[0];
+  if (opt && opt.dataset) opt.dataset.name = opt.textContent || '';
+  saveAudioDevicesOnly();
+}
+
+function saveAudioDevicesOnly() {
+  const payload = audioDevicePayloadFromForm();
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  }).then(async r => {
+    const d = await r.json();
+    if (r.ok && d.status === 'ok') {
+      window._appSettings = d.settings || {};
+      toast('Audio settings saved');
+    } else {
+      toast('Failed to save audio: ' + (d.error || 'unknown'));
+    }
+  }).catch(() => toast('Failed to save audio settings'));
 }
 
 function refreshLanInterfaces(showToast, btn, forceRefresh) {
@@ -4937,6 +5154,9 @@ function showSettingsSection(section) {
   } else {
     stopNetworkAutoRefresh();
   }
+  if (name === 'audio') {
+    refreshAudioDevices(false);
+  }
 }
 
 function openSettings(section) {
@@ -5560,6 +5780,7 @@ function saveSettings() {
       lan_probe_interval_s, serial_probe_interval_s,
       brand_title: (document.getElementById('settings-brand-title')?.value || '').trim().slice(0, 18),
       lan_announce_interval_s, serial_announce_interval_s,
+      ...audioDevicePayloadFromForm(),
     })
   }).then(async r => {
     const d = await r.json();
@@ -6174,6 +6395,7 @@ let callBrowserOpusOk = null;
 let callOpusRecvPrimed = false;
 let callNativeWatchId = null;
 let callForceBrowserPlayback = false;
+let callForceBrowserCapture = false;
 let callDecodeSeqByTs = new Map();
 let callSeqJitter = new Map();
 let callSeqNext = null;
@@ -6224,6 +6446,7 @@ function closeCallAudioResources() {
 function resetCallUi(opts) {
   stopCallRingtone();
   clearCallNativeWatchdog();
+  document.body.classList.remove('modal-open');
   const prevState = callState;
   const prevPeer = callPeer;
   const prevVia = callVia;
@@ -6248,6 +6471,7 @@ function resetCallUi(opts) {
   callOpusRecvPrimed = false;
   callServerStats = {};
   callForceBrowserPlayback = false;
+  callForceBrowserCapture = false;
   if (isAndroidShell()) {
     window.chatxzAndroid?.setCallActive?.(false);
     window.chatxzAndroid?.setSpeakerphone?.(false);
@@ -6464,8 +6688,8 @@ function updateCallDashboard() {
   if (micEl) {
     let micLabel = '—';
     let micClass = '';
-    if (cfg.native || useNativeCallAudio()) {
-      micLabel = cfg.native ? 'Native' : 'Server';
+    if (cfg.native || useNativeCallCapture() || (nativeEngineRunning() && callCaptureNode)) {
+      micLabel = cfg.native ? 'Native' : (callCaptureNode ? 'Browser' : 'Server');
       micClass = ' good';
     } else if (callCaptureNode && sharedMicActive()) {
       micLabel = 'Active';
@@ -6481,19 +6705,33 @@ function updateCallDashboard() {
   if (hintEl) {
     const elapsed = callStartedAt ? Date.now() - callStartedAt : 0;
     if (callState === 'active' && elapsed > 2800) {
-      const serverActive = useNativeCallAudio() && (
+      const serverActive = nativeEngineRunning() && (
         (callServerStats.frames_sent || callServerStats.audio_out || 0) > 0
         || (callServerStats.frames_recv || callServerStats.audio_in || 0) > 0
       );
-      if (outN === 0 && inN === 0 && !serverActive) {
+      const browserSending = !!callCaptureNode && sharedMicActive();
+      if (outN === 0 && inN === 0 && !serverActive && !browserSending) {
         hintEl.style.display = 'block';
         hintEl.textContent = !callMicSecureContext() && !isAndroidShell()
           ? `No audio — open ${preferredLocalCallUrl()} (mic needs secure context on desktop)`
           : 'No audio detected — check microphone permission and speak into the mic';
-      } else if (outN === 0 && !cfg.native && !useNativeCallAudio()) {
+      } else if (outN === 0 && !browserSending && useNativeCallCapture()) {
         hintEl.style.display = 'block';
-        hintEl.textContent = 'Not sending audio — allow microphone access for this site';
-      } else if (outN > 30 && (callServerStats.mic_peak_max || 0) === 0 && useNativeCallAudio()) {
+        hintEl.textContent = 'Using native microphone — speak into your system mic';
+      } else if (outN === 0 && !browserSending && nativeEngineRunning()) {
+        hintEl.style.display = 'block';
+        hintEl.textContent = callServerStats.mode === 'receive-only'
+          ? 'Native mic unavailable — switching to browser microphone…'
+          : 'Native audio starting…';
+      } else if (outN === 0 && !cfg.native && !useNativeCallCapture() && !browserSending) {
+        hintEl.style.display = 'block';
+        hintEl.textContent = !callMicSecureContext()
+          ? `Allow microphone at ${preferredLocalCallUrl()} (not LAN IP)`
+          : 'Not sending audio — allow microphone access for this site';
+      } else if (callServerStats.mode === 'receive-only' && !browserSending) {
+        hintEl.style.display = 'block';
+        hintEl.textContent = 'Native mic unavailable — allowing browser microphone…';
+      } else if (outN > 30 && (callServerStats.mic_peak_max || 0) === 0 && useNativeCallCapture()) {
         hintEl.style.display = 'block';
         hintEl.textContent = 'Mic capturing silence — check system input device (browser fallback may help)';
       } else {
@@ -6508,19 +6746,28 @@ function updateCallDashboard() {
   updateSidebarCallStrip();
 }
 
-function useNativeCallAudio() {
+function nativeEngineRunning() {
+  return !!(callServerStats && callServerStats.running && callServerStats.engine === 'native-opus');
+}
+
+function useNativeCallCapture() {
+  if (callForceBrowserCapture) return false;
+  if (!nativeCallAudioEnabled || isAndroidShell()) return false;
+  if (!nativeEngineRunning()) return false;
+  if (callServerStats.send_enabled === false) return false;
+  return true;
+}
+
+function useNativeCallPlayback() {
   if (callForceBrowserPlayback) return false;
-  if (callServerStats && callServerStats.running && callServerStats.engine === 'native-opus') {
-    if (!isAndroidShell()) return true;
-    const outN = Number(callServerStats.frames_sent || callServerStats.audio_out || 0);
-    const inN = Number(callServerStats.frames_recv || callServerStats.audio_in || 0);
-    if (outN > 0 || inN > 0) return true;
-    if (callStartedAt && (Date.now() - callStartedAt) < 6000) return true;
-    return false;
-  }
-  return !!(isAndroidShell() && callServerStats && callServerStats.state === 'active'
-    && callServerStats.native_android
-    && callStartedAt && (Date.now() - callStartedAt) < 6000);
+  if (!nativeEngineRunning()) return false;
+  const inN = Number(callServerStats.frames_recv || callServerStats.audio_in || 0);
+  const played = Number(callServerStats.playback_frames || 0);
+  return inN > 0 && played > 3;
+}
+
+function useNativeCallAudio() {
+  return useNativeCallCapture() || useNativeCallPlayback();
 }
 
 function nativeCallAudioCapable() {
@@ -6565,6 +6812,10 @@ function showActiveCall(peer, label) {
   callState = 'active';
   callPeer = peerKey(peer) || peer;
   void primeCallOpusReceive();
+  if (isAndroidShell() && window.chatxzAndroid?.setSpeakerphone) {
+    const spkOn = window._appSettings?.android_default_speakerphone !== false;
+    window.chatxzAndroid.setSpeakerphone(spkOn);
+  }
   updateCallSpeakerUi();
   document.getElementById('call-incoming-overlay')?.classList.remove('open');
   if (!callTimerId) {
@@ -6639,7 +6890,7 @@ function callAudioConfig() {
     jitterTarget: 2880, jitterMax: 7200, jitterMin: 1920,
     useOpus: true,
   };
-  if (useNativeCallAudio()) return { ...opus, native: true };
+  if (useNativeCallCapture()) return { ...opus, native: true };
   return { ...opus, native: false };
 }
 
@@ -6669,8 +6920,13 @@ async function ensureCallOpusDecoder(cfg) {
     output: frame => {
       try {
         const n = frame.numberOfFrames;
-        const buf = new Float32Array(n);
+        let buf = new Float32Array(n);
         frame.copyTo(buf, {planeIndex: 0, format: 'f32'});
+        const ctx = ensureCallAudioCtx();
+        const inRate = frame.sampleRate || cfg.rate || 48000;
+        if (inRate !== ctx.sampleRate) {
+          buf = resampleFloats(buf, inRate, ctx.sampleRate);
+        }
         ensureCallPlaybackNode();
         const seq = callDecodeSeqByTs.get(frame.timestamp);
         callDecodeSeqByTs.delete(frame.timestamp);
@@ -6874,6 +7130,21 @@ function floatToPcm(samples) {
   return pcm;
 }
 
+function resampleFloats(input, inputRate, outputRate) {
+  if (!input || !input.length || inputRate === outputRate) return input;
+  const outLen = Math.max(1, Math.round(input.length * outputRate / inputRate));
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const src = i * inputRate / outputRate;
+    const idx = Math.floor(src);
+    const frac = src - idx;
+    const s0 = input[Math.min(idx, input.length - 1)] || 0;
+    const s1 = input[Math.min(idx + 1, input.length - 1)] || s0;
+    out[i] = s0 + (s1 - s0) * frac;
+  }
+  return out;
+}
+
 function resampleLinearToPcm(input, inputRate, outputRate) {
   if (!input || !input.length) return new Int16Array(0);
   if (inputRate === outputRate) return floatToPcm(input);
@@ -6911,9 +7182,14 @@ async function acquireSharedMic(opts) {
   await releaseSharedMic(true);
   if (recording) stopVoice();
   await new Promise(r => setTimeout(r, isAndroidShell() ? 300 : 120));
-  const richAudio = forCall
-    ? { audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}, video: false }
-    : { audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}, video: false };
+  const browserMicId = (window._appSettings?.browser_audio_input_id || '').trim();
+  const audioBase = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
+  if (browserMicId) audioBase.deviceId = { exact: browserMicId };
+  const richAudio = { audio: audioBase, video: false };
   const tries = isAndroidShell() ? 5 : 2;
   let lastErr = null;
   for (let i = 0; i < tries; i++) {
@@ -7047,11 +7323,18 @@ function scheduleCallNativeFallbackWatchdog() {
       await startCallCapture({forceBrowser: true});
       return;
     }
+    if (nativeActive && (callServerStats.mode === 'receive-only' || callServerStats.send_enabled === false)) {
+      if (!callCaptureNode) {
+        toast('Native mic unavailable — switching to browser Opus');
+        callForceBrowserCapture = true;
+        await startCallCapture({forceBrowser: true});
+      }
+      return;
+    }
     if (nativeActive && recv === 0 && sent > 0) {
-      callForceBrowserPlayback = true;
       primeCallPlayback();
     }
-  }, 4000);
+  }, 1200);
 }
 
 function updateCallSpeakerUi() {
@@ -7077,7 +7360,10 @@ function toggleCallSpeaker() {
 
 async function startCallCapture(opts) {
   const forceBrowser = !!(opts && opts.forceBrowser);
-  if (forceBrowser) callForceBrowserPlayback = true;
+  if (forceBrowser) {
+    callForceBrowserCapture = true;
+    callForceBrowserPlayback = true;
+  }
   if (callCaptureNode) return true;
   stopCallRingtone();
   if (!isAndroidShell() && !callMicSecureContext()) {
@@ -7095,11 +7381,15 @@ async function startCallCapture(opts) {
         if (st.native_call_audio === false) nativeCallAudioEnabled = false;
       }
     } catch (_) {}
-    if (useNativeCallAudio() && !forceBrowser && nativeCallAudioEnabled) {
+    if (useNativeCallCapture() && !forceBrowser && nativeCallAudioEnabled) {
       primeCallPlayback();
       scheduleCallNativeFallbackWatchdog();
       updateCallDashboard();
       return true;
+    }
+    if (nativeEngineRunning() && !forceBrowser && nativeCallAudioEnabled
+        && callServerStats.send_enabled === false) {
+      return startCallCapture({forceBrowser: true});
     }
     const stream = await acquireSharedMic({forCall: true});
     const ctx = ensureCallAudioCtx();
@@ -7169,7 +7459,7 @@ function stopCallCapturePipeline() {
 
 function enqueueCallAudio(b64, codec, opts) {
   if (!b64 || callState !== 'active') return;
-  if (useNativeCallAudio() || (opts && opts.native_playback)) return;
+  if (useNativeCallPlayback() || (opts && opts.native_playback)) return;
   if (!(codec || '').includes('opus') || b64.length <= 8) return;
   const rate = parseCallAudioRate(codec) || 48000;
   const decCfg = { useOpus: true, rate };
@@ -7302,19 +7592,24 @@ async function endVoiceCall() {
   const peer = callPeer;
   const via = callVia;
   const id = callId;
+  resetCallUi();
   if (isAndroidShell()) {
     window.chatxzAndroid?.setCallActive?.(false);
     window.chatxzAndroid?.setSpeakerphone?.(false);
   }
-  resetCallUi();
+  closeCallAudioResources();
+  stopCallCapturePipeline();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 2500);
-  fetch('/api/call', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({action: 'end', peer, via, call_id: id}),
-    signal: ctrl.signal,
-  }).catch(() => {}).finally(() => clearTimeout(timer));
+  try {
+    await fetch('/api/call', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'end', peer, via, call_id: id}),
+      signal: ctrl.signal,
+    });
+  } catch (_) {}
+  clearTimeout(timer);
 }
 
 function beaconEndVoiceCall() {

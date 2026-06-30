@@ -3,6 +3,39 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.9.17": [
+        "Settings → Audio: choose microphone and speaker for voice calls (saved across restarts).",
+        "PulseAudio/PipeWire source and sink pickers on Linux; browser mic fallback device selection.",
+        "Android: default speakerphone option in Audio settings.",
+    ],
+    "0.9.16": [
+        "Voice calls on Arch/Linux with HDMI-only Pulse: incoming audio now plays through your HDMI monitor instead of silent analog output.",
+        "Microphone: loads Pulse ALSA capture when no mic source exists; unmutes ALSA Input Source before capture.",
+        "Mic hot-swap no longer tries broken dsnoop/dmix devices.",
+    ],
+    "0.9.15": [
+        "Web UI no longer freezes after voice calls — fixed link-closed crash and stopped flooding the server with per-frame audio WebSocket messages.",
+        "Hang-up unlocks the UI immediately; server notifies the browser before stopping native audio.",
+    ],
+    "0.9.14": [
+        "Voice calls: single native audio owner — hang-up stops capture/playback immediately in the console.",
+        "Mac Ctrl+C uses signal wakeup fd; browser playback fallback until native speakers confirm output.",
+        "Virtual audio devices (e.g. AudioRelay) are no longer selected as call speakers.",
+    ],
+    "0.9.13": [
+        "Ctrl+C now stops the server reliably on Windows and Mac — even after voice calls.",
+        "Shutdown uses a dedicated console/signal thread and forces exit within ~80ms.",
+    ],
+    "0.9.12": [
+        "Voice calls now end symmetrically — hanging up on either side stops audio on both; remote disconnect is detected within ~2s.",
+        "Fixed zombie call audio continuing after the UI showed the call ended.",
+        "CALL_END is sent on every active link so the peer always gets the hang-up signal.",
+    ],
+    "0.9.11": [
+        "Ctrl+C now stops the server after voice calls on Windows and Mac — PyAudio cleanup no longer hangs shutdown.",
+        "Call UI: clearer mic hints (native vs browser vs localhost); faster switch to browser mic when native capture is unavailable.",
+        "Voice calls: open http://localhost:8742 (Mac) or http://127.0.0.1:8742 (Windows) for browser microphone access.",
+    ],
     "0.9.6": [
         "Voice calls: open http://localhost:8742 (Mac) or http://127.0.0.1:8742 (Windows) — browser mic is blocked on LAN IPs.",
         "macOS native voice: brew install opus portaudio, then restart chatxz.",

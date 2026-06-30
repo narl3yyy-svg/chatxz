@@ -3,6 +3,11 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.9.17": [
+        "Settings → Audio: choose microphone and speaker for voice calls (saved across restarts).",
+        "PulseAudio/PipeWire source and sink pickers on Linux; browser mic fallback device selection.",
+        "Android: default speakerphone option in Audio settings.",
+    ],
     "0.9.16": [
         "Voice calls on Arch/Linux with HDMI-only Pulse: incoming audio now plays through your HDMI monitor instead of silent analog output.",
         "Microphone: loads Pulse ALSA capture when no mic source exists; unmutes ALSA Input Source before capture.",

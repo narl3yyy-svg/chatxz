@@ -2,6 +2,16 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.17] — 2026-06-29
+
+### Added
+- **Settings → Audio** — pick microphone, speaker, PulseAudio/PipeWire source/sink, and browser fallback mic (Stoat-style persisted device prefs). Applied on the next voice call; pinned devices disable mic hot-swap.
+- **`GET /api/audio-devices`** — lists native PyAudio I/O and Pulse sources/sinks for the settings UI.
+- **Android** — default speakerphone toggle in Audio settings.
+
+### Fixed
+- Voice calls respect saved output/input devices (including HDMI `default` routing from v0.9.16).
+
 ## [0.9.16] — 2026-06-29
 
 ### Fixed

@@ -173,9 +173,8 @@ class LanBeacon:
                     self._tx_sock.sendto(packet, (addr, BEACON_PORT))
                     sent += 1
                     broadcasts += 1
-                except OSError as exc:
-                    if not android:
-                        print(f"[beacon] broadcast to {addr}:{BEACON_PORT} failed: {exc}")
+                except OSError:
+                    pass
 
         self.last_broadcast_sent = broadcasts
         self.last_announce_sent = sent

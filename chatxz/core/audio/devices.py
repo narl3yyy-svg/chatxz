@@ -637,11 +637,27 @@ def probe_input_device(
     frame_count: int,
     *,
     skip_probe: bool = False,
+    prefs: Optional[dict] = None,
 ) -> Tuple[Optional[int], Optional[str], List[Tuple[int, str, int]]]:
     """Return (index, name, full_ranked_list). Picks best device even without probe signal."""
+    from chatxz.core.audio.prefs import normalize_prefs, resolve_device_index
+
     ranked = rank_devices(pa, input_device=True)
     if not ranked:
         return None, None, []
+    pin = normalize_prefs(prefs) if prefs else None
+    if pin and pin.get("pin_input"):
+        idx, name = resolve_device_index(
+            pa,
+            input_device=True,
+            index=int(pin.get("audio_input_device", -1)),
+            name=str(pin.get("audio_input_name") or ""),
+            ranked=ranked,
+        )
+        if idx is not None:
+            print(f"[call-audio] Mic (settings) [{idx}]: {name}")
+            return idx, name, ranked
+        print("[call-audio] Saved input device missing — using auto selection")
     if skip_probe or pulse_capture_bypass():
         return pick_input_device(pa)
     bypass = pulse_capture_bypass()
@@ -701,13 +717,109 @@ def probe_input_device(
     return idx, name, ranked
 
 
-def pick_output_device(pa) -> Tuple[Optional[int], Optional[str]]:
+def pick_output_device(
+    pa,
+    *,
+    prefs: Optional[dict] = None,
+) -> Tuple[Optional[int], Optional[str]]:
+    from chatxz.core.audio.prefs import normalize_prefs, resolve_device_index
+
     ranked = rank_devices(pa, input_device=False)
+    pin = normalize_prefs(prefs) if prefs else None
+    if pin and pin.get("pin_output"):
+        idx, name = resolve_device_index(
+            pa,
+            input_device=False,
+            index=int(pin.get("audio_output_device", -1)),
+            name=str(pin.get("audio_output_name") or ""),
+            ranked=ranked,
+        )
+        if idx is not None:
+            print(f"[call-audio] Speaker (settings) [{idx}]: {name}")
+            return idx, name
+        print("[call-audio] Saved output device missing — using auto selection")
     if ranked:
         idx, name, score = ranked[0]
         print(f"[call-audio] Selected output [{idx}] score={score}: {name}")
         return idx, name
     return None, None
+
+
+def enumerate_audio_devices(timeout: float = 6.0) -> dict:
+    """List PyAudio I/O devices and optional Pulse sources/sinks for settings UI."""
+    out: dict = {
+        "inputs": [],
+        "outputs": [],
+        "pulse_sources": [],
+        "pulse_sinks": [],
+        "platform": sys.platform,
+        "native_available": False,
+    }
+    if pulse_available():
+        default_src = pulse_default_source()
+        default_snk = pulse_default_sink()
+        for name in pulse_list_sources():
+            if ".monitor" in name.lower():
+                continue
+            out["pulse_sources"].append(
+                {"name": name, "is_default": name == default_src}
+            )
+        for name in pulse_list_sinks():
+            if ".monitor" in name.lower():
+                continue
+            out["pulse_sinks"].append(
+                {"name": name, "is_default": name == default_snk}
+            )
+    try:
+        from chatxz.core.audio.opus import opus_available
+
+        native = opus_available()
+        try:
+            import pyaudio  # noqa: F401
+        except ImportError:
+            native = False
+        out["native_available"] = native
+        if not out["native_available"]:
+            return out
+        pa = create_pyaudio(timeout=timeout)
+        try:
+            for i in range(pa.get_device_count()):
+                info = pa.get_device_info_by_index(i)
+                name = str(info.get("name") or f"device {i}")
+                ins = int(info.get("maxInputChannels", 0) or 0)
+                outs = int(info.get("maxOutputChannels", 0) or 0)
+                if ins > 0:
+                    score = score_device(name, input_device=True, pulse_name=None)
+                    if score > -1000:
+                        out["inputs"].append(
+                            {
+                                "index": i,
+                                "name": name,
+                                "channels": ins,
+                                "score": score,
+                            }
+                        )
+                if outs > 0:
+                    score = score_device(name, input_device=False, pulse_name=None)
+                    if score > -1000:
+                        out["outputs"].append(
+                            {
+                                "index": i,
+                                "name": name,
+                                "channels": outs,
+                                "score": score,
+                            }
+                        )
+            out["inputs"].sort(key=lambda d: d.get("score", 0), reverse=True)
+            out["outputs"].sort(key=lambda d: d.get("score", 0), reverse=True)
+        finally:
+            try:
+                pa.terminate()
+            except Exception:
+                pass
+    except Exception as exc:
+        out["error"] = str(exc)
+    return out
 
 
 def log_audio_devices(pa) -> None:

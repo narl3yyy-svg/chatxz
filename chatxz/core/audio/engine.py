@@ -58,8 +58,15 @@ def call_audio_available() -> bool:
 class CallAudioEngine:
     """Capture → Opus → RNS; receive → jitter → decode → playback."""
 
-    def __init__(self, send_fn: Callable[[str, str], bool]):
+    def __init__(
+        self,
+        send_fn: Callable[[str, str], bool],
+        *,
+        device_prefs: Optional[dict] = None,
+    ):
         self._send_fn = send_fn
+        self._device_prefs = device_prefs or {}
+        self._hotswap_disabled = False
         self._encoder: Optional[OpusEncoder] = None
         self._decoder: Optional[OpusDecoder] = None
         self._jitter = VoiceJitterBuffer()
@@ -90,6 +97,8 @@ class CallAudioEngine:
         self._input_rank_pos = 0
         self._in_dev: Optional[int] = None
         self._in_name: Optional[str] = None
+        self._out_dev: Optional[int] = None
+        self._out_name: Optional[str] = None
         self._out_rate = OPUS_SAMPLE_RATE
         self._lifecycle_lock = threading.Lock()
 
@@ -139,6 +148,11 @@ class CallAudioEngine:
             return False
         import pyaudio
 
+        from chatxz.core.audio.prefs import apply_pulse_prefs, normalize_prefs
+
+        prefs = normalize_prefs(self._device_prefs)
+        self._hotswap_disabled = bool(prefs.get("pin_input"))
+        apply_pulse_prefs(prefs)
         print("[call-audio] Preparing Linux audio...")
         prepare_linux_audio()
         if self._aborted():
@@ -187,7 +201,9 @@ class CallAudioEngine:
         rate = OPUS_SAMPLE_RATE
         frame_count = OPUS_FRAME_SAMPLES
 
-        out_dev, out_name = pick_output_device(self._pa)
+        out_dev, out_name = pick_output_device(self._pa, prefs=prefs)
+        self._out_dev = out_dev
+        self._out_name = out_name
         try:
             out_kw = dict(
                 format=fmt,
@@ -227,7 +243,12 @@ class CallAudioEngine:
 
             skip_probe = pulse_capture_bypass()
             self._in_dev, self._in_name, self._input_ranked = probe_input_device(
-                self._pa, fmt, rate, frame_count, skip_probe=skip_probe
+                self._pa,
+                fmt,
+                rate,
+                frame_count,
+                skip_probe=skip_probe,
+                prefs=prefs,
             )
             if self._aborted():
                 self._stop_unlocked(blocking=False)
@@ -371,7 +392,8 @@ class CallAudioEngine:
                 self._mic_diag -= 1
                 print(f"[call-audio] mic peak {peak}")
             if (
-                self._silent_frames >= SILENT_FRAMES_BEFORE_HOTSWAP
+                not self._hotswap_disabled
+                and self._silent_frames >= SILENT_FRAMES_BEFORE_HOTSWAP
                 and self._hotswap_count < MAX_HOTSWAPS
                 and self._input_ranked
                 and len(self._input_ranked) > 1
@@ -522,6 +544,7 @@ class CallAudioEngine:
             "plc_frames": jb.get("plc_frames", 0),
             "running": self.is_running(),
             "input_device": self._in_name or "",
+            "output_device": self._out_name or "",
         }
 
 

@@ -25,6 +25,7 @@ from chatxz.core.audio import (
     STATE_OUTGOING,
     call_audio_available,
 )
+from chatxz.core.audio.prefs import DEFAULT_AUDIO_SETTINGS, merge_audio_defaults, normalize_prefs
 from chatxz.core.discovery import PeerDiscovery
 from chatxz.core.lan_beacon import LanBeacon, BEACON_PORT
 from chatxz.core.contacts import (
@@ -1389,12 +1390,15 @@ class ChatWebServer:
             "brand_title": "",
             "setup_complete": False,
             "last_release_notes_seen": "",
+            **DEFAULT_AUDIO_SETTINGS,
+            "android_default_speakerphone": True,
         }
         try:
             with open(SETTINGS_FILE) as f:
                 s = json.load(f)
                 for key, val in defaults.items():
                     s.setdefault(key, val)
+                merge_audio_defaults(s)
                 if s.get("auto_announce") and not s.get("lan_announce_interval_s"):
                     s["lan_announce_interval_s"] = 30
                     s["serial_announce_interval_s"] = 30
@@ -2557,12 +2561,18 @@ class ChatWebServer:
             )
         return f"Native voice off ({reason}). Browser Opus works at http://localhost:8742."
 
+    def _audio_device_prefs(self, settings=None):
+        settings = settings or self.load_settings()
+        merge_audio_defaults(settings)
+        return normalize_prefs(settings)
+
     def _configure_call_audio(self):
         self.call_audio.configure(
             send_hook=self._call_audio_send_hook,
             voice_state=lambda: (
                 self.messaging.voice_call.state if self.messaging else STATE_IDLE
             ),
+            device_prefs=self._audio_device_prefs(),
         )
 
     def _call_audio_send_hook(self, b64, codec):
@@ -2701,7 +2711,9 @@ class ChatWebServer:
         if not call_audio_available():
             print("[call-audio] Native unavailable — install libopus + pyaudio (./run.sh install)")
             return
-        self.call_audio.start()
+        prefs = self._audio_device_prefs()
+        self.call_audio.set_device_prefs(prefs)
+        self.call_audio.start(device_prefs=prefs)
 
     def _end_call_audio(self, *, fast: bool = False):
         """Synchronous stop — must halt console capture/playback immediately."""
@@ -4092,7 +4104,18 @@ class ChatWebServer:
 
     async def handle_settings_get(self, request):
         settings = self._apply_hub_settings(self.load_settings())
+        merge_audio_defaults(settings)
         return web.json_response(self._settings_api_payload(settings))
+
+    async def handle_audio_devices_get(self, request):
+        try:
+            from chatxz.core.audio.devices import enumerate_audio_devices
+
+            data = await asyncio.to_thread(enumerate_audio_devices)
+            data["saved"] = self._audio_device_prefs()
+            return web.json_response(data)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
 
     def _abs_path_hint(self):
         if sys.platform == "win32":
@@ -4353,6 +4376,23 @@ class ChatWebServer:
                 settings["last_release_notes_seen"] = (
                     str(data.get("last_release_notes_seen") or "").strip()
                 )
+            for key in DEFAULT_AUDIO_SETTINGS:
+                if key in data:
+                    val = data.get(key)
+                    if key in ("audio_input_device", "audio_output_device"):
+                        try:
+                            settings[key] = int(val)
+                        except (TypeError, ValueError):
+                            settings[key] = -1
+                    else:
+                        settings[key] = str(val or "").strip()
+            if "android_default_speakerphone" in data:
+                settings["android_default_speakerphone"] = bool(
+                    data.get("android_default_speakerphone")
+                )
+            merge_audio_defaults(settings)
+            if any(k in data for k in DEFAULT_AUDIO_SETTINGS):
+                self.call_audio.set_device_prefs(self._audio_device_prefs(settings))
             hub_changed = any(
                 k in data for k in ("hub_role", "hub_host", "hub_port")
             )
@@ -6143,6 +6183,7 @@ class ChatWebServer:
         app.router.add_post("/api/debug/export", self.handle_debug_export)
         app.router.add_get("/api/settings", self.handle_settings_get)
         app.router.add_post("/api/settings", self.handle_settings_post)
+        app.router.add_get("/api/audio-devices", self.handle_audio_devices_get)
         app.router.add_get("/api/browse-dir", self.handle_browse_dir)
         app.router.add_post("/api/browse-dir", self.handle_browse_dir)
         app.router.add_post("/api/transfer/cancel", self.handle_transfer_cancel)

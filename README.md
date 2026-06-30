@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — each transport uses its own RNS identity, and messages travel over encrypted links on your LAN (Wi‑Fi, Ethernet, USB serial).
 
-**Current version:** 0.9.6
+**Current version:** 0.9.17
 
 ## How chatxz works (v0.5+)
 
@@ -53,14 +53,34 @@ Regenerate identities under **Settings → Profile** (**Regenerate LAN** / **Reg
 - **Android sleep** — tap the contact to wake and reconnect (LAN wake is automatic).
 - **Cross-subnet LAN** — pick matching pinned IPv4 on both devices.
 
-**Voice calls:** when connected to a peer, tap **📞** in the chat header for a live duplex **Opus** call over RNS (LAN or USB). All voice code is under `chatxz/core/audio/` — Opus 48 kHz / 20 ms frames, adaptive jitter buffer, threaded capture/playback on desktop. If native audio stalls, the UI automatically falls back to browser Opus. See **[docs/VOICE.md](docs/VOICE.md)**.
+**Voice calls:** when connected to a peer, tap **📞** in the chat header for a live duplex **Opus** call over RNS (LAN or USB). Unlike [Stoat](https://github.com/stoatchat/stoatchat) (LiveKit/WebRTC via a server), chatxz sends encrypted Opus frames **peer-to-peer** over your existing RNS link — no voice server, works offline on LAN/USB.
+
+| | **chatxz** | **Stoat** |
+|---|-----------|-----------|
+| Transport | RNS link + `CALL_AUDIO` Opus packets | LiveKit SFU + WebRTC |
+| Device prefs | **Settings → Audio** (saved mic/speaker) | Client-side WebRTC device store |
+| Scale | 1:1 P2P | Many users per voice channel |
+
+All voice code is under `chatxz/core/audio/` — Opus 48 kHz / 20 ms frames, adaptive jitter buffer, threaded capture/playback on desktop. If native audio stalls, the UI falls back to browser Opus. See **[docs/VOICE.md](docs/VOICE.md)**.
+
+### Settings → Audio
+
+| Control | Purpose |
+|---------|---------|
+| **Microphone (native)** | PyAudio input device for calls (`-1` = auto) |
+| **Speaker (native)** | PyAudio output — pick **default** if you listen on HDMI |
+| **Pulse source / sink** | Linux only — `pactl` routing before capture/playback |
+| **Browser microphone** | Fallback when native Opus/PyAudio unavailable |
+| **Default speakerphone** | Android — start calls on loudspeaker vs earpiece |
+
+Tap **↻ Refresh devices** after plugging in a headset. Changes apply on the **next** call.
 
 | Platform | Audio path |
 |----------|------------|
-| Linux / Windows / macOS | `core/audio/engine.py` — libopus + PyAudio; browser WebCodecs fallback if native unavailable |
-| Android | `core/audio/android.py` + Java `CallAudioEngine` (MediaCodec Opus, speakerphone toggle) |
+| Linux / Windows / macOS | `core/audio/engine.py` — libopus + PyAudio; browser WebCodecs fallback |
+| Android | Java `CallAudioEngine` (MediaCodec Opus) + speakerphone toggle |
 
-**Desktop deps:** `./run.sh web` installs PyAudio; system **libopus** required (`pacman -S opus` / `apt install libopus0`). Linux also needs `pactl` (PulseAudio/PipeWire) for reliable mic selection.
+**Desktop deps:** `./run.sh web` installs PyAudio; system **libopus** required (`pacman -S opus alsa-utils` / `apt install libopus0 alsa-utils`). Linux needs `pactl` (PulseAudio/PipeWire) for HDMI mic/speaker routing.
 
 ## Download
 
