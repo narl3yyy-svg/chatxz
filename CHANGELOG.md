@@ -2,6 +2,11 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.18] — 2026-06-30
+
+### Fixed
+- **Symmetric call hang-up** — when either peer ends a voice call, both sides tear down audio and UI: `CALL_END` is retried, remote hang-up always broadcasts `call_ended`, link loss during a call ends the session, disconnecting a chat link ends an active call first, and 3s remote-audio silence ends the call if `CALL_END` was lost.
+
 ## [0.9.17] — 2026-06-29
 
 ### Added

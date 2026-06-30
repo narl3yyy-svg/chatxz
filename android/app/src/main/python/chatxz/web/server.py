@@ -2379,17 +2379,21 @@ class ChatWebServer:
             return
         peer = self._peer_dest_hash(peer_hash)
         still_linked = bool(self.messaging and peer and self.messaging._peer_link_active(peer))
-        if self.messaging and peer and not still_linked:
+        if self.messaging and peer:
             vc = self.messaging.voice_call
             if vc.state in (STATE_ACTIVE, STATE_OUTGOING, STATE_INCOMING):
                 if self.messaging._call_peer_matches(peer):
-                    threading.Thread(
-                        target=lambda: self._hang_up_call(
-                            vc.call_id, peer, vc.transport,
-                        ),
-                        name="call-link-hangup",
-                        daemon=True,
-                    ).start()
+                    no_call_link = not self.messaging._call_link_for_peer(
+                        peer, vc.transport, prefer_healthy=False,
+                    )
+                    if not still_linked or no_call_link:
+                        threading.Thread(
+                            target=lambda: self._hang_up_call(
+                                vc.call_id, peer, vc.transport,
+                            ),
+                            name="call-link-hangup",
+                            daemon=True,
+                        ).start()
         if still_linked:
             return
         removed = 0

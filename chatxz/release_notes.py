@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.9.18": [
+        "Voice calls end on both sides when either peer hangs up, loses link, or stops sending audio.",
+        "Disconnecting a chat link while on a call ends the call first.",
+    ],
     "0.9.17": [
         "Settings → Audio: choose microphone and speaker for voice calls (saved across restarts).",
         "PulseAudio/PipeWire source and sink pickers on Linux; browser mic fallback device selection.",

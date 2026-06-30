@@ -228,6 +228,71 @@ def test_call_send_audio_ends_faster_without_healthy_link():
     assert len(ended) == 1
 
 
+def test_call_end_remote_hangup_when_already_idle_still_emits():
+    from chatxz.core.messaging import MessagingBackend, CALL_END, STATE_IDLE
+    from types import SimpleNamespace
+
+    mb = MessagingBackend.__new__(MessagingBackend)
+    mb.voice_call = VoiceCallSession()
+    assert mb.voice_call.state == STATE_IDLE
+    peer = "nn" * 16
+    events = []
+    mb._emit_call_event = lambda ev, p, payload=None: events.append((ev, payload))
+    mb.dest_hash_for = lambda h: h
+    mb.hashes_equivalent = lambda a, b: a == b
+    msg = SimpleNamespace(
+        msg_type=CALL_END,
+        content='{"call_id":"cid-9"}',
+    )
+    mb._handle_call_packet(msg, peer, None)
+    assert mb.voice_call.state == STATE_IDLE
+    assert events and events[0][0] == "ended"
+    assert events[0][1].get("remote") is True
+
+
+def test_disconnect_peer_ends_active_call():
+    from chatxz.core.messaging import MessagingBackend, STATE_ACTIVE
+
+    mb = MessagingBackend.__new__(MessagingBackend)
+    mb.voice_call = VoiceCallSession()
+    peer = "oo" * 16
+    mb.voice_call.begin_outgoing(peer, "lan")
+    mb.voice_call.activate()
+    mb.dest_hash_for = lambda h: h
+    mb.hashes_equivalent = lambda a, b: a == b
+    mb._call_peer_matches = lambda h: True
+    mb._normalize_transport = lambda t: t or "lan"
+    mb.links = {}
+    mb._link_peer_hashes = {}
+    mb.active_link = None
+    mb.active_peer_hash = None
+    mb._send_link = None
+    mb._other_active_links_for_peer = lambda *a, **k: False
+    mb._unlink_peer = lambda *a, **k: None
+    mb.mark_user_disconnected = lambda *a, **k: None
+    mb.clear_session_peer = lambda: None
+    ended = []
+    mb.call_end = lambda **k: ended.append(True) or True
+    mb.disconnect_peer(peer, user_initiated=True, transport="lan")
+    assert len(ended) == 1
+    assert mb.voice_call.state == STATE_ACTIVE
+
+
+def test_tick_call_liveness_ends_when_link_gone():
+    from chatxz.core.messaging import MessagingBackend
+
+    mb = MessagingBackend.__new__(MessagingBackend)
+    mb.voice_call = VoiceCallSession()
+    peer = "pp" * 16
+    mb.voice_call.begin_outgoing(peer, "lan")
+    mb.voice_call.activate()
+    mb._call_link_for_peer = lambda *a, **k: None
+    ended = []
+    mb.call_end = lambda **k: ended.append(True) or True
+    assert mb._tick_call_liveness() is True
+    assert len(ended) == 1
+
+
 def test_call_remote_silent_ends_when_links_unhealthy():
     from chatxz.core.messaging import MessagingBackend
 

@@ -863,6 +863,15 @@ class MessagingBackend:
     def disconnect_peer(self, peer_hash, user_initiated=False, transport=None):
         peer = self.dest_hash_for(peer_hash)
         transport = self._normalize_transport(transport) if transport else None
+        if (
+            peer
+            and self.voice_call.state != STATE_IDLE
+            and self._call_peer_matches(peer)
+        ):
+            self.call_end(
+                peer_hash=peer,
+                transport=transport or self.voice_call.transport,
+            )
         if user_initiated and peer and not transport:
             self.mark_user_disconnected(peer)
             self.clear_session_peer()
@@ -5446,30 +5455,36 @@ class MessagingBackend:
             return False
         payload = {"call_id": (call_id or "").strip()}
         sent = False
-        seen = set()
-        for link in self._iter_call_links_for_peer(peer, transport):
-            lid = getattr(link, "link_id", None) or id(link)
-            if lid in seen:
-                continue
-            seen.add(lid)
-            try:
-                if link.status != RNS.Link.ACTIVE:
+        for attempt in range(2):
+            seen = set()
+            for link in self._iter_call_links_for_peer(peer, transport):
+                lid = getattr(link, "link_id", None) or id(link)
+                if lid in seen:
                     continue
-            except Exception:
-                continue
-            msg = ChatMessage(CALL_END, json.dumps(payload))
-            data = msg.to_json().encode("utf-8")
-            mtu = max(400, int(getattr(link, "mtu", 500) or 500) - 48)
-            if len(data) > mtu:
-                continue
-            try:
-                RNS.Packet(link, data).send()
+                seen.add(lid)
+                try:
+                    if link.status != RNS.Link.ACTIVE:
+                        continue
+                except Exception:
+                    continue
+                msg = ChatMessage(CALL_END, json.dumps(payload))
+                data = msg.to_json().encode("utf-8")
+                mtu = max(400, int(getattr(link, "mtu", 500) or 500) - 48)
+                if len(data) > mtu:
+                    continue
+                try:
+                    RNS.Packet(link, data).send()
+                    sent = True
+                except Exception:
+                    continue
+            if sent:
+                break
+            if self._send_call_packet(peer, CALL_END, payload, transport):
                 sent = True
-            except Exception:
-                continue
-        if sent:
-            return True
-        return self._send_call_packet(peer, CALL_END, payload, transport)
+                break
+            if attempt == 0:
+                time.sleep(0.1)
+        return sent
 
     def _emit_call_event(self, event, peer_hash, payload=None):
         if not self.on_call_event:
@@ -5628,18 +5643,25 @@ class MessagingBackend:
             return
 
         if msg_type == CALL_END:
-            if self.voice_call.state == STATE_IDLE:
-                return
             if not self._call_peer_matches(peer):
                 return
             if not self._call_id_matches(call_id, peer):
                 return
+            was_busy = self.voice_call.state != STATE_IDLE
             active_cid = self.voice_call.call_id
             self.voice_call.reset()
             self._reset_call_audio_counters()
             self._call_send_link_fails = 0
-            self._emit_call_event("ended", peer, {"call_id": call_id or active_cid})
-            print(f"[call] Remote hang-up from {peer[:16]}...")
+            self._emit_call_event(
+                "ended",
+                peer,
+                {
+                    "call_id": call_id or active_cid,
+                    "remote": True,
+                },
+            )
+            if was_busy:
+                print(f"[call] Remote hang-up from {peer[:16]}...")
             return
 
         if msg_type == CALL_AUDIO:
@@ -5740,7 +5762,11 @@ class MessagingBackend:
         if self.voice_call.state == STATE_IDLE:
             if peer:
                 self._send_call_end_packets(peer, cid, via)
-                self._emit_call_event("ended", peer, {"call_id": cid})
+                self._emit_call_event(
+                    "ended",
+                    peer,
+                    {"call_id": cid, "remote": False},
+                )
                 print(f"[call] Ended remote notify ({cid or 'no-id'})")
                 return True
             return False
@@ -5754,7 +5780,11 @@ class MessagingBackend:
             self._call_send_link_fails = 0
             if peer:
                 self._send_call_end_packets(peer, cid, via)
-            self._emit_call_event("ended", peer, {"call_id": cid})
+            self._emit_call_event(
+                "ended",
+                peer,
+                {"call_id": cid, "remote": False},
+            )
             print(f"[call] Ended ({cid})" if was_active else f"[call] Ended remote notify ({cid or 'no-id'})")
             return True
         finally:
@@ -5865,7 +5895,40 @@ class MessagingBackend:
                     print(f"[call] Audio out #{sent} ({len(chunk_b64)} b64) → {peer[:16]}...")
         return ok_any
 
+    def _tick_call_liveness(self):
+        """End active call when peer link or audio stream is gone (symmetric teardown)."""
+        if self.voice_call.state != STATE_ACTIVE:
+            return False
+        if getattr(self, "_call_ending", False):
+            return False
+        peer = self.voice_call.peer_hash
+        transport = self.voice_call.transport
+        if not peer:
+            return False
+        call_link = self._call_link_for_peer(peer, transport, prefer_healthy=False)
+        if not call_link:
+            print("[call] Peer link gone during call — ending")
+            self.call_end(peer_hash=peer, transport=transport)
+            return True
+        recv = int(getattr(self, "_call_audio_recv", 0) or 0)
+        last_in = getattr(self, "_call_last_audio_in_at", None)
+        if recv >= 8 and last_in:
+            silent_for = time.monotonic() - float(last_in)
+            if silent_for >= 3.0:
+                print(
+                    f"[call] Remote audio silent {silent_for:.1f}s — ending call"
+                )
+                self.call_end(peer_hash=peer, transport=transport)
+                return True
+        started = float(getattr(self.voice_call, "started_at", 0) or 0)
+        if started and (time.time() - started) >= 12.0 and recv < 4:
+            print("[call] No remote audio after connect — ending call")
+            self.call_end(peer_hash=peer, transport=transport)
+            return True
+        return False
+
     def call_status(self):
+        self._tick_call_liveness()
         vc = self.voice_call
         peer = vc.peer_hash
         link = self._call_link_for_peer(peer, vc.transport) if peer else None

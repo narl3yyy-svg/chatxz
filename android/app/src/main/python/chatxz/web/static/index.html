@@ -3640,7 +3640,10 @@ function handleWSMessage(msg) {
       const stillLinked = ['lan', 'serial'].some(v =>
         isPeerLinked(callPeer, v) || (viewingPeer && peersMatch(viewingPeer, callPeer) && isPeerLinked(viewingPeer, v))
       );
-      if (!stillLinked) resetCallUi({notifyServer: callState === 'active' || callState === 'outgoing'});
+      if (!stillLinked) {
+        if (callState === 'active' || callState === 'outgoing') endVoiceCall();
+        else resetCallUi({notifyServer: true});
+      }
     }
     updatePeerHeader();
     if (!viewingStillLinked && !linkedPeers.size) {
@@ -7521,9 +7524,16 @@ function handleCallWS(event, data) {
     return;
   }
   if (event === 'ended') {
-    if (callId && data.call_id && data.call_id !== callId) return;
     if (callPeer && peer && !peersMatch(callPeer, peer)) return;
-    if (callState !== 'idle') toast('Call ended');
+    if (
+      callId && data.call_id && data.call_id !== callId
+      && callState !== 'idle'
+    ) {
+      return;
+    }
+    if (callState !== 'idle') {
+      toast(data.remote ? 'Call ended by peer' : 'Call ended');
+    }
     resetCallUi();
     return;
   }
