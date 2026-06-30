@@ -61,7 +61,12 @@ build_rust() {
 launch_with_group() {
     local grp="$1"
     shift
-    local cmd="cd $(printf '%q' "$DIR") && CHATXZ_ROOT=$(printf '%q' "$DIR") $(printf '%q' "$CHATXZ_BIN")"
+    local py="${CHATXZ_PYTHON:-}"
+    local cmd="cd $(printf '%q' "$DIR") && CHATXZ_ROOT=$(printf '%q' "$DIR")"
+    if [ -n "$py" ]; then
+        cmd="$cmd && CHATXZ_PYTHON=$(printf '%q' "$py")"
+    fi
+    cmd="$cmd && $(printf '%q' "$CHATXZ_BIN")"
     local arg
     for arg in "$@"; do
         cmd="$cmd $(printf '%q' "$arg")"
@@ -93,7 +98,10 @@ main() {
         fi
     done
 
-    echo "[chatxz] Rust application on port 8742 (RNS daemon auto-started)"
+    echo "[chatxz] Starting (web UI on port 8742, RNS transport loads in background)…"
+    if [ -n "${CHATXZ_PYTHON:-}" ]; then
+        exec env CHATXZ_ROOT="$DIR" CHATXZ_PYTHON="$CHATXZ_PYTHON" "$CHATXZ_BIN" "$@"
+    fi
     exec env CHATXZ_ROOT="$DIR" "$CHATXZ_BIN" "$@"
 }
 

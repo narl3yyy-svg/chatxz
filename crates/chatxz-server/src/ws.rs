@@ -4,13 +4,19 @@ use axum::extract::ws::{Message, WebSocket};
 use serde_json::Value;
 use tracing::warn;
 
-use crate::rns_ipc::RnsIpc;
+use crate::IpcSlot;
 
 pub async fn handle_ui_ws(
     mut socket: WebSocket,
-    ipc: RnsIpc,
+    ipc_slot: IpcSlot,
     mut call_events: tokio::sync::broadcast::Receiver<String>,
 ) {
+    let ipc = loop {
+        if let Some(ipc) = ipc_slot.read().await.clone() {
+            break ipc;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    };
     let mut ipc_events = ipc.subscribe_events();
     loop {
         tokio::select! {

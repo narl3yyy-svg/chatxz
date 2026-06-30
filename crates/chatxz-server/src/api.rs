@@ -8,15 +8,20 @@ use axum::response::Response;
 use http_body_util::BodyExt;
 use tracing::warn;
 
-use crate::rns_ipc::RnsIpc;
+use crate::IpcSlot;
 
 pub async fn forward_api(
-    ipc: &RnsIpc,
+    ipc_slot: &IpcSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, StatusCode> {
+    let ipc = ipc_slot
+        .read()
+        .await
+        .clone()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let path = uri.path().to_string();
     let query: HashMap<String, String> = uri
         .query()

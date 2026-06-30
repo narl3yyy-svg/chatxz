@@ -12,6 +12,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::RwLock;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode, Uri};
@@ -26,12 +28,20 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
+pub type IpcSlot = Arc<RwLock<Option<rns_ipc::RnsIpc>>>;
+
 #[derive(Clone)]
 struct AppState {
     static_root: PathBuf,
     calls: SharedCallManager,
-    ipc: rns_ipc::RnsIpc,
+    ipc: IpcSlot,
     call_events: broadcast::Sender<String>,
+}
+
+impl AppState {
+    async fn ipc(&self) -> Option<rns_ipc::RnsIpc> {
+        self.ipc.read().await.clone()
+    }
 }
 
 #[tokio::main]
@@ -68,29 +78,33 @@ async fn main() {
     let _rnsd = rnsd_spawn::spawn_rnsd(&root, ipc_port, port, &extra);
 
     let ipc_addr = format!("127.0.0.1:{ipc_port}");
-    let ipc = wait_for_ipc(&ipc_addr).await;
+    let ipc_slot: IpcSlot = Arc::new(RwLock::new(None));
     let (call_tx, _) = broadcast::channel(64);
 
-    let ipc_sig = ipc.clone();
+    let ipc_sig = ipc_slot.clone();
     let send_signaling = Arc::new(move |peer: &str, payload: &str| {
-        let ipc = ipc_sig.clone();
+        let slot = ipc_sig.clone();
         let peer = peer.to_string();
         let payload = payload.to_string();
         tokio::spawn(async move {
-            if let Err(e) = ipc.send_signaling(&peer, &payload).await {
-                warn!(%e, "rns signaling send failed");
+            if let Some(ipc) = slot.read().await.clone() {
+                if let Err(e) = ipc.send_signaling(&peer, &payload).await {
+                    warn!(%e, "rns signaling send failed");
+                }
             }
         });
     }) as chatxz_call::SendSignalingFn;
 
-    let ipc_med = ipc.clone();
+    let ipc_med = ipc_slot.clone();
     let send_media = Arc::new(move |peer: &str, data: &[u8]| {
-        let ipc = ipc_med.clone();
+        let slot = ipc_med.clone();
         let peer = peer.to_string();
         let data = data.to_vec();
         tokio::spawn(async move {
-            if let Err(e) = ipc.send_media(&peer, &data).await {
-                warn!(%e, "rns media send failed");
+            if let Some(ipc) = slot.read().await.clone() {
+                if let Err(e) = ipc.send_media(&peer, &data).await {
+                    warn!(%e, "rns media send failed");
+                }
             }
         });
     }) as chatxz_call::SendMediaFn;
@@ -106,7 +120,7 @@ async fn main() {
     let state = AppState {
         static_root,
         calls: Arc::new(Mutex::new(manager)),
-        ipc,
+        ipc: ipc_slot.clone(),
         call_events: call_tx,
     };
 
@@ -121,8 +135,21 @@ async fn main() {
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    info!(%addr, ipc = %ipc_addr, "chatxz v1.0.0 starting");
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
+    eprintln!();
+    eprintln!("[chatxz] Web UI: http://127.0.0.1:{port}");
+    eprintln!("[chatxz] RNS transport starting — API ready in a few seconds…");
+    eprintln!();
+
+    let slot_bg = ipc_slot.clone();
+    let ipc_addr_bg = ipc_addr.clone();
+    tokio::spawn(async move {
+        let ipc = wait_for_ipc(&ipc_addr_bg).await;
+        *slot_bg.write().await = Some(ipc);
+        eprintln!("[chatxz] RNS transport ready — messaging and calls online");
+    });
+
+    info!(%addr, ipc = %ipc_addr, "chatxz v1.0.0 listening");
     axum::serve(listener, app).await.expect("serve");
 }
 
@@ -149,8 +176,14 @@ fn parse_flag(args: &[String], flag: &str) -> Option<String> {
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
-    match state
-        .ipc
+    let Some(ipc) = state.ipc().await else {
+        return Json(json!({
+            "status": "starting",
+            "rns_ready": false,
+            "message": "RNS transport is still starting",
+        }));
+    };
+    match ipc
         .http_request("GET", "/api/health", HashMap::new(), HashMap::new(), None)
         .await
     {
@@ -221,10 +254,10 @@ async fn call_api(
     let peer = body.peer.unwrap_or_default();
     match action.as_str() {
         "status" => {
-            let linked = if peer.is_empty() {
-                state.ipc.any_linked().await.unwrap_or(false)
-            } else {
-                state.ipc.peer_linked(&peer).await.unwrap_or(false)
+            let linked = match state.ipc().await {
+                Some(ipc) if peer.is_empty() => ipc.any_linked().await.unwrap_or(false),
+                Some(ipc) => ipc.peer_linked(&peer).await.unwrap_or(false),
+                None => false,
             };
             Json(json!({
                 "status": "ok",
@@ -238,7 +271,10 @@ async fn call_api(
             if peer.is_empty() {
                 return Json(json!({"error": "peer required"}));
             }
-            if !state.ipc.peer_linked(&peer).await.unwrap_or(false) {
+            let Some(ipc) = state.ipc().await else {
+                return Json(json!({"error": "not_ready"}));
+            };
+            if !ipc.peer_linked(&peer).await.unwrap_or(false) {
                 return Json(json!({"error": "not_linked"}));
             }
             let mode = match body.mode.as_deref().unwrap_or("audio") {
@@ -348,10 +384,10 @@ struct MediaQuery {
 }
 
 async fn ui_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    let ipc = state.ipc.clone();
+    let ipc_slot = state.ipc.clone();
     let call_events = state.call_events.subscribe();
     ws.on_upgrade(move |socket| async move {
-        ws::handle_ui_ws(socket, ipc, call_events).await;
+        ws::handle_ui_ws(socket, ipc_slot, call_events).await;
     })
 }
 
