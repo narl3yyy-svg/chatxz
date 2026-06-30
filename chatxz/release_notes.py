@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.9.20": [
+        "Hanging up on desktop now reliably ends the call on Android too — CALL_END is retried and no longer lost to race conditions.",
+        "Remote hang-up always clears the call UI on both sides.",
+    ],
     "0.9.19": [
         "Voice calls: hang-up now stops capture/playback before signaling — no more audio after remote disconnect.",
         "Both UIs reset reliably when either peer ends the call.",

@@ -2731,14 +2731,31 @@ class ChatWebServer:
 
     def _hang_up_call(self, call_id=None, peer=None, via=None):
         """Stop capture/playback first, then signal CALL_END to the peer."""
+        vc = self.messaging.voice_call if self.messaging else None
+        saved_peer = (peer or (vc.peer_hash if vc else "") or "").strip()
+        saved_cid = (call_id or (vc.call_id if vc else "") or "").strip()
+        saved_via = (
+            via or (vc.transport if vc else "") or "lan"
+        ).strip().lower() or "lan"
         self._end_call_audio()
         if not self.messaging:
             return True
-        return self.messaging.call_end(
-            call_id=call_id,
-            peer_hash=peer,
-            transport=via,
+        ok = self.messaging.call_end(
+            call_id=saved_cid or None,
+            peer_hash=saved_peer or None,
+            transport=saved_via,
         )
+        if (
+            not ok
+            and saved_peer
+            and self.messaging.voice_call.state != STATE_IDLE
+        ):
+            self.messaging.voice_call.reset()
+            self.messaging._send_call_end_packets(
+                saved_peer, saved_cid, saved_via,
+            )
+            ok = True
+        return ok
 
     def _deliver_call_audio_frame(self, seq, data, codec):
         codec = (codec or OPUS_CODEC).strip()

@@ -281,6 +281,33 @@ def test_call_end_remote_halts_before_reset():
     assert order == ["teardown", "event"]
 
 
+def test_call_end_serializes_concurrent_hangup():
+    from chatxz.core.messaging import MessagingBackend
+    import threading
+
+    mb = MessagingBackend.__new__(MessagingBackend)
+    mb.voice_call = VoiceCallSession()
+    peer = "uu" * 16
+    mb.voice_call.begin_outgoing(peer, "lan")
+    mb.voice_call.activate()
+    mb.dest_hash_for = lambda h: h
+    mb._send_call_end_packets = lambda *a, **k: True
+    mb._emit_call_event = lambda *a, **k: None
+    mb.on_call_teardown = lambda: None
+    results = []
+
+    def worker():
+        results.append(mb.call_end())
+
+    t = threading.Thread(target=worker)
+    t.start()
+    ok = mb.call_end()
+    t.join(timeout=2.0)
+    assert ok is True
+    assert results == [True]
+    assert mb.voice_call.state == STATE_IDLE
+
+
 def test_call_send_audio_blocked_while_ending():
     from chatxz.core.messaging import MessagingBackend
 

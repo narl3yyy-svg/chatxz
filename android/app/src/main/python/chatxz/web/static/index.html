@@ -7525,16 +7525,14 @@ function handleCallWS(event, data) {
   }
   if (event === 'ended') {
     if (callState === 'idle') return;
-    if (callPeer && peer && !peersMatch(callPeer, peer)) return;
-    if (
-      !data.remote
-      && callId
-      && data.call_id
-      && data.call_id !== callId
-    ) {
+    if (data.remote) {
+      toast('Call ended by peer');
+      resetCallUi();
       return;
     }
-    toast(data.remote ? 'Call ended by peer' : 'Call ended');
+    if (callPeer && peer && !peersMatch(callPeer, peer)) return;
+    if (callId && data.call_id && data.call_id !== callId) return;
+    toast('Call ended');
     resetCallUi();
     return;
   }
@@ -7603,15 +7601,8 @@ async function endVoiceCall() {
   const peer = callPeer;
   const via = callVia;
   const id = callId;
-  resetCallUi();
-  if (isAndroidShell()) {
-    window.chatxzAndroid?.setCallActive?.(false);
-    window.chatxzAndroid?.setSpeakerphone?.(false);
-  }
-  closeCallAudioResources();
-  stopCallCapturePipeline();
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 2500);
+  const timer = setTimeout(() => ctrl.abort(), 4000);
   try {
     await fetch('/api/call', {
       method: 'POST',
@@ -7621,6 +7612,13 @@ async function endVoiceCall() {
     });
   } catch (_) {}
   clearTimeout(timer);
+  resetCallUi();
+  if (isAndroidShell()) {
+    window.chatxzAndroid?.setCallActive?.(false);
+    window.chatxzAndroid?.setSpeakerphone?.(false);
+  }
+  closeCallAudioResources();
+  stopCallCapturePipeline();
 }
 
 function beaconEndVoiceCall() {

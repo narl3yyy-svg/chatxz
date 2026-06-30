@@ -2,6 +2,11 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.20] — 2026-06-30
+
+### Fixed
+- **Local hang-up not ending remote call** — `call_end` is serialized with a lock (no dropped hang-up when stats/liveness races); `CALL_END` is retried across links/transports with delivery logging; hang-up notifies the server before clearing the UI; remote `call_ended` always resets Android/Web UI even when peer hashes differ.
+
 ## [0.9.19] — 2026-06-30
 
 ### Fixed
