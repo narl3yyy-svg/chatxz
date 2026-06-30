@@ -39,28 +39,50 @@ collect_pids() {
   echo "$pids"
 }
 
-for pattern in "chatxz-server" "target/release/chatxz" "chatxz.rnsd" "chatxz.web.server" "chatxz.app" "chatxz-web"; do
-  if pgrep -f "$pattern" >/dev/null 2>&1; then
-    pkill -f "$pattern" 2>/dev/null || true
-  fi
+wait_ports_free() {
+  local timeout="$1"
+  shift
+  local deadline=$((SECONDS + timeout))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    local busy=0
+    local port
+    for port in "$@"; do
+      if [ -n "$(collect_pids "$port" 0)" ]; then
+        busy=1
+        break
+      fi
+    done
+    [ "$busy" -eq 0 ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+# Rust owns the Python child — stop HTTP (8742) first so rnsd gets SIGTERM via Drop.
+stop_pids TERM $(collect_pids 8742 0)
+for pattern in "target/release/chatxz" "chatxz-server"; do
+  pkill -TERM -f "$pattern" 2>/dev/null || true
 done
 
-sleep 0.4
+wait_ports_free 5 8742 8744 || true
 
-for port in 8742 8744; do
-  stop_pids TERM $(collect_pids "$port" 0)
-done
+# Remaining RNS/IPC holders (standalone rnsd or stragglers).
+stop_pids TERM $(collect_pids 8744 0)
 for port in 4242 8743; do
   stop_pids TERM $(collect_pids "$port" 1)
 done
 
-sleep 0.4
+sleep 0.5
 
 for port in 8742 8744; do
   stop_pids KILL $(collect_pids "$port" 0)
 done
 for port in 4242 8743; do
   stop_pids KILL $(collect_pids "$port" 1)
+done
+
+for pattern in "chatxz.rnsd" "chatxz.web.server"; do
+  pkill -KILL -f "$pattern" 2>/dev/null || true
 done
 
 exit 0

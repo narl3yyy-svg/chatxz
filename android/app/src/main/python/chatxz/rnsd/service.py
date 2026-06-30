@@ -523,6 +523,15 @@ class ChatRnsDaemon:
     def set_event_sink(self, sink):
         self._event_sink = sink
 
+    def _can_schedule(self):
+        loop = self._loop
+        if self._shutting_down or loop is None:
+            return False
+        try:
+            return not loop.is_closed()
+        except Exception:
+            return False
+
     def _build_route_map(self):
         return [
             ("GET", "/", self.handle_index),
@@ -2151,7 +2160,7 @@ class ChatRnsDaemon:
         return peers
 
     def _schedule_peers_broadcast(self, authoritative=False):
-        if not (self._event_sink or self.websockets) or not self._loop:
+        if not (self._event_sink or self.websockets) or not self._can_schedule():
             return
         asyncio.run_coroutine_threadsafe(
             self._broadcast_peers(authoritative=authoritative),
@@ -2175,7 +2184,7 @@ class ChatRnsDaemon:
                 self.websockets.discard(ws)
 
     def _schedule_contacts_broadcast(self):
-        if not (self._event_sink or self.websockets) or not self._loop:
+        if not (self._event_sink or self.websockets) or not self._can_schedule():
             return
         contacts = list_contacts(self.config_dir)
         asyncio.run_coroutine_threadsafe(
@@ -5795,6 +5804,8 @@ class ChatRnsDaemon:
             asyncio.run(_main())
         except (KeyboardInterrupt, SystemExit):
             pass
+        finally:
+            self._loop = None
 
 
 def main():
