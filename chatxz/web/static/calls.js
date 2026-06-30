@@ -1,4 +1,4 @@
-/* chatxz v1.0.2 — voice/video/screen calls over RNS (no WebRTC) */
+/* chatxz v1.0.3 — voice/video/screen calls over RNS (no WebRTC) */
 
 let callState = null;
 let mediaWs = null;
@@ -17,7 +17,7 @@ let lastMediaStatsSent = 0;
 
 const FRAME_MS = 20;
 const SAMPLE_RATE = 48000;
-const FRAME_SAMPLES = 960;
+const FRAME_SAMPLES = 240;  // 10ms @ 48kHz — MTU-safe on RNS links (1064 B)
 
 function callEl(id) { return document.getElementById(id); }
 
@@ -78,8 +78,18 @@ function callMediaReady() {
 function updateCallUI() {
   const bar = callEl('call-bar');
   const overlay = callEl('call-overlay');
+  const incoming = callEl('incoming-call-prompt');
   const active = callIsActive();
-  if (bar) bar.style.display = active ? 'flex' : 'none';
+  const ringing = callState && callState.state === 'incoming';
+  if (incoming) {
+    incoming.classList.toggle('active', !!ringing);
+    const label = callEl('incoming-call-label');
+    if (label && ringing) {
+      const modes = {audio: 'Voice', video: 'Video', screen: 'Screen'};
+      label.textContent = `Incoming ${modes[callState.mode] || 'call'}`;
+    }
+  }
+  if (bar) bar.style.display = (active && !ringing) ? 'flex' : 'none';
   if (overlay) overlay.style.display = (callState && callState.state === 'active') ? 'flex' : 'none';
   const peer = resolveCallPeerHash();
   const linked = isCallPeerLinked();
@@ -440,10 +450,13 @@ function onCallWsEvent(ev, data) {
   if (ev === 'incoming') {
     callState = data;
     updateCallUI();
+    toast(`Incoming ${data.mode || 'voice'} call — tap Accept`);
     if (window.chatxzAndroid && typeof window.chatxzAndroid.vibrateIncomingCall === 'function') {
       try { window.chatxzAndroid.vibrateIncomingCall(); } catch (_) {}
     }
-    showIncomingCallDialog(data);
+    if (typeof showMessageNotification === 'function') {
+      try { showMessageNotification(data.peer || 'peer', `Incoming ${data.mode || 'voice'} call`); } catch (_) {}
+    }
   } else if (ev === 'accepted') {
     callState = data;
     updateCallUI();
@@ -463,13 +476,6 @@ function onCallWsEvent(ev, data) {
     }
     if (ev === 'update' && data.stats) applyRemoteMediaStats(data.stats);
   }
-}
-
-function showIncomingCallDialog(data) {
-  const modes = {audio: 'Voice', video: 'Video', screen: 'Screen'};
-  const mode = modes[data.mode] || 'Call';
-  if (confirm(`Incoming ${mode} call. Accept?`)) acceptCall();
-  else rejectCall();
 }
 
 function micErrorMessage(err) {

@@ -8,7 +8,15 @@ import time
 from typing import TYPE_CHECKING, Optional
 
 from chatxz.core.calls import CallManager, CallState
-from chatxz.core.media_engine import MediaSession, parse_packet, rust_available
+from chatxz.core.media_engine import (
+    KIND_AUDIO,
+    KIND_SCREEN,
+    KIND_VIDEO,
+    MediaSession,
+    packet_fits_mtu,
+    parse_packet,
+    rust_available,
+)
 
 if TYPE_CHECKING:
     from chatxz.web.server import ChatWebServer
@@ -20,11 +28,12 @@ class CallBridge:
         self.manager: Optional[CallManager] = None
         self._local_sessions: dict[str, MediaSession] = {}
         self._media_ws: dict = {}
+        self._mtu_warn_at = 0.0
 
     def attach(self):
         self.manager = CallManager(
             send_signaling=self._send_signaling,
-            send_media=self._send_media,
+            send_media=self._send_media_packets,
             get_link_for_peer=self._peer_linked,
         )
         self.manager.set_event_handler(self._on_call_event)
@@ -38,12 +47,25 @@ class CallBridge:
     def _send_signaling(self, peer_hash: str, payload: str):
         if self.server.messaging:
             resolved = self.server._peer_dest_hash(peer_hash) or peer_hash
-            self.server.messaging.send_call_signaling(payload, target_peer=resolved)
+            ok = self.server.messaging.send_call_signaling(payload, target_peer=resolved)
+            if not ok:
+                print(f"[call] signaling send failed peer={resolved[:16]}")
 
-    def _send_media(self, peer_hash: str, data: bytes):
+    def _send_media_packets(self, peer_hash: str, packets):
+        if isinstance(packets, (bytes, bytearray)):
+            packets = [bytes(packets)]
         if self.server.messaging:
             resolved = self.server._peer_dest_hash(peer_hash) or peer_hash
-            self.server.messaging.send_media_packet(data, target_peer=resolved)
+            for pkt in packets:
+                if not pkt:
+                    continue
+                if not packet_fits_mtu(pkt):
+                    now = time.time()
+                    if now - self._mtu_warn_at > 5.0:
+                        self._mtu_warn_at = now
+                        print(f"[call] dropping oversize media packet ({len(pkt)} bytes)")
+                    continue
+                self.server.messaging.send_media_packet(pkt, target_peer=resolved)
 
     def on_signaling(self, peer_hash: str, content: str):
         if self.manager:
@@ -53,26 +75,37 @@ class CallBridge:
         if self.manager:
             self.manager.handle_media_bytes(peer_hash, data)
         parsed = parse_packet(data)
-        if parsed and self.server._loop:
-            kind, flags, seq, ts, payload = parsed
-            if kind == 1:
-                session = self._session_for_peer(peer_hash)
-                try:
-                    session.ingest_packet(data)
-                    result = session.pop_audio_immediate()
-                    if not result:
-                        result = session.pop_audio(int(time.time() * 1000) + 5000)
-                    if result:
-                        _, pcm = result
-                        payload = pcm
-                except Exception:
-                    pass
-            asyncio.run_coroutine_threadsafe(
-                self._broadcast_media(peer_hash, kind, flags, seq, ts, payload),
-                self.server._loop,
-            )
+        if not parsed or not self.server._loop:
+            return
+        kind, flags, seq, ts, payload = parsed
+        if kind == KIND_AUDIO:
+            session = self._session_for_peer(peer_hash)
+            try:
+                session.ingest_packet(data)
+                result = session.pop_audio_immediate()
+                if not result:
+                    result = session.pop_audio(int(time.time() * 1000) + 2000)
+                if result:
+                    _, pcm = result
+                    payload = pcm
+            except Exception as exc:
+                print(f"[call] audio ingest error: {exc}")
+        elif kind in (KIND_VIDEO, KIND_SCREEN):
+            session = self._session_for_peer(peer_hash)
+            try:
+                ingested = session.ingest_packet(data)
+                if ingested:
+                    _, flags, _, _, payload = ingested
+            except Exception:
+                pass
+        asyncio.run_coroutine_threadsafe(
+            self._broadcast_media(peer_hash, kind, flags, seq, ts, payload),
+            self.server._loop,
+        )
 
     async def _broadcast_media(self, peer_hash, kind, flags, seq, ts, payload):
+        if not payload:
+            return
         msg = json.dumps({
             "type": "media",
             "peer": peer_hash,
@@ -94,6 +127,7 @@ class CallBridge:
             self._media_ws.pop(ws, None)
 
     def _on_call_event(self, event: str, data: dict):
+        print(f"[call] event {event} peer={str(data.get('peer', ''))[:16]} call_id={data.get('call_id', '')}")
         if self.server._loop:
             asyncio.run_coroutine_threadsafe(
                 self.server._broadcast({"type": "call", "event": event, "data": data}),
@@ -216,24 +250,24 @@ class CallBridge:
                 frame_type = raw[0]
                 ts = int.from_bytes(raw[1:5], "big")
                 session = self._session_for_peer(peer)
-                if frame_type == 1:
-                    payload = raw[5:]
-                    try:
+                try:
+                    if frame_type == 1:
+                        payload = raw[5:]
                         opus = session.encode_audio_frame(payload)
-                        pkt = session.packetize_audio(opus, ts)
-                        self._send_media(peer, pkt)
-                    except Exception as exc:
-                        print(f"[call] audio encode error: {exc}")
-                elif frame_type == 2:
-                    keyframe = raw[5] == 1 if len(raw) > 5 else False
-                    vid_data = raw[6:] if len(raw) > 6 else b""
-                    pkt = session.packetize_video(vid_data, ts, keyframe=keyframe)
-                    self._send_media(peer, pkt)
-                elif frame_type == 3:
-                    keyframe = raw[5] == 1 if len(raw) > 5 else False
-                    scr_data = raw[6:] if len(raw) > 6 else b""
-                    pkt = session.packetize_screen(scr_data, ts, keyframe=keyframe)
-                    self._send_media(peer, pkt)
+                        packets = session.packetize_audio_chunks(opus, ts)
+                        self._send_media_packets(peer, packets)
+                    elif frame_type == 2:
+                        keyframe = raw[5] == 1 if len(raw) > 5 else False
+                        vid_data = raw[6:] if len(raw) > 6 else b""
+                        packets = session.packetize_video_chunks(vid_data, ts, keyframe=keyframe)
+                        self._send_media_packets(peer, packets)
+                    elif frame_type == 3:
+                        keyframe = raw[5] == 1 if len(raw) > 5 else False
+                        scr_data = raw[6:] if len(raw) > 6 else b""
+                        packets = session.packetize_screen_chunks(scr_data, ts, keyframe=keyframe)
+                        self._send_media_packets(peer, packets)
+                except Exception as exc:
+                    print(f"[call] media encode error: {exc}")
         finally:
             self._media_ws.pop(ws, None)
         return ws

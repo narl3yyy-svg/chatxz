@@ -5091,12 +5091,32 @@ class MessagingBackend:
         link = self._queue_media_link(peer, link_hint=link)
         if not link or not self._link_matches_peer(link, peer):
             return False
+        mtu = int(getattr(link, "mtu", 1064) or 1064)
+        budget = max(200, mtu - 120)
+        if len(data) > budget:
+            if not getattr(self, "_media_mtu_warn_at", None):
+                self._media_mtu_warn_at = 0.0
+            now = time.time()
+            if now - self._media_mtu_warn_at > 5.0:
+                self._media_mtu_warn_at = now
+                print(
+                    f"[messaging] Media packet too large ({len(data)} > {budget} budget, "
+                    f"link MTU {mtu}) — drop; rebuild media engine"
+                )
+            return False
         try:
             packet = RNS.Packet(link, data)
             packet.send()
             return True
         except Exception as e:
-            print(f"[messaging] Media packet send failed: {e}")
+            err = str(e)
+            if "exceeds MTU" in err:
+                now = time.time()
+                if now - getattr(self, "_media_mtu_warn_at", 0.0) > 5.0:
+                    self._media_mtu_warn_at = now
+                    print(f"[messaging] Media MTU exceeded ({len(data)} bytes, link MTU {mtu})")
+            else:
+                print(f"[messaging] Media packet send failed: {e}")
             return False
 
     def _send_long_text(self, msg, text, data, receipt_callback, link=None):

@@ -14,13 +14,16 @@ from chatxz.core.calls import (
     MESSAGE_TYPE_CALL,
 )
 from chatxz.core.media_engine import (
+    AUDIO_CHUNK_BYTES,
     HEADER_SIZE,
     KIND_AUDIO,
     KIND_SCREEN,
     KIND_VIDEO,
     MAGIC,
+    MAX_CXMZ_BYTES,
     MediaSession,
     is_media_packet,
+    packet_fits_mtu,
     parse_packet,
 )
 
@@ -126,9 +129,10 @@ def test_call_signaling_message_type_constant():
 
 def test_media_packet_roundtrip_python_fallback():
     session = MediaSession()
-    pcm = b"\x00\x01" * 480
+    pcm = b"\x00\x01" * (AUDIO_CHUNK_BYTES // 2)
     pkt = session.packetize_audio(pcm, timestamp_ms=1000)
     assert is_media_packet(pkt)
+    assert packet_fits_mtu(pkt)
     parsed = parse_packet(pkt)
     assert parsed is not None
     kind, flags, seq, ts, payload = parsed
@@ -187,6 +191,25 @@ def test_call_hangup_does_not_ping_pong():
     before = len(signals)
     mgr.handle_signaling("peerB", json.dumps({"action": CALL_HANGUP, "call_id": "x1"}))
     assert len(signals) == before
+
+
+def test_audio_chunks_fit_rns_mtu():
+    session = MediaSession()
+    pcm = b"\x00\x01" * 480
+    packets = session.packetize_audio_chunks(pcm, timestamp_ms=42)
+    assert len(packets) >= 1
+    for pkt in packets:
+        assert packet_fits_mtu(pkt)
+        assert len(pkt) <= MAX_CXMZ_BYTES
+
+
+def test_video_fragments_fit_mtu():
+    session = MediaSession()
+    jpg = b"\xff\xd8\xff" + (b"x" * 2500)
+    packets = session.packetize_video_chunks(jpg, timestamp_ms=99, keyframe=True)
+    assert len(packets) > 1
+    for pkt in packets:
+        assert packet_fits_mtu(pkt)
 
 
 def test_media_pop_audio_immediate():

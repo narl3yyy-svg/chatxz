@@ -2,6 +2,15 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [1.0.3] — 2026-06-29
+
+### Fixed
+- **Call audio MTU** — media packets exceeded RNS link MTU (1064 B); audio now sent in 480-byte chunks, video/screen JPEG fragmented to fit.
+- **Incoming calls** — in-page Accept/Decline bar replaces `confirm()` dialog; toast + notification on invite.
+
+### Added
+- MTU-safe packetization (`packetize_audio_chunks`, video fragmentation) and tests.
+
 ## [1.0.2] — 2026-06-29
 
 ### Fixed

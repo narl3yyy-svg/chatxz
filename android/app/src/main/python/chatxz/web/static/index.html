@@ -993,6 +993,8 @@ body.settings-open { overflow: hidden; }
   display: none; align-items: center; gap: 8px; padding: 8px 14px;
   background: var(--surface); border-bottom: 1px solid var(--border);
 }
+#incoming-call-prompt { display: none; }
+#incoming-call-prompt.active { display: flex; }
 #call-overlay {
   display: none; position: fixed; inset: 0; z-index: 9000;
   background: rgba(0,0,0,0.85); flex-direction: column;
@@ -1587,6 +1589,11 @@ body.android-shell.sidebar-open #sidebar-backdrop {
       <button class="call-btn" onclick="toggleMute()" title="Mute">🔇</button>
       <button class="call-btn" onclick="startScreenShare()" title="Share screen">🖥</button>
       <button class="call-btn danger" onclick="hangupCall()" title="Hang up">✕</button>
+    </div>
+    <div id="incoming-call-prompt" style="display:none;padding:10px 14px;background:var(--primary);color:#fff;align-items:center;gap:10px;">
+      <span id="incoming-call-label">Incoming call</span>
+      <button class="call-btn primary" onclick="acceptCall()" title="Accept">✓</button>
+      <button class="call-btn danger" onclick="rejectCall()" title="Decline">✕</button>
     </div>
 
     <div id="placeholder">

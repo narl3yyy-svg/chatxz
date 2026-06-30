@@ -2,7 +2,7 @@
 
 Encrypted peer-to-peer chat over the [Reticulum Network Stack](https://reticulum.network/). No accounts, no cloud servers — each transport uses its own RNS identity, and messages travel over encrypted links on your LAN (Wi‑Fi, Ethernet, USB serial).
 
-**Current version:** 1.0.2
+**Current version:** 1.0.3
 
 ## How chatxz works (v0.5+)
 
@@ -62,7 +62,7 @@ Regenerate identities under **Settings → Profile** (**Regenerate LAN** / **Reg
 
 | Platform | Run |
 |----------|-----|
-| **Android** | `chatxz-1.0.2.apk` (or latest) from [Releases](https://github.com/narl3yyy-svg/chatxz/releases) — sideload (arm64) |
+| **Android** | `chatxz-1.0.3.apk` (or latest) from [Releases](https://github.com/narl3yyy-svg/chatxz/releases) — sideload (arm64) |
 | **Windows** | `git clone` → **cmd** → `run.bat web --share` |
 | **macOS / Linux** | `git clone` → `./run.sh web --share` |
 
@@ -301,6 +301,7 @@ On first launch, choose **Normal** or **Debug** mode (Debug enables RNS verbose 
 
 ## Recent changes
 
+- **v1.0.3** — **Call audio MTU fix:** 480-byte audio chunks + video fragmentation (fixes “Packet size exceeds MTU”); incoming-call Accept/Decline bar
 - **v1.0.2** — **Calls:** robust link detection, low-latency LAN audio, bilateral hangup, UDP-first media, adaptive video quality; WebSocket reconnect no longer clears link state
 - **v1.0.1** — **Call buttons:** voice/video/screen use the open chat peer (`viewingPeer`) instead of a stale `activePeerHash`; Android CI/APK build fixed (`MainActivity` call helpers)
 - **v1.0.0** — **Calls rewrite:** voice, video, and screen sharing over RNS (no WebRTC); Rust `chatxz-media` engine (Opus, jitter buffer, CXMZ protocol); legacy voice notes and pyaudio removed
