@@ -50,6 +50,7 @@ from chatxz.core.rns_interfaces import (
     configured_serial_enabled,
     configured_tcp_lan_enabled,
     configured_udp_lan_enabled,
+    set_primary_lan_transport,
     ensure_runtime_tcp_lan_server,
     remove_serial_interfaces,
     prune_dead_serial_interfaces,
@@ -1374,6 +1375,20 @@ class ChatWebServer:
                 if needs_udp:
                     s["rns_interfaces"] = normalize_interface_list(None)
                     self.save_settings(s)
+                if (
+                    is_android()
+                    and configured_udp_lan_enabled(s.get("rns_interfaces"))
+                    and not configured_tcp_lan_enabled(s.get("rns_interfaces"))
+                    and (s.get("hub_role") or "off") == "off"
+                ):
+                    s["rns_interfaces"] = set_primary_lan_transport(
+                        s.get("rns_interfaces"), "tcp_lan",
+                    )
+                    self.save_settings(s)
+                    print(
+                        "[config] Android: migrated LAN transport to TCP "
+                        "(stable default for mobile)"
+                    )
                 repaired = normalize_interface_list(s.get("rns_interfaces"))
                 if repaired != s.get("rns_interfaces"):
                     s["rns_interfaces"] = repaired
@@ -2828,6 +2843,19 @@ class ChatWebServer:
             caller_ip = detect_lan_ip() or (self.host if self.host not in ("127.0.0.1", "0.0.0.0") else "")
             if is_android() and not caller_ip:
                 print("[connect] Warning: could not detect Android LAN IP - reverse connect may fail")
+            if self.messaging:
+                usable, adopt = self.messaging._peer_link_usable(resolved_hash)
+                if usable:
+                    clean = self._peer_dest_hash(
+                        self.messaging.active_peer_hash or resolved_hash
+                    )
+                    self.active_peer = clean
+                    return web.json_response({
+                        "status": "ok",
+                        "hash": clean,
+                        "linked_peers": self.messaging.linked_peers(),
+                        "already_connected": True,
+                    })
             ok = await self._run_blocking(
                 self.messaging.connect_to,
                 resolved_hash,
@@ -5258,6 +5286,31 @@ class ChatWebServer:
             self._ui_state["viewing_peer"] = self._peer_dest_hash(peer) if peer else None
         elif msg_type == "visibility":
             self._ui_state["hidden"] = bool(data.get("hidden"))
+            linked = self.messaging.linked_peers() if self.messaging else []
+            session_peer = self._peer_dest_hash(
+                getattr(self.messaging, "_session_peer_hash", None)
+                or getattr(self.messaging, "active_peer_hash", None)
+                or self.active_peer
+                or ""
+            )
+            await ws.send_str(json.dumps({
+                "type": "link_state",
+                "linked_peers": linked,
+                "session_peer": session_peer or None,
+            }))
+        elif msg_type == "link_state":
+            linked = self.messaging.linked_peers() if self.messaging else []
+            session_peer = self._peer_dest_hash(
+                getattr(self.messaging, "_session_peer_hash", None)
+                or getattr(self.messaging, "active_peer_hash", None)
+                or self.active_peer
+                or ""
+            )
+            await ws.send_str(json.dumps({
+                "type": "link_state",
+                "linked_peers": linked,
+                "session_peer": session_peer or None,
+            }))
         elif msg_type == "announce":
             result = await self._perform_announce()
             if result.get("ok"):

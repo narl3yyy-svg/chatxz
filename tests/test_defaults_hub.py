@@ -21,6 +21,14 @@ class DefaultInterfaceTests(unittest.TestCase):
         self.assertEqual(items[0].get("type"), "UDPInterface")
         self.assertEqual(items[0].get("preset"), "udp_lan")
 
+    def test_android_default_is_tcp_lan(self):
+        from unittest.mock import patch
+        with patch("chatxz.utils.platform.is_android", return_value=True):
+            items = ri.default_interface_list()
+        self.assertTrue(items)
+        self.assertEqual(items[0].get("preset"), "tcp_lan")
+        self.assertEqual(items[0].get("type"), "TCPServerInterface")
+
     def test_standalone_needs_udp_for_loopback_tcp_only(self):
         ifaces = ri.normalize_interface_list([
             {
@@ -35,7 +43,9 @@ class DefaultInterfaceTests(unittest.TestCase):
         self.assertTrue(ri.standalone_needs_udp(ifaces))
 
     def test_set_primary_lan_transport_swaps_udp_for_tcp(self):
-        udp = ri.default_interface_list()
+        from unittest.mock import patch
+        with patch("chatxz.utils.platform.is_android", return_value=False):
+            udp = ri.default_interface_list()
         self.assertTrue(any(i.get("preset") == "udp_lan" for i in udp))
         tcp = ri.set_primary_lan_transport(udp, "tcp_lan")
         self.assertFalse(any(i.get("preset") == "udp_lan" for i in tcp))

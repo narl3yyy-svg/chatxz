@@ -111,7 +111,7 @@ DEFAULT_INTERFACE_LIST = [
     },
 ]
 
-ANDROID_DEFAULT_INTERFACE_LIST = [
+DESKTOP_DEFAULT_INTERFACE_LIST = [
     {
         "id": "udp-lan",
         "preset": "udp_lan",
@@ -126,6 +126,19 @@ ANDROID_DEFAULT_INTERFACE_LIST = [
     },
 ]
 
+ANDROID_DEFAULT_INTERFACE_LIST = [
+    {
+        "id": "tcp-lan",
+        "preset": "tcp_lan",
+        "name": "TCP LAN",
+        "type": "TCPServerInterface",
+        "enabled": True,
+        "listen_ip": "0.0.0.0",
+        "listen_port": 4242,
+        "ifac_size": 16,
+    },
+]
+
 
 def standalone_needs_udp(interfaces, hub_role="off"):
     """True when only a loopback TCP client is configured with no hub — LAN cannot work."""
@@ -133,14 +146,14 @@ def standalone_needs_udp(interfaces, hub_role="off"):
 
 
 def default_interface_list():
-    """Fresh installs get UDP LAN so discovery works without manual TCP hub setup."""
+    """Fresh installs: Android uses TCP LAN; desktop uses UDP LAN."""
     try:
         from chatxz.utils.platform import is_android
         if is_android():
             return copy.deepcopy(ANDROID_DEFAULT_INTERFACE_LIST)
     except Exception:
         pass
-    return copy.deepcopy(ANDROID_DEFAULT_INTERFACE_LIST)
+    return copy.deepcopy(DESKTOP_DEFAULT_INTERFACE_LIST)
 
 
 def android_standalone_needs_udp(interfaces, hub_role="off"):

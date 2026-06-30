@@ -3,6 +3,24 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "1.0.4": [
+        "Connection stability: no more wake spam when already linked — 20s debounce on LAN peer wake.",
+        "Link status is server-authoritative — header only shows Connected when the RNS link is actually usable.",
+        "Android defaults to TCP LAN for reliable mobile links; existing installs migrate automatically on restart.",
+        "Inbound links are adopted before opening duplicate outbound sessions — fewer one-sided connects.",
+    ],
+    "1.0.3": [
+        "Call audio MTU fix: media packets are chunked to fit RNS link size — voice calls should carry audio reliably.",
+        "Incoming calls show an Accept / Decline bar instead of a browser confirm dialog.",
+    ],
+    "1.0.2": [
+        "Calls: bilateral hangup, UDP-first media on LAN, lower-latency audio playback.",
+        "WebSocket reconnect no longer clears link state while a peer is still connected.",
+    ],
+    "1.0.1": [
+        "Call buttons work when the chat header shows Connected — uses the open chat peer.",
+        "Android APK build fixes for call vibration and audio bridge.",
+    ],
     "1.0.0": [
         "Major rewrite: voice, video, and screen sharing calls over RNS — no WebRTC, no external voice servers.",
         "Rust media engine (chatxz-media) with Opus codec and adaptive jitter buffer for low-latency audio.",

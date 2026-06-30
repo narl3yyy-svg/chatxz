@@ -2,6 +2,16 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [1.0.4] — 2026-06-29
+
+### Fixed
+- **Connection churn** — skip HTTP wake when already linked; 20s wake debounce; adopt inbound links before opening duplicate outbound sessions.
+- **Truthful link state** — `linked_peers` only reports healthy, usable RNS links; UI syncs from server on WebSocket reconnect and visibility changes.
+- **Sticky sessions** — background failover loop unchanged; UI no longer shows Connected when server has no active link.
+
+### Changed
+- **Android TCP default** — fresh installs and migrated Android settings use TCP LAN instead of UDP; failover prefers TCP on mobile when both transports are enabled.
+
 ## [1.0.3] — 2026-06-29
 
 ### Fixed

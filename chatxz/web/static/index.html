@@ -2195,6 +2195,7 @@ function init() {
     }
   }).catch(() => {});
   connectWS();
+  startLinkPoll();
   loadEmojiKeywords();
   startPeerPolling();
   setupGlobalHandlers();
@@ -2554,6 +2555,7 @@ function setupVisibilitySync() {
 function syncUiState() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({type: 'visibility', hidden: document.hidden}));
+  ws.send(JSON.stringify({type: 'link_state'}));
   if (viewingPeer) {
     ws.send(JSON.stringify({type: 'viewing', peer: viewingPeer}));
   }
@@ -2629,6 +2631,15 @@ function setLinkStatus(state, label) {
   el.innerHTML = `<span class="status-pill ${state}" title="${title}"><span id="link-dot" class="${state}"></span><span id="link-label">Link: ${label}</span></span>`;
 }
 
+let linkPollTimer = null;
+
+function startLinkPoll() {
+  if (linkPollTimer) return;
+  linkPollTimer = setInterval(() => {
+    if (viewingPeer && !document.hidden) pollLinkStatus();
+  }, 12000);
+}
+
 function pollLinkStatus() {
   fetch('/api/network-status')
     .then(r => r.json())
@@ -2639,11 +2650,14 @@ function pollLinkStatus() {
       } else if (d.link_active && d.active_peer) {
         setLinkPeer(d.active_peer, true);
         updatePeerHeader();
-      } else if (linkedPeers.size && (d.session_peer || d.active_peer)) {
+      } else if (linkedPeers.size && (d.session_peer || d.active_peer) && !connectInFlight) {
+        linkedPeers.clear();
+        linkPeer = null;
         setLinkStatus('disconnected', 'Reconnecting…');
         updatePeerHeader();
-      } else if (!linkedPeers.size) {
+      } else if (!linkedPeers.size && !connectInFlight) {
         setLinkStatus('disconnected', 'Inactive');
+        updatePeerHeader();
       }
     })
     .catch(() => {});
@@ -2747,6 +2761,7 @@ function updatePeerHeader() {
   if (!viewingPeer) return;
   const name = contactNameFor(viewingPeer) || truncateHash(viewingPeer);
   const linked = isPeerLinked(viewingPeer, viewingVia);
+  const connecting = connectInFlight && !linked;
   const rtt = linked ? rttForViewingPeer() : '';
   const rttBadge = rtt ? ` · <span class="peer-rtt">${escapeHtml(rtt)}</span>` : '';
   document.getElementById('peer-name').textContent = name;
@@ -2755,11 +2770,12 @@ function updatePeerHeader() {
   const iface = peerInterfaceLabel(viewingVia);
   const statusEl = document.getElementById('peer-status');
   if (statusEl) {
-    const conn = linked ? 'Connected' : 'Not connected';
+    const conn = linked ? 'Connected' : (connecting ? 'Connecting…' : 'Not connected');
     statusEl.innerHTML = `${escapeHtml(fullHash)} · ${escapeHtml(iface)} · ${conn}${rttBadge}`;
   }
   document.getElementById('disconnect-btn').style.display = linked ? 'block' : 'none';
-  setLinkStatus(linked ? 'connected' : 'disconnected', linked ? 'Active' : 'Inactive');
+  const linkLabel = linked ? 'Active' : (connecting ? 'Connecting…' : 'Inactive');
+  setLinkStatus(linked ? 'connected' : 'disconnected', linkLabel);
   document.getElementById('input-area').style.display = 'block';
   if (typeof updateCallUI === 'function') updateCallUI();
 }
@@ -2978,6 +2994,7 @@ function connectWS() {
     setWsStatus('connected', 'Connected');
     fetchIdentity();
     syncUiState();
+    pollLinkStatus();
   };
   ws.onmessage = e => {
     if (gen !== wsGen) return;
@@ -3099,6 +3116,17 @@ function handleWSMessage(msg) {
     }
   } else if (msg.type === 'progress') {
     showProgress(msg.data);
+  } else if (msg.type === 'link_state') {
+    if (Array.isArray(msg.linked_peers)) {
+      syncLinkedPeers(msg.linked_peers);
+    } else if (!msg.linked_peers || !msg.linked_peers.length) {
+      if (!connectInFlight) {
+        linkedPeers.clear();
+        linkPeer = null;
+      }
+    }
+    updatePeerHeader();
+    if (typeof updateCallUI === 'function') updateCallUI();
   } else if (msg.type === 'link_established') {
     if (msg.data?.hash) {
       const h = msg.data.hash;
@@ -5250,12 +5278,10 @@ function openChat(hash, tryConnect, meta) {
   pollQueue();
   renderContacts(allContacts);
   renderDiscovered(window._discoveredPeers || []);
-  if (tryConnect) {
+  if (tryConnect && !isPeerLinked(viewingPeer, viewingVia)) {
     const m = meta || peerMetaForHash(hash);
     const wake = m?.via !== 'serial';
-    if (wake || !isPeerLinked(viewingPeer, viewingVia)) {
-      connectTo(hash, m?.ip, m?.port, m?.via, {wake});
-    }
+    connectTo(hash, m?.ip, m?.port, m?.via, {wake});
   } else if (!document.body.classList.contains('modal-open') && isPeerLinked(viewingPeer, viewingVia)) {
     document.getElementById('msg-input').focus();
   }

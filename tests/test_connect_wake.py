@@ -25,6 +25,7 @@ class ConnectWakeTests(unittest.TestCase):
         m.running = True
         m.active_link = None
         m.active_peer_hash = None
+        m._wake_last = {}
         return m
 
     def test_peer_link_usable_requires_healthy_interface_and_path(self):
@@ -62,6 +63,8 @@ class ConnectWakeTests(unittest.TestCase):
         m.clear_user_disconnected = MagicMock()
         m.dest_hash_for = MagicMock(side_effect=lambda h: (h or "").replace(":", ""))
         m._teardown_other_peer_links = MagicMock()
+        m._teardown_mismatched_links = MagicMock(return_value=0)
+        m._peer_link_usable = MagicMock(return_value=(False, None))
         m._wake_peer = MagicMock(return_value=True)
         m._teardown_stale_peer_links = MagicMock(return_value=1)
         m._peer_link_active = MagicMock(return_value=False)
@@ -72,6 +75,39 @@ class ConnectWakeTests(unittest.TestCase):
 
         m._wake_peer.assert_called_once()
         m._teardown_stale_peer_links.assert_called_once()
+
+    @patch("chatxz.core.messaging.physical_lan_reachable", return_value=True)
+    def test_user_initiated_connect_skips_wake_when_already_linked(self, _lan):
+        m = self._messaging()
+        peer = "a" * 32
+        link = _LinkStub()
+        m.hashes_equivalent = MagicMock(return_value=False)
+        m._peer_lan_ip_usable = MagicMock(return_value=True)
+        m._peer_lan_recently_unreachable = MagicMock(return_value=False)
+        m.clear_user_disconnected = MagicMock()
+        m.dest_hash_for = MagicMock(side_effect=lambda h: (h or "").replace(":", ""))
+        m._teardown_other_peer_links = MagicMock()
+        m._teardown_mismatched_links = MagicMock(return_value=0)
+        m._wake_peer = MagicMock(return_value=True)
+        m._should_wake_peer = MagicMock(return_value=True)
+        m._peer_link_usable = MagicMock(return_value=(True, link))
+        m._transport_from_link = MagicMock(return_value="lan")
+        m._notify_link_established = MagicMock()
+        m._finish_connect = MagicMock(return_value=True)
+
+        result = m._connect_to_locked(
+            peer, peer_ip="192.168.1.10", peer_port=8742, user_initiated=True,
+        )
+
+        self.assertTrue(result)
+        m._wake_peer.assert_not_called()
+        m._finish_connect.assert_called_once()
+
+    def test_should_wake_peer_debounces(self):
+        m = self._messaging()
+        m._wake_last = {}
+        self.assertTrue(m._should_wake_peer("10.0.0.1", "a" * 32))
+        self.assertFalse(m._should_wake_peer("10.0.0.1", "a" * 32))
 
 
 if __name__ == "__main__":

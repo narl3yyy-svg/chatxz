@@ -108,6 +108,7 @@ INITIATOR_INBOUND_WAIT_S = 8
 ANDROID_INITIATOR_INBOUND_WAIT_S = 10
 QUICK_OUTBOUND_TIMEOUT_S = 6
 HTTP_WAKE_TIMEOUT_S = 1.5
+WAKE_COOLDOWN_S = 20
 LINK_FAILOVER_GRACE_S = 30
 LINK_STALE_FAILOVER_IDLE_S = 90
 SESSION_RECONNECT_MIN_IDLE_S = 18
@@ -287,6 +288,7 @@ class MessagingBackend:
         self._connect_background = False
         self._connect_in_progress = False
         self._peer_lan_unreachable = {}
+        self._wake_last = {}
         self._user_disconnected = set()
         self._transport_reconnect_pending = False
         self._call_end_lock = threading.Lock()
@@ -814,18 +816,31 @@ class MessagingBackend:
         return self._peer_has_path_on_family(dest_hex, "tcp")
 
     def linked_peers(self):
+        """Server-authoritative list of peers with healthy, usable RNS links."""
         out = []
+        seen = set()
         for key, link in list(self.peer_links.items()):
             try:
                 if getattr(link, "status", None) == RNS.Link.CLOSED:
                     continue
             except Exception:
                 pass
+            if not self._link_interface_healthy(link):
+                continue
             peer = self._peer_from_link_key(key)
+            if not peer:
+                continue
+            usable, _ = self._peer_link_usable(peer)
+            if not usable:
+                continue
             if ":" in str(key):
-                out.append(str(key))
+                entry = str(key).lower()
             else:
-                out.append(f"{peer}:{self._transport_from_link(link)}")
+                entry = f"{peer}:{self._transport_from_link(link)}"
+            if entry in seen:
+                continue
+            seen.add(entry)
+            out.append(entry)
         return out
 
     def _hub_tcp_linked_peers(self):
@@ -1391,7 +1406,10 @@ class MessagingBackend:
             else:
                 order = ("udp", "tcp", "lan", "serial") if tcp_lan else ("udp", "lan", "serial")
         elif lan_up:
-            order = ("udp", "tcp", "lan", "serial") if tcp_lan else ("udp", "lan", "serial")
+            if is_android() and tcp_lan and udp_lan:
+                order = ("tcp", "udp", "lan", "serial")
+            else:
+                order = ("udp", "tcp", "lan", "serial") if tcp_lan else ("udp", "lan", "serial")
         elif serial_up:
             order = ("serial", "udp", "tcp", "lan") if tcp_lan else ("serial", "udp", "lan")
         else:
@@ -2879,6 +2897,22 @@ class MessagingBackend:
         }
         return self._http_peer_post(peer_ip, peer_port, "/api/request_connect", payload=payload)
 
+    def _wake_cooldown_key(self, peer_ip, dest_hex=None):
+        ip = (peer_ip or "").strip()
+        peer = normalize_hash(dest_hex or "")
+        return f"{ip}:{peer[:16]}" if peer else ip
+
+    def _should_wake_peer(self, peer_ip, dest_hex=None):
+        """Debounce HTTP wake storms when UI or discovery retries connect."""
+        if not peer_ip:
+            return False
+        key = self._wake_cooldown_key(peer_ip, dest_hex)
+        last = self._wake_last.get(key, 0)
+        if time.time() - last < WAKE_COOLDOWN_S:
+            return False
+        self._wake_last[key] = time.time()
+        return True
+
     def _wake_peer(self, peer_ip, peer_port, my_hash, caller_ip=None, caller_port=8742):
         """Wake peer for reverse RNS connect and refresh its LAN announces."""
         if not peer_ip or self._interrupted() or not physical_lan_reachable():
@@ -3106,6 +3140,18 @@ class MessagingBackend:
                                  timeout_s=LINK_CONNECT_TIMEOUT_S, promote_active=None,
                                  serial=False):
         """Try to open an outbound RNS link within timeout_s."""
+        if self._peer_link_active(dest_hex, clean):
+            existing = (
+                self._link_for_peer(dest_hex)
+                or self._link_for_peer(clean)
+                or self._find_active_link_for_peer(dest_hex, clean)
+            )
+            if existing:
+                usable, _ = self._peer_link_usable(dest_hex, clean)
+                if usable:
+                    return self._promote_outbound_link(
+                        existing, dest_hex, old_link=old_link, promote_active=promote_active,
+                    )
         link = None
         try:
             if serial:
@@ -4589,12 +4635,33 @@ class MessagingBackend:
                 if requested_transport:
                     self._session_transport = requested_transport
                 self._teardown_other_peer_links(session_hash)
-                if (
+                pruned = self._teardown_mismatched_links(clean)
+                if pruned:
+                    print(f"[connect] Closed {pruned} stale link(s) for {clean[:16]}...")
+                already_usable, already_link = self._peer_link_usable(
+                    clean, transport=requested_transport,
+                )
+                if already_usable and not replace:
+                    print(
+                        f"[connect] Already linked to {clean[:16]}... "
+                        f"({self._transport_from_link(already_link) if already_link else 'active'})"
+                    )
+                    if already_link:
+                        self._notify_link_established(
+                            already_link, clean, promote_active=True, background=False,
+                        )
+                    return self._finish_connect(
+                        clean, link=already_link, transport=requested_transport,
+                    )
+                need_wake = (
                     peer_ip
                     and physical_lan_reachable()
                     and not respond_to_wake
                     and not self._peer_lan_recently_unreachable(peer_ip)
-                ):
+                    and not already_usable
+                    and self._should_wake_peer(peer_ip, clean)
+                )
+                if need_wake:
                     print(f"[connect] Waking LAN peer at {peer_ip}:{peer_port or 8742}")
                     self._wake_peer(
                         peer_ip, peer_port, self.my_dest_hash or "",
@@ -4603,9 +4670,6 @@ class MessagingBackend:
                     pruned = self._teardown_stale_peer_links(clean, handoff=True)
                     if pruned:
                         print(f"[connect] Closed {pruned} stale link(s) for {clean[:16]}...")
-                pruned = self._teardown_mismatched_links(clean)
-                if pruned:
-                    print(f"[connect] Closed {pruned} stale link(s) for {clean[:16]}...")
             elif respond_to_wake and self.is_user_disconnected(clean):
                 print(
                     f"[connect] Passive mode — not reverse-connecting to "
@@ -4815,11 +4879,12 @@ class MessagingBackend:
                     ):
                         adopt = self._link_for_peer(dest_hex) or self.active_link
                         return self._finish_connect(dest_hex, link=adopt)
-                print(f"[connect] Waking peer at {peer_ip}:{peer_port or 8742}")
-                self._wake_peer(
-                    peer_ip, peer_port, my_hash,
-                    caller_ip=caller_ip, caller_port=caller_port,
-                )
+                if self._should_wake_peer(peer_ip, dest_hex):
+                    print(f"[connect] Waking peer at {peer_ip}:{peer_port or 8742}")
+                    self._wake_peer(
+                        peer_ip, peer_port, my_hash,
+                        caller_ip=caller_ip, caller_port=caller_port,
+                    )
                 inbound_wait = (
                     ANDROID_INITIATOR_INBOUND_WAIT_S if is_android()
                     else INITIATOR_INBOUND_WAIT_S
@@ -4881,7 +4946,7 @@ class MessagingBackend:
             if peer_ip and lan_ready and physical_lan:
                 reverse_wait = ANDROID_REVERSE_CONNECT_WAIT_S if is_android() else REVERSE_CONNECT_WAIT_S
                 print(f"[connect] Outbound timed out — waiting for reverse connect ({reverse_wait}s)...")
-                if not respond_to_wake:
+                if not respond_to_wake and self._should_wake_peer(peer_ip, dest_hex):
                     self._wake_peer(
                         peer_ip, peer_port, my_hash,
                         caller_ip=caller_ip, caller_port=caller_port,
