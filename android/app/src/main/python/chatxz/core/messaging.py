@@ -204,6 +204,7 @@ class MessagingBackend:
                  display_name="", auto_announce=False,
                  receive_dir=None, peer_resolver=None, on_queue_sent=None,
                  on_transfer_revoked=None, on_call_event=None,
+                 on_call_teardown=None,
                  http_port=8742, lan_transfer_enabled=False,
                  peer_endpoint_resolver=None, peer_scope_checker=None,
                  peer_transport_resolver=None, identity_serial=None,
@@ -221,6 +222,7 @@ class MessagingBackend:
         self.on_queue_sent = on_queue_sent
         self.on_transfer_revoked = on_transfer_revoked
         self.on_call_event = on_call_event
+        self.on_call_teardown = on_call_teardown
         self.voice_call = VoiceCallSession()
         self.display_name = display_name
         self.auto_announce = auto_announce
@@ -5494,6 +5496,16 @@ class MessagingBackend:
         except Exception as e:
             print(f"[call] on_call_event error: {e}")
 
+    def _halt_call_audio(self):
+        """Stop native capture/playback before call state reset (symmetric hang-up)."""
+        cb = getattr(self, "on_call_teardown", None)
+        if not cb:
+            return
+        try:
+            cb()
+        except Exception as e:
+            print(f"[call] teardown error: {e}")
+
     def _send_call_packet(self, peer_hash, msg_type, payload, transport=None):
         peer = self.dest_hash_for(peer_hash)
         link = self._call_link_for_peer(peer, transport)
@@ -5649,19 +5661,24 @@ class MessagingBackend:
                 return
             was_busy = self.voice_call.state != STATE_IDLE
             active_cid = self.voice_call.call_id
-            self.voice_call.reset()
-            self._reset_call_audio_counters()
-            self._call_send_link_fails = 0
-            self._emit_call_event(
-                "ended",
-                peer,
-                {
-                    "call_id": call_id or active_cid,
-                    "remote": True,
-                },
-            )
-            if was_busy:
-                print(f"[call] Remote hang-up from {peer[:16]}...")
+            self._call_ending = True
+            try:
+                self._halt_call_audio()
+                self.voice_call.reset()
+                self._reset_call_audio_counters()
+                self._call_send_link_fails = 0
+                self._emit_call_event(
+                    "ended",
+                    peer,
+                    {
+                        "call_id": call_id or active_cid,
+                        "remote": True,
+                    },
+                )
+                if was_busy:
+                    print(f"[call] Remote hang-up from {peer[:16]}...")
+            finally:
+                self._call_ending = False
             return
 
         if msg_type == CALL_AUDIO:
@@ -5759,19 +5776,20 @@ class MessagingBackend:
         cid = (call_id or self.voice_call.call_id or "").strip()
         via = (transport or self.voice_call.transport or "lan").strip().lower() or "lan"
         was_active = self.voice_call.state != STATE_IDLE
-        if self.voice_call.state == STATE_IDLE:
-            if peer:
-                self._send_call_end_packets(peer, cid, via)
-                self._emit_call_event(
-                    "ended",
-                    peer,
-                    {"call_id": cid, "remote": False},
-                )
-                print(f"[call] Ended remote notify ({cid or 'no-id'})")
-                return True
-            return False
         self._call_ending = True
         try:
+            self._halt_call_audio()
+            if self.voice_call.state == STATE_IDLE:
+                if peer:
+                    self._send_call_end_packets(peer, cid, via)
+                    self._emit_call_event(
+                        "ended",
+                        peer,
+                        {"call_id": cid, "remote": False},
+                    )
+                    print(f"[call] Ended remote notify ({cid or 'no-id'})")
+                    return True
+                return False
             peer = peer or self.voice_call.peer_hash
             cid = cid or self.voice_call.call_id
             via = via or self.voice_call.transport
@@ -5812,6 +5830,8 @@ class MessagingBackend:
         return True
 
     def call_send_audio(self, audio_b64, codec=OPUS_CODEC, call_id=None):
+        if getattr(self, "_call_ending", False):
+            return False
         if self.voice_call.state != STATE_ACTIVE:
             return False
         if not audio_b64:

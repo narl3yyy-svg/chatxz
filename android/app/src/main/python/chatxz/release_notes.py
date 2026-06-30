@@ -3,6 +3,10 @@
 from chatxz._version import __version__ as CURRENT_VERSION
 
 RELEASE_NOTES = {
+    "0.9.19": [
+        "Voice calls: hang-up now stops capture/playback before signaling — no more audio after remote disconnect.",
+        "Both UIs reset reliably when either peer ends the call.",
+    ],
     "0.9.18": [
         "Voice calls end on both sides when either peer hangs up, loses link, or stops sending audio.",
         "Disconnecting a chat link while on a call ends the call first.",

@@ -7524,16 +7524,17 @@ function handleCallWS(event, data) {
     return;
   }
   if (event === 'ended') {
+    if (callState === 'idle') return;
     if (callPeer && peer && !peersMatch(callPeer, peer)) return;
     if (
-      callId && data.call_id && data.call_id !== callId
-      && callState !== 'idle'
+      !data.remote
+      && callId
+      && data.call_id
+      && data.call_id !== callId
     ) {
       return;
     }
-    if (callState !== 'idle') {
-      toast(data.remote ? 'Call ended by peer' : 'Call ended');
-    }
+    toast(data.remote ? 'Call ended by peer' : 'Call ended');
     resetCallUi();
     return;
   }

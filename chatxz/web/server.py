@@ -1651,6 +1651,7 @@ class ChatWebServer:
             on_queue_sent=self._on_queue_sent,
             on_transfer_revoked=self._on_transfer_revoked,
             on_call_event=self._on_call_event,
+            on_call_teardown=self._end_call_audio,
             display_name=effective_display_name(settings),
             auto_announce=auto_announce,
             receive_dir=received_dir,
@@ -2729,17 +2730,15 @@ class ChatWebServer:
             self.call_audio.end_session()
 
     def _hang_up_call(self, call_id=None, peer=None, via=None):
-        """Signal hang-up immediately; stop native audio in a side thread."""
+        """Stop capture/playback first, then signal CALL_END to the peer."""
+        self._end_call_audio()
         if not self.messaging:
-            self._schedule_call_audio_stop()
             return True
-        ok = self.messaging.call_end(
+        return self.messaging.call_end(
             call_id=call_id,
             peer_hash=peer,
             transport=via,
         )
-        self._schedule_call_audio_stop()
-        return ok
 
     def _deliver_call_audio_frame(self, seq, data, codec):
         codec = (codec or OPUS_CODEC).strip()
@@ -2765,8 +2764,8 @@ class ChatWebServer:
             self._call_stats_last_key = None
             self._post_call_audio = True
             self._shutdown_fast = False
+            self._end_call_audio()
             self._schedule_call_ws(event, peer_hash, payload)
-            self._schedule_call_audio_stop()
             return
         if event == "audio":
             seq = int(payload.get("seq") or 0)

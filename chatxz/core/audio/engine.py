@@ -402,7 +402,13 @@ class CallAudioEngine:
                     self._hotswap_count += 1
                 self._silent_frames = 0
             opus = enc.encode(in_data)
-            if opus and self._send_fn and not self._stop.is_set():
+            if (
+                opus
+                and self._send_fn
+                and self._send_enabled
+                and self._active.is_set()
+                and not self._stop.is_set()
+            ):
                 b64 = base64.b64encode(opus).decode("ascii")
                 if self._send_fn(b64, OPUS_CODEC):
                     self._send_fail_streak = 0

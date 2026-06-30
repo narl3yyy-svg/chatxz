@@ -156,11 +156,12 @@ def test_call_end_notifies_peer_when_already_idle():
     peer = "ii" * 16
     sent = []
 
-    def fake_send(peer_hash, msg_type, payload, transport=None):
-        sent.append((msg_type, payload.get("call_id")))
+    def fake_send(peer_hash, call_id, transport=None):
+        sent.append((CALL_END, call_id))
         return True
 
-    mb._send_call_packet = fake_send
+    mb.dest_hash_for = lambda h: h
+    mb._send_call_end_packets = fake_send
     mb._emit_call_event = lambda *a, **k: None
     assert mb.call_end(call_id="abc-123", peer_hash=peer, transport="lan")
     assert mb.voice_call.state == STATE_IDLE
@@ -177,11 +178,12 @@ def test_call_end_sends_end_while_active_then_resets():
     mb.voice_call.activate()
     sent = []
 
-    def fake_send(peer_hash, msg_type, payload, transport=None):
-        sent.append((msg_type, mb.voice_call.state, payload.get("call_id")))
+    def fake_send(peer_hash, call_id, transport=None):
+        sent.append((CALL_END, mb.voice_call.state, call_id))
         return True
 
-    mb._send_call_packet = fake_send
+    mb.dest_hash_for = lambda h: h
+    mb._send_call_end_packets = fake_send
     mb._emit_call_event = lambda *a, **k: None
     mb.call_end()
     assert mb.voice_call.state == STATE_IDLE
@@ -200,6 +202,7 @@ def test_call_send_audio_auto_ends_without_link():
     mb.voice_call.activate()
     mb.dest_hash_for = lambda h: h
     mb._call_link_for_peer = lambda *a, **k: None
+    mb._peer_has_healthy_call_link = lambda *a, **k: False
     ended = []
     mb.call_end = lambda call_id=None: ended.append(True) or True
     for _ in range(20):
@@ -226,6 +229,71 @@ def test_call_send_audio_ends_faster_without_healthy_link():
     mb._call_link_fail_since = time.monotonic() - 1.5
     assert mb.call_send_audio("AAAA", "audio/opus;rate=48000") is False
     assert len(ended) == 1
+
+
+def test_call_end_halts_audio_before_reset():
+    from chatxz.core.messaging import MessagingBackend, CALL_END
+
+    mb = MessagingBackend.__new__(MessagingBackend)
+    mb.voice_call = VoiceCallSession()
+    peer = "rr" * 16
+    mb.voice_call.begin_outgoing(peer, "lan")
+    mb.voice_call.activate()
+    order = []
+
+    def teardown():
+        order.append("teardown")
+        assert mb.voice_call.state != STATE_IDLE
+
+    mb.on_call_teardown = teardown
+    mb.dest_hash_for = lambda h: h
+    mb._send_call_end_packets = lambda *a, **k: order.append("send") or True
+    mb._emit_call_event = lambda *a, **k: order.append("event")
+    mb.call_end()
+    assert mb.voice_call.state == STATE_IDLE
+    assert order[0] == "teardown"
+    assert "send" in order
+    assert order.index("teardown") < order.index("send")
+
+
+def test_call_end_remote_halts_before_reset():
+    from chatxz.core.messaging import MessagingBackend, CALL_END
+    from types import SimpleNamespace
+
+    mb = MessagingBackend.__new__(MessagingBackend)
+    mb.voice_call = VoiceCallSession()
+    peer = "ss" * 16
+    mb.voice_call.begin_outgoing(peer, "lan")
+    mb.voice_call.activate()
+    order = []
+
+    def teardown():
+        order.append("teardown")
+        assert mb.voice_call.state == STATE_ACTIVE
+
+    mb.on_call_teardown = teardown
+    mb.dest_hash_for = lambda h: h
+    mb.hashes_equivalent = lambda a, b: a == b
+    mb._emit_call_event = lambda *a, **k: order.append("event")
+    msg = SimpleNamespace(msg_type=CALL_END, content='{"call_id":""}')
+    mb._handle_call_packet(msg, peer, None)
+    assert mb.voice_call.state == STATE_IDLE
+    assert order == ["teardown", "event"]
+
+
+def test_call_send_audio_blocked_while_ending():
+    from chatxz.core.messaging import MessagingBackend
+
+    mb = MessagingBackend.__new__(MessagingBackend)
+    mb.voice_call = VoiceCallSession()
+    peer = "tt" * 16
+    mb.voice_call.begin_outgoing(peer, "lan")
+    mb.voice_call.activate()
+    mb.dest_hash_for = lambda h: h
+    mb._call_link_for_peer = lambda *a, **k: object()
+    mb._link_interface_healthy = lambda link: True
+    mb._call_ending = True
+    assert mb.call_send_audio("AAAA", "audio/opus;rate=48000") is False
 
 
 def test_call_end_remote_hangup_when_already_idle_still_emits():
@@ -410,7 +478,7 @@ def test_call_audio_manager_abandon_clears_engine(monkeypatch):
     from chatxz.core.audio.manager import CallAudioManager
 
     class FakeEngine:
-        def __init__(self, send_fn):
+        def __init__(self, send_fn, device_prefs=None):
             self.started = False
 
         def start(self):

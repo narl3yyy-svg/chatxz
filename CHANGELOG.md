@@ -2,6 +2,11 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [0.9.19] — 2026-06-30
+
+### Fixed
+- **Symmetric call hang-up (v2)** — native audio stops synchronously before `CALL_END` and before call state reset, eliminating zombie `Audio out` packets after remote hang-up; `_call_ending` blocks in-flight capture sends; remote `call_ended` always clears the UI even when `call_id` differs.
+
 ## [0.9.18] — 2026-06-30
 
 ### Fixed
