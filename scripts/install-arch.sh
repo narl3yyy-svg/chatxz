@@ -15,7 +15,7 @@ sudo pacman -S --needed --noconfirm python python-pip python-setuptools base-dev
 
 read -p "Install voice support (libopus + pyaudio)? [y/N]: " voice_opt
 if [[ "$voice_opt" =~ ^[Yy]$ ]]; then
-    sudo pacman -S --needed --noconfirm opus portaudio
+    sudo pacman -S --needed --noconfirm opus portaudio alsa-utils pulseaudio
 fi
 
 read -p "Install terminal image viewer (chafa) for screenshot preview? [y/N]: " img_opt
