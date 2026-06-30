@@ -2,6 +2,13 @@
 
 All notable changes to chatxz are documented here. The README lists only the latest release summary.
 
+## [2.0.1] — 2026-06-29
+
+### Fixed
+- **Web UI WebSocket** — `/ws` now tunnels through Rust to the Python backend (HTTP proxy cannot upgrade WebSockets; messaging/UI was broken).
+- **Remote hangup** — incoming `hangup` signaling correctly emits `ended` to both peers.
+- **Media routing** — `/ws/media` filters inbound frames by peer hash.
+
 ## [2.0.0] — 2026-06-29
 
 ### Changed — full Rust media rewrite

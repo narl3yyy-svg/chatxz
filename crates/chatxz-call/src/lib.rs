@@ -340,10 +340,7 @@ impl CallManager {
                 self.end_session(&call_id, true);
             }
             "hangup" => {
-                self.end_session(&call_id, false);
-                if let Some(s) = self.sessions.get(&call_id) {
-                    self.emit("ended", s);
-                }
+                self.end_session(&call_id, true);
             }
             "update" => {
                 if let Some(session) = self.sessions.get_mut(&call_id) {

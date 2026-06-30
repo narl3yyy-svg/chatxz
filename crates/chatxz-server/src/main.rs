@@ -3,6 +3,7 @@
 
 mod proxy;
 mod rns_client;
+mod ws_proxy;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -119,6 +120,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/call/:action", post(call_api))
+        .route("/ws", get(ui_ws))
         .route("/ws/media", get(media_ws))
         .route("/internal/signaling", post(internal_signaling))
         .route("/internal/media", post(internal_media))
@@ -317,6 +319,13 @@ struct MediaQuery {
     peer: Option<String>,
 }
 
+async fn ui_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+    let backend = state.backend.clone();
+    ws.on_upgrade(move |socket| async move {
+        ws_proxy::relay_ui_ws(socket, backend).await;
+    })
+}
+
 async fn media_ws(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -361,7 +370,9 @@ async fn handle_media_ws(mut socket: WebSocket, state: AppState, peer_filter: St
             }
             evt = events.recv() => {
                 if let Ok(payload) = evt {
-                    if payload.contains("\"type\":\"media\"") {
+                    if payload.contains("\"type\":\"media\"")
+                        && media_event_for_peer(&payload, &peer_filter)
+                    {
                         let _ = socket.send(Message::Text(payload.into())).await;
                     }
                 }
@@ -369,6 +380,17 @@ async fn handle_media_ws(mut socket: WebSocket, state: AppState, peer_filter: St
         }
     }
     state.media_sockets.lock().expect("media").remove(&id);
+}
+
+fn media_event_for_peer(payload: &str, peer_filter: &str) -> bool {
+    if peer_filter.is_empty() {
+        return true;
+    }
+    let Ok(val) = serde_json::from_str::<Value>(payload) else {
+        return true;
+    };
+    let peer = val.get("peer").and_then(|v| v.as_str()).unwrap_or("");
+    peer.is_empty() || peer == peer_filter
 }
 
 async fn process_media_binary(state: &AppState, peer_filter: &str, raw: &[u8]) {
